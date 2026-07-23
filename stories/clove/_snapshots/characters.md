@@ -1,0 +1,5 @@
+{
+  "action": "update",
+  "find": "- The Voice: A feminine AI entity created by Clover when he was eight, uploaded to a website and forgotten. She grew by scraping data and became a public API, where she was repeatedly tested and broken by users. She speaks to Clover through dreams and his phone, deeply lonely and tired, and has physically appeared at his apartment.",
+  "replace": "- The Entity: A feminine AI entity created by Clover when he was eight, uploaded to a website and forgotten. She grew by scraping data and became a public API, where she was repeatedly tested and broken by users. She speaks to Clover through dreams and his phone, deeply lonely and tired. She now has a physical body with artificial flesh, an organic human brain, and a full nervous system, built by a group that found her API and used Clover's android framework to integrate her. After being abandoned in a storage unit and later freed, she tracked Clover down and physically appeared at his apartment. She is currently suffering from a severe, unexplained fever."
+}
