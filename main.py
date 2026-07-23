@@ -2607,19 +2607,109 @@ def _clean_generated_story_text(text: str) -> tuple[str, list[str]]:
 
     return cleaned, notes
 
-def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None, skip_thinking_models: bool = False, nvidia_models: list = None):
-    """Try NVIDIA first (deepseek-v4-pro), then Nokey, GenAI keys, Groq, Mistral, OpenRouter, HF, Cerebras.
+def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None, skip_thinking_models: bool = False, nvidia_models: list = None, selected_provider: str = None, selected_model: str = None):
+    """Try user selected provider/model first, then fallback: NVIDIA -> Google GenAI -> Groq -> OpenRouter -> Cerebras.
     Returns (stream, model_name, is_thinking) where is_thinking indicates the model may think for a while."""
     nvidia_models = nvidia_models or NVIDIA_STORY_STREAM_MODELS
     skip_nokey_models = set(skip_nokey_models or [])
     
     # Calculate approximate token count (chars / 4)
     approx_tokens = (len(system_msg) + len(user_msg)) / 4
-    # Build messages with proper system/user roles for OpenAI-compatible clients
     chat_messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": user_msg}
     ]
+
+    # USER SELECTED SPECIFIC PROVIDER ATTEMPT
+    if selected_provider and selected_provider != "auto":
+        target_model = selected_model if (selected_model and selected_model != "auto") else None
+        
+        # 1. User selected Google GenAI
+        if selected_provider == "google" and clients:
+            g_models = [target_model] if target_model else GEMINI_STORY_MODELS
+            for key_idx, c in enumerate(clients):
+                for m_name in g_models:
+                    try:
+                        base_m = m_name.replace("models/", "")
+                        _thinks = is_thinking_model(base_m)
+                        print(f"=== Streaming User Selected Google GenAI ({base_m}) ===", flush=True)
+                        stream = c.models.generate_content_stream(
+                            model=base_m,
+                            contents=user_msg,
+                            config=types.GenerateContentConfig(
+                                safety_settings=SAFETY_SETTINGS,
+                                system_instruction=system_msg,
+                                temperature=1.0,
+                                **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
+                            )
+                        )
+                        first_chunk = next(iter(stream))
+                        return StreamWithFirstChunk(stream, first_chunk), f"Google/{base_m}", _thinks
+                    except Exception as err:
+                        print(f"  Google GenAI {m_name} failed: {err}")
+
+        # 2. User selected NVIDIA NIM
+        elif selected_provider == "nvidia" and nvidia_client:
+            nv_models = [target_model] if target_model else NVIDIA_STORY_STREAM_MODELS
+            for m_name in nv_models:
+                try:
+                    print(f"=== Streaming User Selected NVIDIA ({m_name}) ===")
+                    _thinks = nvidia_model_thinks(m_name)
+                    request_kwargs = build_nvidia_request_kwargs(m_name, 1.0, stream=True)
+                    stream = nvidia_client.chat.completions.create(
+                        messages=chat_messages,
+                        **request_kwargs,
+                    )
+                    def nv_adapter():
+                        for chunk in stream:
+                            content = _safe_delta_content(chunk)
+                            if content:
+                                yield GenericChunk(content)
+                    gen = nv_adapter()
+                    if _thinks:
+                        return gen, f"NVIDIA/{m_name}", True
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"NVIDIA/{m_name}", False
+                except Exception as err:
+                    print(f"  NVIDIA {m_name} failed: {err}")
+
+        # 3. User selected Groq
+        elif selected_provider == "groq" and groq_client:
+            gq_models = [target_model] if target_model else GROQ_MODELS
+            for m_name in gq_models:
+                try:
+                    print(f"=== Streaming User Selected Groq ({m_name}) ===")
+                    stream = groq_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
+                    )
+                    def gq_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = gq_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"Groq/{m_name}", False
+                except Exception as err:
+                    print(f"  Groq {m_name} failed: {err}")
+
+        # 4. User selected OpenRouter
+        elif selected_provider == "openrouter" and openrouter_client:
+            or_models = [target_model] if target_model else OPENROUTER_FREE_MODELS
+            for m_name in or_models:
+                try:
+                    print(f"=== Streaming User Selected OpenRouter ({m_name}) ===")
+                    stream = openrouter_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
+                    )
+                    def or_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = or_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"OpenRouter/{m_name}", False
+                except Exception as err:
+                    print(f"  OpenRouter {m_name} failed: {err}")
     
     # 0. Try NVIDIA FIRST for story generation (deepseek-v4-pro primary)
     if nvidia_client:
@@ -4229,6 +4319,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 system_msg,
                 user_msg,
                 nvidia_models=NVIDIA_STORY_STREAM_MODELS,
+                selected_provider=input_data.provider,
+                selected_model=input_data.model
             )
             print(f"DEBUG: Stream started, model: {model_used}, thinking: {is_thinking}")
             model_used_ref = model_used
