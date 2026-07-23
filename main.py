@@ -4505,7 +4505,7 @@ def fetch_dynamic_provider_models() -> dict:
 
     providers = {}
 
-    # 1. Google GenAI (Gemini API)
+    # 1. Google GenAI (Gemini API) — ALL Text & Multimodal Models
     google_models = []
     g_keys = []
     api_keys_file = os.path.join(BASE_DIR, "API keys.txt")
@@ -4538,15 +4538,18 @@ def fetch_dynamic_provider_models() -> dict:
 
     if not google_models:
         google_models = [
-            "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview",
-            "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"
+            "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+            "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite",
+            "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro",
+            "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest",
+            "gemini-pro-latest", "gemini-omni-flash-preview", "gemini-3.1-flash-live-preview"
         ]
     providers["google"] = {
         "name": "Google GenAI (Gemini)",
         "models": google_models
     }
 
-    # 2. NVIDIA NIM
+    # 2. NVIDIA NIM — ALL Text Generation Models
     nvidia_models = []
     nv_k = os.getenv("NVIDIA_API_KEY") or os.getenv("NVAPI_KEY") or os.getenv("NIM_API_KEY")
     if nv_k:
@@ -4561,16 +4564,22 @@ def fetch_dynamic_provider_models() -> dict:
             print(f"[Dynamic Model Fetch] NVIDIA error: {e}")
     if not nvidia_models:
         nvidia_models = [
-            "deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b",
-            "nvidia/nemotron-3-nano-30b-a3b", "qwen/qwen3.5-397b-a17b",
-            "meta/llama-3.3-70b-instruct", "google/gemma-4-31b-it"
+            "deepseek-ai/deepseek-v4-pro", "deepseek-ai/deepseek-v4-flash",
+            "nvidia/nemotron-3-super-120b-a12b", "nvidia/nemotron-3-nano-30b-a3b",
+            "nvidia/nemotron-3-ultra-550b-a55b", "qwen/qwen3.5-397b-a17b",
+            "qwen/qwen3-next-80b-a3b-instruct", "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.1-70b-instruct", "meta/llama-3.1-8b-instruct",
+            "google/gemma-4-31b-it", "google/gemma-3-12b-it", "google/gemma-2-2b-it",
+            "mistralai/mistral-large-3-675b-instruct-2512", "mistralai/mistral-medium-3.5-128b",
+            "mistralai/mixtral-8x22b-v0.1", "minimaxai/minimax-m3", "moonshotai/kimi-k2.6",
+            "stepfun-ai/step-3.7-flash", "01-ai/yi-large", "z-ai/glm-5.2"
         ]
     providers["nvidia"] = {
         "name": "NVIDIA NIM",
         "models": nvidia_models
     }
 
-    # 3. Groq
+    # 3. Groq — ALL Models
     groq_models = []
     gq_k = os.getenv("GROQ_API_KEY")
     if gq_k:
@@ -4585,15 +4594,15 @@ def fetch_dynamic_provider_models() -> dict:
             print(f"[Dynamic Model Fetch] Groq error: {e}")
     if not groq_models:
         groq_models = [
-            "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-            "qwen/qwen3.6-27b", "openai/gpt-oss-120b"
+            "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b",
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b", "groq/compound"
         ]
     providers["groq"] = {
         "name": "Groq",
         "models": groq_models
     }
 
-    # 4. OpenRouter
+    # 4. OpenRouter — ALL Free Text Models
     openrouter_models = []
     try:
         import urllib.request
@@ -4608,15 +4617,16 @@ def fetch_dynamic_provider_models() -> dict:
         print(f"[Dynamic Model Fetch] OpenRouter error: {e}")
     if not openrouter_models:
         openrouter_models = [
-            "openrouter/free", "google/gemma-4-31b-it:free",
-            "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-nano-30b-a3b:free"
+            "openrouter/free", "google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free",
+            "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-nano-30b-a3b:free",
+            "openai/gpt-oss-20b:free"
         ]
     providers["openrouter"] = {
         "name": "OpenRouter",
         "models": openrouter_models
     }
 
-    # 5. Cerebras
+    # 5. Cerebras — ALL Models
     cerebras_models = []
     cb_k = os.getenv("CEREBRAS_API_KEY")
     if cb_k:
