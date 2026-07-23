@@ -65,6 +65,53 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         print(f"[Auth Error] Failed to verify Firebase token: {e}")
         return "default_user"
 
+def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: str, title: str = None):
+    """Save a specific file content into Firestore under users/{uid}/stories/{story_id}"""
+    if db_firestore and uid and uid != "default_user":
+        try:
+            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+            field_key = f"files.{file_name.replace('.', '_')}"
+            update_payload = {
+                "updated_at": time.time(),
+                field_key: content
+            }
+            if title:
+                update_payload["title"] = title
+            doc_ref.set(update_payload, merge=True)
+        except Exception as e:
+            print(f"[Firestore Write Error] {e}")
+
+def get_story_from_firestore(uid: str, story_id: str, file_name: str) -> str:
+    """Read a specific file content from Firestore under users/{uid}/stories/{story_id}"""
+    if db_firestore and uid and uid != "default_user":
+        try:
+            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict() or {}
+                files = data.get("files", {})
+                return files.get(file_name.replace('.', '_'), "")
+        except Exception as e:
+            print(f"[Firestore Read Error] {e}")
+    return ""
+
+def list_user_stories_firestore(uid: str) -> list:
+    """List all stories for a specific user UID from Firestore"""
+    stories = []
+    if db_firestore and uid and uid != "default_user":
+        try:
+            docs = db_firestore.collection("users").document(uid).collection("stories").stream()
+            for doc in docs:
+                data = doc.to_dict() or {}
+                stories.append({
+                    "id": doc.id,
+                    "title": data.get("title", doc.id.capitalize()),
+                    "updated_at": data.get("updated_at", 0)
+                })
+        except Exception as e:
+            print(f"[Firestore List Error] {e}")
+    return stories
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
