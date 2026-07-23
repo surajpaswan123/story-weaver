@@ -1,0 +1,1619 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Story Weaver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;1,400&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .story-font {
+            font-family: 'Merriweather', serif;
+        }
+
+        /* Sidebar */
+        .sidebar-item {
+            transition: all 0.15s ease;
+            border-left: 3px solid transparent;
+        }
+
+        .sidebar-item:hover {
+            background: #f5f5f4;
+        }
+
+        .sidebar-item.active {
+            background: #fafaf9;
+            border-left-color: #44403c;
+            font-weight: 600;
+        }
+
+        /* Tab styling */
+        .tab-btn {
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn.active {
+            border-bottom: 2px solid #44403c;
+            color: #1c1917;
+            font-weight: 600;
+        }
+
+        .tab-btn:not(.active) {
+            color: #78716c;
+        }
+
+        .element-card {
+        }
+
+        /* Truncation banner */
+        .truncation-banner {
+            background: linear-gradient(to bottom, rgba(245, 245, 244, 1), rgba(245, 245, 244, 0));
+            padding-bottom: 2rem;
+        }
+
+
+
+        /* Scrollbar thin */
+        /* Screen reader only */
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* Skip link: invisible until keyboard focus reaches it */
+        .focus-visible-skip:focus {
+            position: fixed;
+            top: 8px;
+            left: 8px;
+            width: auto;
+            height: auto;
+            padding: 10px 16px;
+            margin: 0;
+            overflow: visible;
+            clip: auto;
+            white-space: normal;
+            background: #1c1917;
+            color: #fff;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            z-index: 100;
+        }
+
+        /* Focus ring for action-bar buttons, visible on keyboard focus not just hover */
+        .action-bar:has(:focus-visible) {
+            opacity: 1;
+        }
+        .action-btn:focus-visible,
+        .tab-btn:focus-visible,
+        button:focus-visible,
+        [tabindex]:focus-visible {
+            outline: 2px solid #1c1917;
+            outline-offset: 2px;
+        }
+
+        /* Action buttons (edit/regenerate) */
+        .action-bar {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+            opacity: 0.5;
+            transition: opacity 0.2s ease;
+        }
+
+        .action-bar:hover {
+            opacity: 1;
+        }
+
+        .action-btn {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: 1px solid #d6d3d1;
+            background: #fafaf9;
+            color: #57534e;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .action-btn:hover {
+            background: #e7e5e4;
+            border-color: #a8a29e;
+        }
+
+        .edit-inline {
+            width: 100%;
+            margin-top: 8px;
+            padding: 8px;
+            border: 1px solid #a8a29e;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            resize: vertical;
+            min-height: 40px;
+        }
+
+        .edit-inline:focus {
+            outline: none;
+            border-color: #44403c;
+            box-shadow: 0 0 0 2px rgba(68, 64, 60, 0.15);
+        }
+
+        /* Thinking panel */
+        .thinking-panel {
+            background: #f5f5f4;
+            border: 1px solid #d6d3d1;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-top: 8px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #57534e;
+            white-space: pre-wrap;
+            font-family: 'Inter', sans-serif;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .thinking-panel-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: #78716c;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+        }
+
+        /* Audio attachment badge */
+        .audio-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #e7e5e4;
+            border: 1px solid #d6d3d1;
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-size: 11px;
+            color: #44403c;
+            max-width: 200px;
+        }
+
+        .audio-badge .filename {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .audio-badge .remove-audio {
+            cursor: pointer;
+            color: #78716c;
+            font-size: 13px;
+            line-height: 1;
+            padding: 0 2px;
+            background: none;
+            border: none;
+            font-family: inherit;
+        }
+
+        .audio-badge .remove-audio:hover {
+            color: #dc2626;
+        }
+
+        /* Upload progress bar */
+        .upload-progress {
+            display: none;
+            margin-bottom: 6px;
+        }
+
+        .upload-progress .progress-track {
+            height: 6px;
+            background: #e7e5e4;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .upload-progress .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #78716c, #44403c);
+            border-radius: 3px;
+            transition: width 0.2s ease;
+            width: 0%;
+        }
+
+        .upload-progress .progress-label {
+            font-size: 11px;
+            color: #78716c;
+            margin-top: 2px;
+            text-align: center;
+        }
+
+        /* Chat message blocks */
+        .chat-user-prompt {
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+        .chat-user-prompt:hover {
+            background: #f5f5f4;
+        }
+    </style>
+</head>
+
+<body class="bg-stone-100 h-screen flex items-center justify-center p-4">
+
+    <!-- Screen reader announcer for new story content -->
+    <div id="sr-announcer" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
+    <!-- Screen reader status for AI state -->
+    <div id="sr-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <a href="#user-input" class="sr-only focus-visible-skip">Skip to story input</a>
+
+    <div class="w-full max-w-6xl h-full flex bg-white shadow-xl rounded-lg overflow-hidden border border-stone-200"
+        aria-label="Story Weaver Application">
+
+        <!-- Sidebar -->
+        <nav id="sidebar" class="w-56 bg-stone-50 border-r border-stone-200 flex flex-col flex-shrink-0"
+            role="navigation" aria-label="Story list">
+            <!-- Sidebar Header -->
+            <div class="p-3 border-b border-stone-200">
+                <button id="new-story-btn" aria-label="Create new story"
+                    class="w-full bg-stone-800 text-white text-sm py-2 px-3 rounded-lg hover:bg-stone-700 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"
+                        aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                    New Story
+                </button>
+            </div>
+            <!-- Story List -->
+            <div id="story-list" class="flex-1 overflow-y-auto thin-scroll py-1" role="list" aria-label="Your stories">
+                <div class="text-xs text-stone-400 text-center py-4" role="listitem">Loading...</div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="flex-1 flex flex-col overflow-hidden" role="main" aria-label="Story editor">
+
+            <!-- Header -->
+            <header class="bg-stone-800 text-stone-100 p-3 shadow-md flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <h1 class="text-lg font-bold tracking-wider">STORY WEAVER</h1>
+                    <span id="story-title" class="text-sm opacity-60" aria-label="Current story name">—</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button id="analyze-btn" onclick="triggerAnalysis()" aria-label="Force background analysis"
+                        class="hidden text-xs bg-stone-700 hover:bg-stone-600 text-stone-200 px-2 py-1 rounded transition-colors">
+                        <span aria-hidden="true">⚡</span> Analyze Now
+                    </button>
+                    <span id="model-badge" aria-label="AI model in use"
+                        class="text-xs bg-stone-700 px-2 py-1 rounded opacity-0 transition-opacity"></span>
+                    <span id="status-indicator" class="text-sm opacity-75" aria-label="AI status">Ready</span>
+                </div>
+            </header>
+
+            <!-- Tab Bar -->
+            <div class="bg-stone-50 border-b border-stone-200 px-4" role="tablist" aria-label="Content tabs">
+                <div class="flex gap-4">
+                    <button class="tab-btn active py-2.5 px-2 text-sm" role="tab" aria-selected="true"
+                        aria-controls="tab-story" data-tab="story" tabindex="0"><span aria-hidden="true">📖</span>
+                        Story</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-summary" data-tab="summary" tabindex="-1"><span aria-hidden="true">📝</span>
+                        Summary</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-elements" data-tab="elements" tabindex="-1"><span aria-hidden="true">📋</span>
+                        Elements</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-style" data-tab="style" tabindex="-1"><span aria-hidden="true">🎨</span>
+                        Style</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-rules" data-tab="rules" tabindex="-1"><span aria-hidden="true">📜</span>
+                        Rules</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-consistency" data-tab="consistency" tabindex="-1"><span aria-hidden="true">🔍</span>
+                        Consistency</button>
+                </div>
+            </div>
+
+            <!-- Content Area -->
+            <div class="flex-1 flex overflow-hidden">
+                <!-- Story Tab -->
+                <div id="tab-story" class="flex-1 flex flex-col overflow-hidden" role="tabpanel"
+                    aria-label="Story content" tabindex="-1">
+                    <!-- Truncation Banner -->
+                    <div id="truncation-banner" class="hidden truncation-banner text-center py-2 px-4" role="alert">
+                        <button onclick="loadFullStory()" class="text-xs text-stone-500 hover:text-stone-800 underline"
+                            aria-label="Load full story, currently showing only recent part">
+                            ⬆ Story is long — showing recent part. Click to load all.
+                        </button>
+                    </div>
+                    <!-- Story Display -->
+                    <div id="story-display"
+                        class="flex-1 p-6 overflow-y-auto story-font prose prose-stone max-w-none thin-scroll"
+                        role="log" aria-label="Story text" aria-live="off">
+                        <p class="text-stone-500 italic text-center mt-16">The page is blank. Waiting for your first
+                            words...</p>
+                    </div>
+                </div>
+
+                <!-- Elements Tab -->
+                <div id="tab-elements" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="Story elements" tabindex="-1">
+                    <h2 class="text-sm font-semibold text-stone-600 mb-3"><span aria-hidden="true">📋</span> Story Elements</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="elements-grid" role="list">
+                        <div class="text-stone-400 italic col-span-2 text-center mt-10 text-sm" role="listitem">
+                            Story elements will appear after you start writing...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Summary Tab -->
+                <div id="tab-summary" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="Story summary" tabindex="-1">
+                    <div class="max-w-2xl mx-auto">
+                        <div class="flex justify-between items-center mb-3">
+                            <h2 class="text-sm font-semibold text-stone-600"><span aria-hidden="true">📝</span> AI-Maintained Story Summary</h2>
+                            <div class="flex gap-2">
+                                <button onclick="loadSummary()"
+                                    class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-2 py-1 rounded transition-colors"
+                                    aria-label="Refresh summary">
+                                    <span aria-hidden="true">↻</span> Refresh
+                                </button>
+                                <button onclick="saveSummary()"
+                                    class="text-xs bg-stone-800 hover:bg-stone-700 text-white px-2 py-1 rounded transition-colors"
+                                    aria-label="Save summary changes">
+                                    <span aria-hidden="true">💾</span> Save
+                                </button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-stone-400 mb-3">
+                            The AI updates this after each generation. You can also edit it manually — the AI uses this
+                            as context instead of re-reading the full story.
+                        </p>
+                        <textarea id="summary-textarea"
+                            class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-none bg-white text-sm story-font leading-relaxed"
+                            rows="14" placeholder="Summary will appear here after the AI generates content..."
+                            aria-label="Story summary text, editable"></textarea>
+                        <div id="summary-status" class="text-xs text-stone-400 mt-1 text-center"></div>
+                    </div>
+                </div>
+
+                <!-- Style Guide Tab -->
+                <div id="tab-style" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="Style guide" tabindex="-1">
+                    <div class="max-w-2xl mx-auto">
+                        <div class="flex justify-between items-center mb-3">
+                            <h2 class="text-sm font-semibold text-stone-600"><span aria-hidden="true">🎨</span> Style Guide</h2>
+                            <div class="flex gap-2">
+                                <button onclick="loadStyle()" aria-label="Refresh style guide"
+                                    class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-2 py-1 rounded transition-colors"><span aria-hidden="true">↻</span>
+                                    Refresh</button>
+                                <button onclick="saveStyle()" aria-label="Save style guide changes"
+                                    class="text-xs bg-stone-800 hover:bg-stone-700 text-white px-2 py-1 rounded transition-colors"><span aria-hidden="true">💾</span>
+                                    Save</button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-stone-400 mb-3">
+                            Define POV, tense, tone, and writing style. The AI follows these rules in every generation.
+                        </p>
+                        <textarea id="style-textarea"
+                            class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-none bg-white text-sm story-font leading-relaxed"
+                            rows="12" placeholder="Example:
+POV: Third person limited
+Tense: Past tense
+Tone: Dark fantasy with moments of humor
+Dialogue: Natural, no formal speech unless royal
+Descriptions: Focus on sensory details, especially sound and smell
+Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></textarea>
+                        <div id="style-status" class="text-xs text-stone-400 mt-1 text-center"></div>
+                    </div>
+                </div>
+
+                <!-- World Rules Tab -->
+                <div id="tab-rules" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="World rules" tabindex="-1">
+                    <div class="max-w-2xl mx-auto">
+                        <div class="flex justify-between items-center mb-3">
+                            <h2 class="text-sm font-semibold text-stone-600"><span aria-hidden="true">📜</span> World Rules</h2>
+                            <div class="flex gap-2">
+                                <button onclick="loadRules()" aria-label="Refresh world rules"
+                                    class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-2 py-1 rounded transition-colors"><span aria-hidden="true">↻</span>
+                                    Refresh</button>
+                                <button onclick="saveRules()" aria-label="Save world rules changes"
+                                    class="text-xs bg-stone-800 hover:bg-stone-700 text-white px-2 py-1 rounded transition-colors"><span aria-hidden="true">💾</span>
+                                    Save</button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-stone-400 mb-3">
+                            Define constraints the AI must never break. These are injected as hard rules.
+                        </p>
+                        <textarea id="rules-textarea"
+                            class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-none bg-white text-sm story-font leading-relaxed"
+                            rows="12" placeholder="Example:
+- Magic requires spoken incantations
+- Suraj cannot fly (yet)
+- The kingdom has medieval technology only
+- Dead characters stay dead unless resurrected by the Phoenix Stone
+- Time travel does not exist in this world" aria-label="World rules text"></textarea>
+                        <div id="rules-status" class="text-xs text-stone-400 mt-1 text-center"></div>
+                    </div>
+                </div>
+
+                <!-- Consistency Log Tab -->
+                <div id="tab-consistency" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="Consistency log" tabindex="-1">
+                    <div class="max-w-2xl mx-auto">
+                        <div class="flex justify-between items-center mb-3">
+                            <h2 class="text-sm font-semibold text-stone-600"><span aria-hidden="true">🔍</span> Consistency Checker</h2>
+                            <button onclick="loadConsistency()" aria-label="Refresh consistency log"
+                                class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-2 py-1 rounded transition-colors"><span aria-hidden="true">↻</span>
+                                Refresh</button>
+                        </div>
+                        <p class="text-xs text-stone-400 mb-3">
+                            After every AI generation, a background check compares the new text against story elements
+                            and world rules. Issues appear here.
+                        </p>
+                        <div id="consistency-log"
+                            class="w-full p-4 rounded-lg border border-stone-300 bg-white text-sm story-font leading-relaxed min-h-[200px] whitespace-pre-wrap">
+                            <span class="text-stone-400 italic">No checks yet — generate some story first.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="p-3 bg-stone-50 border-t border-stone-200" role="form" aria-label="Story input">
+                <!-- Audio attachment badge -->
+                <div id="audio-attachment" style="display:none; margin-bottom:6px;">
+                    <span class="audio-badge">
+                        <span aria-hidden="true">🎵</span>
+                        <span class="filename" id="audio-filename"></span>
+                        <button type="button" class="remove-audio" onclick="removeAudio()" title="Remove audio" aria-label="Remove attached audio">×</button>
+                    </span>
+                </div>
+                <!-- Upload progress bar -->
+                <div id="upload-progress" class="upload-progress" role="progressbar" aria-label="Audio upload progress"
+                    aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+                    <div class="progress-label" id="progress-label">Uploading audio...</div>
+                </div>
+                <div class="relative">
+                    <label for="user-input" class="sr-only">Type your action or dialogue to continue the story</label>
+                    <textarea id="user-input"
+                        class="w-full p-3 pr-20 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-none shadow-inner bg-white text-sm"
+                        rows="2" placeholder="Type your action or dialogue here..."
+                        aria-describedby="input-hint"></textarea>
+                    <!-- Hidden audio file input -->
+                    <input type="file" id="audio-file-input" accept="audio/*" style="display:none" aria-label="Upload audio file">
+                    <!-- Audio upload button -->
+                    <button id="audio-btn" aria-label="Attach audio file"
+                        class="absolute bottom-3 right-10 text-stone-400 hover:text-stone-800 transition-colors" title="Attach audio">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                            stroke="currentColor" class="w-5 h-5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M9 9l10.5-3m0 6.553v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 11-.99-3.467l2.31-.66a2.25 2.25 0 001.632-2.163zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 01-.99-3.467l2.31-.66A2.25 2.25 0 009 15.553z" />
+                        </svg>
+                    </button>
+                    <!-- Send button -->
+                    <button id="send-btn" aria-label="Send to AI"
+                        class="absolute bottom-3 right-3 text-stone-400 hover:text-stone-800 transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                            stroke="currentColor" class="w-5 h-5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="flex items-center justify-center gap-4 mt-1">
+                    <div id="input-hint" class="text-xs text-stone-400">
+                        AI will refine your text and continue the story. Elements auto-extracted.
+                    </div>
+                    <label class="flex items-center gap-1 text-xs text-stone-500 cursor-pointer select-none whitespace-nowrap" title="When checked, the AI rules checker will not run after generation">
+                        <input type="checkbox" id="skip-rules-check" aria-label="Skip rules checker for this prompt">
+                        <span>Skip rules check</span>
+                    </label>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script>
+        // State
+        let currentStoryId = 'default';
+        const input = document.getElementById('user-input');
+        const sendBtn = document.getElementById('send-btn');
+        const storyDisplay = document.getElementById('story-display');
+        const elementsGrid = document.getElementById('elements-grid');
+        const statusIndicator = document.getElementById('status-indicator');
+        const modelBadge = document.getElementById('model-badge');
+        const storyList = document.getElementById('story-list');
+        const storyTitle = document.getElementById('story-title');
+        const truncationBanner = document.getElementById('truncation-banner');
+        const srAnnouncer = document.getElementById('sr-announcer');
+        const srStatus = document.getElementById('sr-status');
+
+        // ===== SCREEN READER HELPERS =====
+        function announceToScreenReader(text) {
+            // Clear then set to force re-announcement
+            srAnnouncer.textContent = '';
+            setTimeout(() => { srAnnouncer.textContent = text; }, 100);
+        }
+
+        function announceStatus(text) {
+            srStatus.textContent = text;
+            statusIndicator.textContent = text;
+        }
+
+        // ===== SHARED EXPANDABLE PROMPT (used for both the live turn and history) =====
+        let _expandablePromptId = 0;
+        function createExpandablePrompt(fullText) {
+            const wrapper = document.createElement('div');
+            const div = document.createElement('div');
+            div.className = 'chat-user-prompt px-6 pb-3 text-sm text-stone-500 border-b border-stone-200';
+            wrapper.appendChild(div);
+
+            if (fullText.length <= 200) {
+                div.textContent = fullText;
+                return wrapper;
+            }
+
+            const shortText = fullText.substring(0, 200) + '\u2026';
+            let expanded = false;
+            const hintId = `prompt-hint-${_expandablePromptId++}`;
+
+            div.textContent = shortText;
+            div.title = 'Click to expand full prompt';
+            div.setAttribute('role', 'button');
+            div.setAttribute('tabindex', '0');
+            // IMPORTANT: no aria-label here - the prompt text itself must remain the
+            // accessible name so a screen reader actually reads it, not a static
+            // instruction sentence. The "how to expand" hint goes in aria-describedby
+            // instead (pointing at a SIBLING, not a child - a child's text would get
+            // folded into the accessible name too), so it's announced after the name,
+            // not instead of it.
+            div.setAttribute('aria-describedby', hintId);
+
+            const hint = document.createElement('span');
+            hint.id = hintId;
+            hint.className = 'sr-only';
+            hint.textContent = 'Truncated. Press Enter to show the full prompt.';
+            wrapper.appendChild(hint);
+
+            function toggle() {
+                expanded = !expanded;
+                div.textContent = expanded ? fullText : shortText;
+                hint.textContent = expanded
+                    ? 'Full prompt shown. Press Enter to collapse.'
+                    : 'Truncated. Press Enter to show the full prompt.';
+                announceToScreenReader(expanded ? 'Full prompt shown.' : 'Prompt collapsed.');
+            }
+            div.addEventListener('click', toggle);
+            div.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+            });
+
+            return wrapper;
+        }
+
+        // ===== SIDEBAR =====
+        async function loadStoryList() {
+            try {
+                const res = await fetch('/stories');
+                const data = await res.json();
+                storyList.innerHTML = '';
+
+                if (data.stories.length === 0) {
+                    storyList.innerHTML = '<div class="text-xs text-stone-400 text-center py-4">No stories yet</div>';
+                    return;
+                }
+
+                data.stories.forEach(story => {
+                    const div = document.createElement('div');
+                    div.dataset.id = story.id;
+                    div.className = `sidebar-item px-3 py-2.5 cursor-pointer flex items-center justify-between group ${story.id === currentStoryId ? 'active' : ''}`;
+                    div.setAttribute('role', 'listitem');
+                    div.setAttribute('tabindex', '0');
+                    div.setAttribute('aria-label', `${story.name}, ${(story.size / 1024).toFixed(1)} kilobytes${story.id === currentStoryId ? ', currently selected' : ''}`);
+                    div.setAttribute('aria-current', story.id === currentStoryId ? 'true' : 'false');
+
+                    const sizeKB = (story.size / 1024).toFixed(1);
+                    div.innerHTML = `
+                        <div class="min-w-0 flex-1">
+                            <div class="text-sm truncate">${story.name}</div>
+                            <div class="text-xs text-stone-400">${sizeKB} KB</div>
+                        </div>
+                        <button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-red-500 p-1 transition-opacity" title="Delete" aria-label="Delete story ${story.name}">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                        </button>
+                    `;
+
+                    const activateStory = () => switchStory(story.id, story.name);
+                    div.addEventListener('click', (e) => {
+                        if (e.target.closest('.delete-btn')) return;
+                        activateStory();
+                    });
+                    div.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateStory(); }
+                    });
+
+                    div.querySelector('.delete-btn').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        deleteStory(story.id);
+                    });
+
+                    storyList.appendChild(div);
+                });
+            } catch (err) {
+                console.error('Failed to load stories:', err);
+                storyList.innerHTML = '<div class="text-xs text-stone-400 text-center py-4 cursor-pointer" onclick="loadStoryList()">Failed to load. Click to retry.</div>';
+            }
+        }
+
+        async function createNewStory() {
+            const name = prompt('Enter story name:');
+            if (!name || !name.trim()) return;
+
+            try {
+                const res = await fetch('/stories/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim() })
+                });
+                const data = await res.json();
+                switchStory(data.id, name.trim());
+                loadStoryList();
+            } catch (err) {
+                console.error('Failed to create story:', err);
+            }
+        }
+
+        async function deleteStory(storyId) {
+            if (!confirm(`Delete this story and ALL its files? This cannot be undone.`)) return;
+            try {
+                const res = await fetch(`/story/${storyId}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    alert('Failed to delete story. Please try again.');
+                    return;
+                }
+                announceToScreenReader('Story deleted.');
+                if (currentStoryId === storyId) {
+                    // Switch to first available story after refresh
+                    const listRes = await fetch('/stories');
+                    const listData = await listRes.json();
+                    const remaining = listData.stories.filter(s => s.id !== storyId);
+                    if (remaining.length > 0) {
+                        switchStory(remaining[0].id, remaining[0].name);
+                    } else {
+                        // No stories left — create default
+                        currentStoryId = 'default';
+                        storyTitle.textContent = 'Default';
+                        loadStory();
+                    }
+                }
+                loadStoryList();
+            } catch (err) {
+                console.error('Failed to delete story:', err);
+                alert('Error deleting story: ' + err.message);
+            }
+        }
+
+        async function triggerAnalysis() {
+            if (!currentStoryId || currentStoryId === 'default') return;
+            const btn = document.getElementById('analyze-btn');
+            const originalText = btn.textContent;
+
+            try {
+                btn.disabled = true;
+                btn.textContent = '⏳ Analyzing...';
+                announceStatus('Starting background analysis...');
+
+                const res = await fetch(`/analyze/${currentStoryId}`, { method: 'POST' });
+                if (!res.ok) throw new Error(await res.text());
+
+                announceStatus('Analysis started in background.');
+                setTimeout(() => {
+                    announceStatus('Analysis running...');
+                    // Poll for a bit to see if files update? 
+                    // For now just restore button after a delay
+                }, 2000);
+
+            } catch (err) {
+                console.error('Analysis trigger failed:', err);
+                announceStatus('Analysis failed to start.');
+                alert('Failed to trigger analysis: ' + err.message);
+            } finally {
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                }, 5000);
+            }
+        }
+
+        function switchStory(storyId, name) {
+            currentStoryId = storyId;
+            storyTitle.textContent = name || storyId;
+
+            // Update active state in DOM to preserve focus
+            document.querySelectorAll('.sidebar-item').forEach(el => {
+                const isActive = el.dataset.id === storyId;
+                el.classList.toggle('active', isActive);
+                el.setAttribute('aria-current', isActive ? 'true' : 'false');
+            });
+
+            loadStory();
+            document.getElementById('analyze-btn').classList.remove('hidden');
+            // Don't reload list here, it kills focus.
+        }
+
+        // ===== TABS =====
+        function switchTab(tab, moveFocus) {
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.remove('active');
+                b.setAttribute('aria-selected', 'false');
+                b.setAttribute('tabindex', '-1');
+            });
+            const activeBtn = document.querySelector(`[data-tab="${tab}"]`);
+            activeBtn.classList.add('active');
+            activeBtn.setAttribute('aria-selected', 'true');
+            activeBtn.setAttribute('tabindex', '0');
+            if (moveFocus) activeBtn.focus();
+            document.getElementById('tab-story').classList.toggle('hidden', tab !== 'story');
+            document.getElementById('tab-elements').classList.toggle('hidden', tab !== 'elements');
+            document.getElementById('tab-summary').classList.toggle('hidden', tab !== 'summary');
+            document.getElementById('tab-style').classList.toggle('hidden', tab !== 'style');
+            document.getElementById('tab-rules').classList.toggle('hidden', tab !== 'rules');
+            document.getElementById('tab-consistency').classList.toggle('hidden', tab !== 'consistency');
+            if (tab === 'elements') loadElements();
+            if (tab === 'summary') loadSummary();
+            if (tab === 'style') loadStyle();
+            if (tab === 'rules') loadRules();
+            if (tab === 'consistency') loadConsistency();
+            announceStatus(`Viewing ${tab} tab`);
+            // Move the reading position into the panel itself, not just the live-region status
+            const panel = document.getElementById(`tab-${tab}`);
+            if (panel) panel.focus({ preventScroll: true });
+        }
+
+        // Standard tablist keyboard pattern: Left/Right/Home/End move focus between tabs,
+        // Enter/Space (native button behavior) activates the focused tab.
+        (function initTabKeyboardNav() {
+            const tabBtns = Array.from(document.querySelectorAll('.tab-btn'));
+            const tablist = document.querySelector('[role="tablist"]');
+            tabBtns.forEach((btn) => {
+                btn.addEventListener('click', () => switchTab(btn.dataset.tab, false));
+            });
+            tablist.addEventListener('keydown', (e) => {
+                const currentIndex = tabBtns.findIndex(b => b === document.activeElement);
+                if (currentIndex === -1) return;
+                let nextIndex = null;
+                if (e.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabBtns.length;
+                else if (e.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + tabBtns.length) % tabBtns.length;
+                else if (e.key === 'Home') nextIndex = 0;
+                else if (e.key === 'End') nextIndex = tabBtns.length - 1;
+                if (nextIndex !== null) {
+                    e.preventDefault();
+                    switchTab(tabBtns[nextIndex].dataset.tab, true);
+                }
+            });
+        })();
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ===== STORY LOADING (gradual) =====
+        let allChatEntries = [];
+        let renderedStartIndex = 0;
+        const CHAT_PAGE_SIZE = 40;
+        let isLoadingMore = false;
+
+        function renderBatch(startIdx, endIdx, prepend) {
+            const entries = allChatEntries.slice(startIdx, endIdx);
+            if (!entries.length) return;
+
+            const isLastBatch = (endIdx >= allChatEntries.length);
+            const fragment = document.createDocumentFragment();
+
+            for (let i = 0; i < entries.length; i++) {
+                const globalIdx = startIdx + i;
+                const isLast = isLastBatch && (globalIdx === allChatEntries.length - 1);
+                const block = renderChatEntryToNode(entries[i], isLast);
+                fragment.appendChild(block);
+            }
+
+            if (prepend) {
+                const prevHeight = storyDisplay.scrollHeight;
+                storyDisplay.insertBefore(fragment, storyDisplay.firstChild);
+                storyDisplay.scrollTop += (storyDisplay.scrollHeight - prevHeight);
+            } else {
+                storyDisplay.appendChild(fragment);
+            }
+        }
+
+        function renderChatEntryToNode(entry, isLast) {
+            const block = document.createElement('div');
+            block.className = 'mb-4';
+
+            const header = document.createElement('h3');
+            header.className = 'px-6 pt-4 pb-1 font-bold text-sm';
+
+            if (entry.role === 'user') {
+                header.className += ' text-stone-600';
+                header.textContent = 'You said:';
+                block.appendChild(header);
+
+                const fullText = entry.text || '';
+                block.appendChild(createExpandablePrompt(fullText));
+            } else {
+                header.className += ' text-stone-500';
+                const modelInfo = entry.model ? ` - ${entry.model}` : '';
+                header.textContent = `AI said:${modelInfo}`;
+                block.appendChild(header);
+
+                const body = document.createElement('div');
+                body.className = 'story-font text-lg leading-relaxed whitespace-pre-wrap px-6 pb-3';
+                body.textContent = (entry.text || '').replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
+                block.appendChild(body);
+
+                const actionBar = document.createElement('div');
+                actionBar.className = 'action-bar px-6';
+                if (isLast) {
+                    actionBar.innerHTML = `
+                        <button class="action-btn" onclick="regenerateStory()" title="Regenerate with same prompt">Regenerate</button>
+                        <button class="action-btn" onclick="editLastPrompt(this)" title="Edit your prompt and regenerate">Edit & Redo</button>
+                        <button class="action-btn" onclick="copyResponse(this)" title="Copy AI response">Copy</button>
+                    `;
+                } else {
+                    actionBar.innerHTML = `
+                        <button class="action-btn" onclick="copyResponse(this)" title="Copy AI response">Copy</button>
+                    `;
+                }
+                block.appendChild(actionBar);
+            }
+
+            return block;
+        }
+
+        function onStoryScroll() {
+            if (isLoadingMore || renderedStartIndex <= 0) return;
+            if (storyDisplay.scrollTop < 200) {
+                isLoadingMore = true;
+                const newStart = Math.max(0, renderedStartIndex - CHAT_PAGE_SIZE);
+                renderBatch(newStart, renderedStartIndex, true);
+                renderedStartIndex = newStart;
+                isLoadingMore = false;
+            }
+        }
+
+        storyDisplay.addEventListener('scroll', onStoryScroll);
+
+        async function loadStory() {
+            try {
+                storyDisplay.innerHTML = '';
+                truncationBanner.classList.add('hidden');
+
+                const chatRes = await fetch(`/story/${currentStoryId}/chat?last=9999`);
+                const chatData = await chatRes.json();
+                allChatEntries = chatData.messages || [];
+
+                if (allChatEntries.length === 0) {
+                    storyDisplay.innerHTML = '<p class="text-stone-500 italic text-center mt-16">The page is blank. Waiting for your first words...</p>';
+                    return;
+                }
+
+                // Set lastUserPrompt from the most recent user entry
+                for (let i = allChatEntries.length - 1; i >= 0; i--) {
+                    if (allChatEntries[i].role === 'user') {
+                        lastUserPrompt = allChatEntries[i].text || '';
+                        break;
+                    }
+                }
+
+                // Render only the last CHAT_PAGE_SIZE entries
+                renderedStartIndex = Math.max(0, allChatEntries.length - CHAT_PAGE_SIZE);
+                renderBatch(renderedStartIndex, allChatEntries.length, false);
+                storyDisplay.scrollTop = storyDisplay.scrollHeight;
+            } catch (err) {
+                console.error('Failed to load story:', err);
+                storyDisplay.innerHTML = '<p class="text-stone-500 italic text-center mt-16">Failed to load story.</p>';
+            }
+        }
+
+        async function loadRecentStory() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}?tail=1000`);
+                const data = await res.json();
+                storyDisplay.innerHTML = '';
+                if (data.content) renderStoryContent(data.content);
+            } catch (err) {
+                console.error('Failed to load recent story:', err);
+            }
+        }
+
+        async function loadFullStory() {
+            try {
+                truncationBanner.innerHTML = '<div class="text-xs text-stone-500 py-2">Loading full story...</div>';
+                const res = await fetch(`/story/${currentStoryId}/full`);
+                const data = await res.json();
+
+                storyDisplay.innerHTML = '';
+                truncationBanner.classList.add('hidden');
+                truncationBanner.innerHTML = '<button onclick="loadFullStory()" class="text-xs text-stone-500 hover:text-stone-800 underline">⬆ Story is long — showing recent part. Click to load all.</button>';
+
+                if (data.content) {
+                    renderStoryContent(data.content);
+                    // Re-add action buttons if there's a last prompt
+                    if (lastUserPrompt) {
+                        const actionBar = document.createElement('div');
+                        actionBar.className = 'action-bar';
+                        actionBar.setAttribute('role', 'group');
+                        actionBar.setAttribute('aria-label', 'Story generation actions');
+                        actionBar.innerHTML = `
+                            <button class="action-btn" onclick="regenerateStory()" aria-label="Regenerate with same prompt" title="Regenerate with same prompt">🔄 Regenerate</button>
+                            <button class="action-btn" onclick="editLastPrompt(this)" aria-label="Edit your prompt and regenerate" title="Edit your prompt and regenerate">✏️ Edit & Redo</button>
+                        `;
+                        storyDisplay.appendChild(actionBar);
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to load full story:', err);
+            }
+        }
+
+        function renderStoryContent(content) {
+            content.split('\n\n').forEach(block => {
+                if (block.trim()) {
+                    const p = document.createElement('p');
+                    p.innerText = block.replace(/\*/g, '');
+                    p.className = "mb-4";
+                    storyDisplay.appendChild(p);
+                }
+            });
+            storyDisplay.scrollTop = storyDisplay.scrollHeight;
+        }
+
+        // ===== ELEMENTS =====
+        const ELEMENT_ICONS = { characters: '👤', positions: '📍', villains: '🦹', locations: '🗺️', incidents: '⚡', items: '🗡️' };
+        const ELEMENT_COLORS = {
+            characters: 'border-blue-200 bg-blue-50',
+            villains: 'border-red-200 bg-red-50',
+            locations: 'border-green-200 bg-green-50',
+            incidents: 'border-amber-200 bg-amber-50',
+            items: 'border-purple-200 bg-purple-50'
+        };
+
+        async function loadElements() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}/elements`);
+                const data = await res.json();
+
+                if (Object.keys(data).length === 0) {
+                    elementsGrid.innerHTML = '<div class="text-stone-400 italic col-span-2 text-center mt-10 text-sm">Story elements will appear after you start writing...</div>';
+                    return;
+                }
+
+                elementsGrid.innerHTML = '';
+                for (const [cat, content] of Object.entries(data)) {
+                    const card = document.createElement('div');
+                    card.className = `element-card border rounded-lg p-3 ${ELEMENT_COLORS[cat] || 'border-stone-200 bg-stone-50'}`;
+                    card.innerHTML = `
+                        <h3 class="text-xs font-semibold uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                            ${ELEMENT_ICONS[cat] || '📌'} ${cat}
+                        </h3>
+                        <div class="text-xs text-stone-700 whitespace-pre-line leading-relaxed">${escapeHtml(content.replace(/^## .*\n?/, ''))}</div>
+                    `;
+                    elementsGrid.appendChild(card);
+                }
+            } catch (err) {
+                console.error('Failed to load elements:', err);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ===== SUMMARY =====
+        async function loadSummary() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}/summary`);
+                const data = await res.json();
+                document.getElementById('summary-textarea').value = data.summary || '';
+                document.getElementById('summary-status').textContent = data.summary ? 'Last loaded just now' : 'No summary yet — it will be created after AI generates content.';
+            } catch (err) {
+                console.error('Failed to load summary:', err);
+            }
+        }
+
+        async function saveSummary() {
+            const text = document.getElementById('summary-textarea').value;
+            try {
+                await fetch(`/story/${currentStoryId}/summary`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ summary: text })
+                });
+                document.getElementById('summary-status').textContent = 'Saved!';
+                announceToScreenReader('Summary saved successfully.');
+                setTimeout(() => { document.getElementById('summary-status').textContent = ''; }, 2000);
+            } catch (err) {
+                console.error('Failed to save summary:', err);
+                document.getElementById('summary-status').textContent = 'Error saving.';
+            }
+        }
+
+        // ===== STYLE GUIDE =====
+        async function loadStyle() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}/style`);
+                const data = await res.json();
+                document.getElementById('style-textarea').value = data.text || '';
+                document.getElementById('style-status').textContent = data.text ? 'Loaded' : 'No style guide yet — add your writing preferences.';
+            } catch (err) { console.error('Failed to load style:', err); }
+        }
+
+        async function saveStyle() {
+            const text = document.getElementById('style-textarea').value;
+            try {
+                await fetch(`/story/${currentStoryId}/style`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                });
+                document.getElementById('style-status').textContent = 'Saved!';
+                announceToScreenReader('Style guide saved.');
+                setTimeout(() => { document.getElementById('style-status').textContent = ''; }, 2000);
+            } catch (err) {
+                document.getElementById('style-status').textContent = 'Error saving.';
+            }
+        }
+
+        // ===== WORLD RULES =====
+        async function loadRules() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}/rules`);
+                const data = await res.json();
+                document.getElementById('rules-textarea').value = data.text || '';
+                document.getElementById('rules-status').textContent = data.text ? 'Loaded' : 'No rules yet — define your world constraints.';
+            } catch (err) { console.error('Failed to load rules:', err); }
+        }
+
+        async function saveRules() {
+            const text = document.getElementById('rules-textarea').value;
+            try {
+                await fetch(`/story/${currentStoryId}/rules`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                });
+                document.getElementById('rules-status').textContent = 'Saved!';
+                announceToScreenReader('World rules saved.');
+                setTimeout(() => { document.getElementById('rules-status').textContent = ''; }, 2000);
+            } catch (err) {
+                document.getElementById('rules-status').textContent = 'Error saving.';
+            }
+        }
+
+        // ===== CONSISTENCY LOG =====
+        async function loadConsistency() {
+            try {
+                const res = await fetch(`/story/${currentStoryId}/consistency`);
+                const data = await res.json();
+                const logDiv = document.getElementById('consistency-log');
+                if (data.text && data.text.trim()) {
+                    logDiv.innerHTML = escapeHtml(data.text);
+                } else {
+                    logDiv.innerHTML = '<span class="text-stone-400 italic">No checks yet — generate some story first.</span>';
+                }
+            } catch (err) { console.error('Failed to load consistency:', err); }
+        }
+
+        // ===== AUDIO ATTACHMENT =====
+        let attachedAudioFile = null;
+        const audioBtn = document.getElementById('audio-btn');
+        const audioFileInput = document.getElementById('audio-file-input');
+        const audioAttachment = document.getElementById('audio-attachment');
+        const audioFilename = document.getElementById('audio-filename');
+
+        audioBtn.addEventListener('click', () => audioFileInput.click());
+        audioFileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                attachedAudioFile = file;
+                audioFilename.textContent = file.name;
+                audioAttachment.style.display = 'block';
+                announceToScreenReader('Audio file attached: ' + file.name);
+            }
+        });
+
+        function removeAudio() {
+            attachedAudioFile = null;
+            audioFileInput.value = '';
+            audioAttachment.style.display = 'none';
+            announceToScreenReader('Audio file removed.');
+        }
+
+        // ===== STORY SUBMISSION (SSE streaming) =====
+        let lastUserPrompt = '';
+
+
+
+        async function submitStory(overrideText) {
+            const text = (typeof overrideText === 'string' ? overrideText : input.value.trim());
+            if (!text) return;
+
+            lastUserPrompt = text;
+            input.value = '';
+            input.disabled = true;
+            sendBtn.disabled = true;
+            announceStatus('Generating response...');
+
+            // Show user prompt block
+            const userBlock = document.createElement('div');
+            userBlock.className = 'mb-4';
+            const userHeader = document.createElement('h3');
+            userHeader.className = 'px-6 pt-4 pb-1 font-bold text-sm text-stone-600';
+            userHeader.textContent = 'You said:';
+            userBlock.appendChild(userHeader);
+            userBlock.appendChild(createExpandablePrompt(text));
+            storyDisplay.appendChild(userBlock);
+
+            // AI response header
+            const aiHeader = document.createElement('h3');
+            aiHeader.className = 'px-6 pt-4 pb-1 font-bold text-sm text-stone-500';
+            aiHeader.textContent = 'AI said:';
+            storyDisplay.appendChild(aiHeader);
+
+            // Thinking disclosure - sits right below the header, collapsed by default.
+            // Hidden until 'done' confirms this turn actually produced any thinking text.
+            const thinkingId = 'thinking-' + Date.now();
+            const thinkingToggleBtn = document.createElement('button');
+            thinkingToggleBtn.type = 'button';
+            thinkingToggleBtn.className = 'action-btn thinking-toggle-btn';
+            thinkingToggleBtn.style.cssText = 'display:none; margin:0 24px 8px;';
+            thinkingToggleBtn.setAttribute('aria-expanded', 'false');
+            thinkingToggleBtn.setAttribute('aria-controls', thinkingId);
+            thinkingToggleBtn.textContent = '🧠 Show Thinking';
+            storyDisplay.appendChild(thinkingToggleBtn);
+
+            const thinkingPanel = document.createElement('div');
+            thinkingPanel.id = thinkingId;
+            thinkingPanel.style.display = 'none';
+            thinkingPanel.innerHTML = `
+                <div class="thinking-panel-label">AI Thinking Process</div>
+                <div class="thinking-panel"></div>
+            `;
+            storyDisplay.appendChild(thinkingPanel);
+            thinkingToggleBtn.addEventListener('click', () => toggleThinking(thinkingId, thinkingToggleBtn));
+
+            // Status indicator below AI header
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'px-6 pb-3 text-sm text-stone-400 italic';
+            statusDiv.textContent = 'generating...';
+            storyDisplay.appendChild(statusDiv);
+
+            // Visible response body - created now, filled in live as chunks arrive
+            const body = document.createElement('div');
+            body.className = 'story-font text-lg leading-relaxed whitespace-pre-wrap px-6 pb-3';
+            storyDisplay.appendChild(body);
+            storyDisplay.scrollTop = userBlock.offsetTop;
+
+            // Accumulate response in memory
+            let thinkingText = '';
+            let isInThinking = false;
+            let textBuffer = '';
+            let fullResponseText = '';
+            let thinkingAnnounced = false;
+
+            try {
+                let response;
+                if (attachedAudioFile) {
+                    const formData = new FormData();
+                    formData.append('user_input', text);
+                    formData.append('story_id', currentStoryId);
+                    formData.append('skip_rules_check', document.getElementById('skip-rules-check').checked);
+                    formData.append('audio', attachedAudioFile);
+
+                    const progressBar = document.getElementById('upload-progress');
+                    const progressFill = document.getElementById('progress-fill');
+                    const progressLabel = document.getElementById('progress-label');
+                    progressBar.style.display = 'block';
+                    progressFill.style.width = '0%';
+                    progressLabel.textContent = 'Uploading audio...';
+                    announceStatus('Uploading audio file...');
+
+                    response = await new Promise((resolve, reject) => {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('POST', '/generate-audio');
+                        xhr.responseType = 'blob';
+
+                        xhr.upload.onprogress = (e) => {
+                            if (e.lengthComputable) {
+                                const pct = Math.round((e.loaded / e.total) * 100);
+                                progressFill.style.width = pct + '%';
+                                progressLabel.textContent = `Uploading audio... ${pct}%`;
+                                progressBar.setAttribute('aria-valuenow', String(pct));
+                            }
+                        };
+
+                        xhr.upload.onload = () => {
+                            progressFill.style.width = '100%';
+                            progressLabel.textContent = 'Processing audio... AI is listening';
+                            announceStatus('Audio uploaded. AI is listening...');
+                        };
+
+                        xhr.onload = () => {
+                            progressBar.style.display = 'none';
+                            const stream = new Response(xhr.response).body;
+                            resolve(new Response(stream, {
+                                status: xhr.status,
+                                statusText: xhr.statusText,
+                                headers: { 'Content-Type': xhr.getResponseHeader('Content-Type') }
+                            }));
+                        };
+
+                        xhr.onerror = () => {
+                            progressBar.style.display = 'none';
+                            reject(new Error('Upload failed'));
+                        };
+
+                        xhr.send(formData);
+                    });
+
+                    // Clear attachment after send
+                    attachedAudioFile = null;
+                    audioFileInput.value = '';
+                    audioAttachment.style.display = 'none';
+                } else {
+                    response = await fetch('/generate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_input: text, story_id: currentStoryId, skip_rules_check: document.getElementById('skip-rules-check').checked })
+                    });
+                }
+
+                if (!response.ok) {
+                    const errText = await response.text();
+                    throw new Error(errText || 'Server Error');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let lastChunkPayload = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const payload = JSON.parse(line.substring(6));
+                                if (payload.type === 'info') {
+                                    modelBadge.textContent = payload.model;
+                                    modelBadge.style.opacity = '1';
+                                    aiHeader.textContent = 'AI said: - ' + payload.model;
+                                } else if (payload.type === 'thinking') {
+                                    statusDiv.textContent = 'thinking...';
+                                    if (!thinkingAnnounced) {
+                                        announceStatus('AI is thinking. This may take a while for complex requests.');
+                                        thinkingAnnounced = true;
+                                    }
+                                } else if (payload.type === 'chunk') {
+                                    if (statusDiv.textContent === 'thinking...') {
+                                        statusDiv.textContent = 'generating...';
+                                        announceStatus('Generating story text...');
+                                    }
+                                    if (payload.text && lastChunkPayload && payload.text === lastChunkPayload) {
+                                        continue;
+                                    }
+                                    if (payload.text && lastChunkPayload && payload.text.trimEnd() === lastChunkPayload.trimEnd()) {
+                                        continue;
+                                    }
+                                    lastChunkPayload = payload.text || '';
+                                    textBuffer += payload.text;
+
+                                    while (true) {
+                                        if (!isInThinking) {
+                                            const thoughtStart = textBuffer.indexOf('<thought>');
+                                            if (thoughtStart === -1) {
+                                                fullResponseText += textBuffer;
+                                                textBuffer = '';
+                                                break;
+                                            } else {
+                                                const storyPart = textBuffer.substring(0, thoughtStart);
+                                                if (storyPart) fullResponseText += storyPart;
+                                                textBuffer = textBuffer.substring(thoughtStart + 9);
+                                                isInThinking = true;
+                                                statusDiv.textContent = 'thinking...';
+                                                if (!thinkingAnnounced) {
+                                                    announceStatus('AI is thinking. This may take a while for complex requests.');
+                                                    thinkingAnnounced = true;
+                                                }
+                                            }
+                                        } else {
+                                            const thoughtEnd = textBuffer.indexOf('</thought>');
+                                            if (thoughtEnd === -1) {
+                                                thinkingText += textBuffer;
+                                                textBuffer = '';
+                                                break;
+                                            } else {
+                                                thinkingText += textBuffer.substring(0, thoughtEnd);
+                                                textBuffer = textBuffer.substring(thoughtEnd + 10);
+                                                isInThinking = false;
+                                                statusDiv.textContent = 'generating...';
+                                                announceStatus('Generating story text...');
+                                            }
+                                        }
+                                    }
+
+                                    // Paint what we have so far - this is what makes streaming actually visible
+                                    body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
+                                    storyDisplay.scrollTop = storyDisplay.scrollHeight;
+                                } else if (payload.type === 'finalizing') {
+                                    // Story text is done, but the server is still updating its background
+                                    // memory (characters/items/timeline/etc). Input stays locked until 'done'
+                                    // actually arrives, so the next turn never reads stale memory files.
+                                    statusDiv.textContent = 'finalizing...';
+                                    announceStatus(payload.message || 'Updating story memory...');
+                                } else if (payload.type === 'heartbeat') {
+                                    // Keeps the connection alive during a long finalizing phase - no UI change needed.
+                                } else if (payload.type === 'done') {
+                                    if (textBuffer) {
+                                        fullResponseText += textBuffer;
+                                        textBuffer = '';
+                                    }
+
+                                    statusDiv.remove();
+                                    body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
+
+                                    announceStatus('Story generation complete.');
+                                    setTimeout(() => {
+                                        announceToScreenReader(body.textContent);
+                                    }, 500);
+
+                                    if (thinkingText.trim()) {
+                                        thinkingPanel.querySelector('.thinking-panel').textContent = thinkingText.trim();
+                                        thinkingToggleBtn.style.display = '';
+                                    } else {
+                                        thinkingToggleBtn.remove();
+                                        thinkingPanel.remove();
+                                    }
+
+                                    const actionBar = document.createElement('div');
+                                    actionBar.className = 'action-bar';
+                                    actionBar.setAttribute('role', 'group');
+                                    actionBar.setAttribute('aria-label', 'Story generation actions');
+
+                                    actionBar.innerHTML = `
+                                        <button class="action-btn" onclick="regenerateStory()" title="Regenerate with same prompt">Regenerate</button>
+                                        <button class="action-btn" onclick="editLastPrompt(this)" title="Edit your prompt and regenerate">Edit & Redo</button>
+                                        <button class="action-btn" onclick="copyResponse(this)" title="Copy AI response">Copy</button>
+                                    `;
+                                    storyDisplay.appendChild(actionBar);
+                                    storyDisplay.scrollTop = userBlock.offsetTop;
+
+                                    loadStoryList();
+                                } else if (payload.type === 'warning') {
+                                    const warnDiv = document.createElement('div');
+                                    warnDiv.className = 'bg-amber-100 border border-amber-400 text-amber-700 px-3 py-2 rounded mb-4 text-sm';
+                                    warnDiv.setAttribute('role', 'alert');
+                                    warnDiv.innerText = payload.message;
+                                    storyDisplay.appendChild(warnDiv);
+                                    announceToScreenReader(payload.message);
+                                } else if (payload.type === 'error') {
+                                    throw new Error(payload.message);
+                                }
+                            } catch (parseErr) {
+                                if (parseErr.message && !parseErr.message.includes('JSON')) throw parseErr;
+                            }
+                        }
+                    }
+                }
+
+            } catch (err) {
+                const msg = err.message || '';
+                const isDisconnect = msg.includes('Errno 22') || msg.includes('network') ||
+                    msg.includes('Failed to fetch') || msg.includes('aborted') ||
+                    msg.includes('BodyStreamBuffer');
+
+                if (isDisconnect && fullResponseText) {
+                    statusDiv.remove();
+                    body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
+                    console.log('Server disconnected, showing partial response.');
+                } else if (isDisconnect) {
+                    statusDiv.remove();
+                    announceStatus('Server disconnected. Refresh the page.');
+                } else {
+                    console.error('Error:', err);
+                    statusDiv.remove();
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded mb-4 text-sm';
+                    errorDiv.setAttribute('role', 'alert');
+                    errorDiv.innerText = 'Error: ' + msg;
+                    storyDisplay.appendChild(errorDiv);
+                    storyDisplay.scrollTop = storyDisplay.scrollHeight;
+                    announceToScreenReader('Error generating story: ' + msg);
+                    input.value = text;
+                }
+            } finally {
+                input.disabled = false;
+                updateSendButtonState();
+                announceStatus('Ready');
+            }
+        }
+
+        async function regenerateStory() {
+            if (!lastUserPrompt) {
+                alert('No previous prompt to regenerate.');
+                return;
+            }
+            // Capture this BEFORE calling undo/loadStory - loadStory() re-derives
+            // lastUserPrompt from whatever's now the most recent chat entry, which after
+            // undo removes the current turn, would silently become the PREVIOUS prompt.
+            const promptToRegenerate = lastUserPrompt;
+            try {
+                announceStatus('Undoing last generation...');
+                const res = await fetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || 'Undo failed');
+                }
+                // Reload story display to remove old text, then regenerate
+                await loadStory();
+                submitStory(promptToRegenerate);
+            } catch (err) {
+                console.error('Regenerate failed:', err);
+                alert('Regenerate failed: ' + err.message);
+                announceStatus('Ready');
+            }
+        }
+
+        async function copyResponse(btn) {
+            const actionBar = btn.closest('.action-bar');
+            if (!actionBar) return;
+            let el = actionBar.previousElementSibling;
+            while (el && !el.classList.contains('story-font')) {
+                el = el.previousElementSibling;
+            }
+            if (el) {
+                try {
+                    await navigator.clipboard.writeText(el.textContent.trim());
+                    const orig = btn.textContent;
+                    btn.textContent = '\u2713 Copied';
+                    setTimeout(() => btn.textContent = orig, 2000);
+                } catch (e) {
+                    console.error('Copy failed:', e);
+                }
+            }
+        }
+
+        function editLastPrompt(btn) {
+            if (!lastUserPrompt) {
+                alert('No previous prompt to edit.');
+                return;
+            }
+            // Find the action bar and replace it with an edit UI
+            const actionBar = btn.closest('.action-bar');
+            const editContainer = document.createElement('div');
+            editContainer.style.marginTop = '8px';
+            editContainer.innerHTML = `
+                <label for="edit-prompt-textarea" style="font-size:11px;color:#78716c;margin-bottom:4px;display:block;">Edit your prompt:</label>
+                <textarea id="edit-prompt-textarea" class="edit-inline" rows="2" aria-label="Edit your prompt before regenerating">${lastUserPrompt.replace(/</g, '&lt;')}</textarea>
+                <div style="display:flex;gap:6px;margin-top:6px;" role="group" aria-label="Edit actions">
+                    <button class="action-btn" style="background:#44403c;color:white;border-color:#44403c;" onclick="confirmEdit(this)" aria-label="Confirm edit and regenerate">✅ Regenerate</button>
+                    <button class="action-btn" onclick="cancelEdit(this)" aria-label="Cancel editing">Cancel</button>
+                </div>
+            `;
+            actionBar.replaceWith(editContainer);
+            editContainer.querySelector('textarea').focus();
+        }
+
+        async function confirmEdit(btn) {
+            const container = btn.closest('div').parentElement;
+            const newPrompt = container.querySelector('textarea').value.trim();
+            if (!newPrompt) return;
+            container.remove();
+            try {
+                announceStatus('Undoing last generation...');
+                const res = await fetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || 'Undo failed');
+                }
+                await loadStory();
+                submitStory(newPrompt);
+            } catch (err) {
+                console.error('Edit & regenerate failed:', err);
+                alert('Edit & regenerate failed: ' + err.message);
+                announceStatus('Ready');
+            }
+        }
+
+        function cancelEdit(btn) {
+            const container = btn.closest('div').parentElement;
+            // Restore the action bar
+            const actionBar = document.createElement('div');
+            actionBar.className = 'action-bar';
+            actionBar.setAttribute('role', 'group');
+            actionBar.setAttribute('aria-label', 'Story generation actions');
+            actionBar.innerHTML = `
+                <button class="action-btn" onclick="regenerateStory()" aria-label="Regenerate with same prompt" title="Regenerate with same prompt">🔄 Regenerate</button>
+                <button class="action-btn" onclick="editLastPrompt(this)" aria-label="Edit your prompt and regenerate" title="Edit your prompt and regenerate">✏️ Edit & Redo</button>
+            `;
+            container.replaceWith(actionBar);
+        }
+
+        function toggleThinking(panelId, btn) {
+            const panel = document.getElementById(panelId);
+            if (!panel) return;
+            const isHidden = panel.style.display === 'none';
+            panel.style.display = isHidden ? 'block' : 'none';
+            btn.textContent = isHidden ? '🧠 Hide Thinking' : '🧠 Show Thinking';
+            btn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+            if (isHidden) {
+                announceToScreenReader('Showing AI thinking process.');
+                panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else {
+                announceToScreenReader('Hiding AI thinking process.');
+            }
+        }
+
+        // ===== INIT =====
+        // Retry loading story list in case server is still starting
+        (async function initStoryList() {
+            for (let i = 0; i < 3; i++) {
+                try {
+                    const res = await fetch('/stories');
+                    if (res.ok) { loadStoryList(); return; }
+                } catch (e) { }
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            loadStoryList(); // final attempt, will show retry button if it fails
+        })();
+        loadStory();
+
+        document.getElementById('new-story-btn').addEventListener('click', createNewStory);
+        sendBtn.addEventListener('click', () => submitStory());
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitStory();
+            }
+        });
+
+        // Keep Send disabled whenever the textbox is empty, so there's nothing to accidentally submit.
+        function updateSendButtonState() {
+            sendBtn.disabled = input.value.trim().length === 0;
+        }
+        input.addEventListener('input', updateSendButtonState);
+        updateSendButtonState();
+    </script>
+</body>
+
+</html>
