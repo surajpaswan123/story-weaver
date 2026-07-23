@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -16,6 +16,54 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI()
+
+# Firebase Admin Initialization (Graceful / Optional)
+db_firestore = None
+firebase_initialized = False
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth, firestore
+    
+    cred_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    cred_file = os.getenv("FIREBASE_CREDENTIALS_FILE", os.path.join(os.path.dirname(__file__), "firebase-credentials.json"))
+    
+    if cred_json:
+        cred_dict = json.loads(cred_json)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        firebase_initialized = True
+    elif os.path.exists(cred_file):
+        cred = credentials.Certificate(cred_file)
+        firebase_admin.initialize_app(cred)
+        firebase_initialized = True
+    else:
+        try:
+            firebase_admin.initialize_app()
+            firebase_initialized = True
+        except Exception:
+            pass
+            
+    if firebase_initialized:
+        db_firestore = firestore.client()
+        print("[Firebase] Successfully initialized Firebase Admin & Firestore!")
+    else:
+        print("[Firebase] Firebase credentials not provided — running in local mode.")
+except Exception as fb_err:
+    print(f"[Firebase] Firebase note: {fb_err} — running in local mode.")
+
+def get_current_user_id(authorization: str = Header(None)) -> str:
+    """Extract user UID from Firebase ID token in Authorization header.
+    Returns 'default_user' if no token provided or Firebase not active."""
+    if not authorization or not authorization.startswith("Bearer ") or not firebase_initialized:
+        return "default_user"
+    token = authorization.split("Bearer ")[1].strip()
+    try:
+        decoded = auth.verify_id_token(token)
+        return decoded.get("uid", "default_user")
+    except Exception as e:
+        print(f"[Auth Error] Failed to verify Firebase token: {e}")
+        return "default_user"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
