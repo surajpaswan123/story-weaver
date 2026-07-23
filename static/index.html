@@ -515,6 +515,23 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             <!-- Input Area -->
             <div class="p-3 bg-stone-50 border-t border-stone-200" role="form" aria-label="Story input">
+                <!-- Provider and Model Selectors -->
+                <div class="flex flex-wrap items-center gap-2 mb-2 bg-stone-100 p-2 rounded-lg border border-stone-200 text-xs">
+                    <div class="flex items-center gap-1.5">
+                        <span class="font-medium text-stone-600 flex items-center gap-1">⚡ <span>Provider:</span></span>
+                        <select id="provider-select" onchange="onProviderChange()" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
+                            <option value="auto">Auto (Best Fallback)</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center gap-1.5 flex-1 min-w-[200px]">
+                        <span class="font-medium text-stone-600 flex items-center gap-1">🤖 <span>Model:</span></span>
+                        <select id="model-select" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium w-full focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
+                            <option value="auto">Auto (Default Recommended)</option>
+                        </select>
+                    </div>
+                </div>
+
                 <!-- Audio attachment badge -->
                 <div id="audio-attachment" style="display:none; margin-bottom:6px;">
                     <span class="audio-badge">
@@ -1324,10 +1341,18 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     audioFileInput.value = '';
                     audioAttachment.style.display = 'none';
                 } else {
+                    const providerVal = document.getElementById('provider-select')?.value || 'auto';
+                    const modelVal = document.getElementById('model-select')?.value || 'auto';
                     response = await fetch('/generate', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ user_input: text, story_id: currentStoryId, skip_rules_check: document.getElementById('skip-rules-check').checked })
+                        body: JSON.stringify({ 
+                            user_input: text, 
+                            story_id: currentStoryId, 
+                            skip_rules_check: document.getElementById('skip-rules-check').checked,
+                            provider: providerVal,
+                            model: modelVal
+                        })
                     });
                 }
 
@@ -1707,7 +1732,53 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             return fetch(url, options);
         }
 
+        // ===== PROVIDER & MODEL SELECTION LOGIC =====
+        let providersData = {};
+
+        async function loadProvidersAndModels() {
+            try {
+                const res = await fetch('/api/providers-models');
+                if (!res.ok) return;
+                const data = await res.json();
+                providersData = data.providers || {};
+                
+                const providerSelect = document.getElementById('provider-select');
+                if (!providerSelect) return;
+                
+                providerSelect.innerHTML = '<option value="auto">Auto (Best Fallback)</option>';
+                for (const [key, p] of Object.entries(providersData)) {
+                    const opt = document.createElement('option');
+                    opt.value = key;
+                    opt.textContent = p.name || key.toUpperCase();
+                    providerSelect.appendChild(opt);
+                }
+                onProviderChange();
+            } catch (e) {
+                console.warn('Failed to load providers:', e);
+            }
+        }
+
+        function onProviderChange() {
+            const providerSelect = document.getElementById('provider-select');
+            const modelSelect = document.getElementById('model-select');
+            if (!providerSelect || !modelSelect) return;
+            
+            const selectedProvider = providerSelect.value;
+            modelSelect.innerHTML = '<option value="auto">Auto (Default Recommended)</option>';
+            
+            if (selectedProvider !== 'auto' && providersData[selectedProvider]) {
+                const models = providersData[selectedProvider].models || [];
+                for (const m of models) {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    modelSelect.appendChild(opt);
+                }
+            }
+        }
+
         // ===== INIT =====
+        loadProvidersAndModels();
         // Retry loading story list in case server is still starting
         (async function initStoryList() {
             for (let i = 0; i < 3; i++) {
