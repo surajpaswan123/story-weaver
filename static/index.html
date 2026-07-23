@@ -6,6 +6,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Story Weaver</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase JS SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;1,400&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -294,6 +298,18 @@
                     <span id="story-title" class="text-sm opacity-60" aria-label="Current story name">—</span>
                 </div>
                 <div class="flex items-center gap-3">
+                    <!-- Auth Container -->
+                    <div id="auth-container" class="flex items-center gap-2">
+                        <button id="login-btn" onclick="handleGoogleLogin()" class="text-xs bg-amber-600 hover:bg-amber-500 text-white font-medium px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 shadow-sm">
+                            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/></svg>
+                            Sign in
+                        </button>
+                        <div id="user-profile" class="hidden flex items-center gap-2">
+                            <img id="user-avatar" class="w-6 h-6 rounded-full border border-stone-600" src="" alt="User Avatar">
+                            <span id="user-name" class="text-xs text-stone-300"></span>
+                            <button onclick="handleGoogleLogout()" class="text-xs text-stone-400 hover:text-stone-200 underline ml-1">Logout</button>
+                        </div>
+                    </div>
                     <button id="analyze-btn" onclick="triggerAnalysis()" aria-label="Force background analysis"
                         class="hidden text-xs bg-stone-700 hover:bg-stone-600 text-stone-200 px-2 py-1 rounded transition-colors">
                         <span aria-hidden="true">⚡</span> Analyze Now
@@ -1584,12 +1600,81 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
+        // ===== FIREBASE AUTH LOGIC =====
+        let currentUserToken = null;
+        let currentUser = null;
+
+        // Firebase Config helper (Loads config if window.FIREBASE_CONFIG is injected)
+        const windowFirebaseConfig = window.FIREBASE_CONFIG || {};
+
+        if (windowFirebaseConfig.apiKey && typeof firebase !== 'undefined') {
+            try {
+                if (!firebase.apps.length) {
+                    firebase.initializeApp(windowFirebaseConfig);
+                }
+                firebase.auth().onAuthStateChanged(async (user) => {
+                    const loginBtn = document.getElementById('login-btn');
+                    const userProfile = document.getElementById('user-profile');
+                    const userAvatar = document.getElementById('user-avatar');
+                    const userName = document.getElementById('user-name');
+
+                    if (user) {
+                        currentUser = user;
+                        currentUserToken = await user.getIdToken();
+                        if (loginBtn) loginBtn.classList.add('hidden');
+                        if (userProfile) userProfile.classList.remove('hidden');
+                        if (userAvatar) userAvatar.src = user.photoURL || '';
+                        if (userName) userName.textContent = user.displayName || user.email;
+                        console.log('[Auth] Signed in as:', user.email);
+                    } else {
+                        currentUser = null;
+                        currentUserToken = null;
+                        if (loginBtn) loginBtn.classList.remove('hidden');
+                        if (userProfile) userProfile.classList.add('hidden');
+                    }
+                    loadStoryList();
+                });
+            } catch (e) {
+                console.warn('[Firebase Auth] Initialization note:', e);
+            }
+        }
+
+        async function handleGoogleLogin() {
+            if (typeof firebase === 'undefined' || !firebase.apps.length) {
+                alert('Firebase project details missing. Please add your firebaseConfig to index.html or environment!');
+                return;
+            }
+            const provider = new firebase.auth.GoogleAuthProvider();
+            try {
+                await firebase.auth().signInWithPopup(provider);
+            } catch (error) {
+                console.error('[Auth Error] Google Sign-In failed:', error);
+                alert('Sign-In failed: ' + error.message);
+            }
+        }
+
+        async function handleGoogleLogout() {
+            if (typeof firebase !== 'undefined' && firebase.apps.length) {
+                await firebase.auth().signOut();
+                console.log('[Auth] Signed out');
+            }
+        }
+
+        // Helper to fetch with Firebase Bearer Auth Token
+        async function authFetch(url, options = {}) {
+            options.headers = options.headers || {};
+            if (currentUserToken) {
+                options.headers['Authorization'] = `Bearer ${currentUserToken}`;
+            }
+            return fetch(url, options);
+        }
+
         // ===== INIT =====
         // Retry loading story list in case server is still starting
         (async function initStoryList() {
             for (let i = 0; i < 3; i++) {
                 try {
-                    const res = await fetch('/stories');
+                    const res = await authFetch('/stories');
                     if (res.ok) { loadStoryList(); return; }
                 } catch (e) { }
                 await new Promise(r => setTimeout(r, 2000));
