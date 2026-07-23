@@ -1708,11 +1708,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 return;
             }
             const provider = new firebase.auth.GoogleAuthProvider();
+            provider.setCustomParameters({ prompt: 'select_account' });
             try {
                 await firebase.auth().signInWithPopup(provider);
             } catch (error) {
-                console.error('[Auth Error] Google Sign-In failed:', error);
-                alert('Sign-In failed: ' + error.message);
+                console.warn('[Auth Note] Popup sign-in note, trying redirect fallback:', error);
+                try {
+                    await firebase.auth().signInWithRedirect(provider);
+                } catch (err2) {
+                    console.error('[Auth Error] Sign-In failed:', err2);
+                    alert('Sign-In failed: ' + err2.message);
+                }
             }
         }
 
