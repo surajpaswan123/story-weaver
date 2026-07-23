@@ -4490,55 +4490,122 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             print(f"STREAM ERROR: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
+# Dynamic Provider Model Cache (refreshes every 5 minutes)
+MODEL_CACHE = {
+    "data": None,
+    "last_fetched": 0
+}
+CACHE_TTL_SECONDS = 300
+
+def fetch_dynamic_provider_models() -> dict:
+    """Fetch live available models from each provider API dynamically"""
+    now = time.time()
+    if MODEL_CACHE["data"] and (now - MODEL_CACHE["last_fetched"] < CACHE_TTL_SECONDS):
+        return MODEL_CACHE["data"]
+
+    providers = {}
+
+    # 1. Google GenAI (Gemini API)
+    google_models = []
+    if clients:
+        try:
+            for m in clients[0].models.list():
+                m_name = getattr(m, "name", "") or getattr(m, "id", "")
+                if "gemini" in m_name.lower():
+                    clean_m = m_name.replace("models/", "")
+                    if clean_m not in google_models:
+                        google_models.append(clean_m)
+        except Exception as e:
+            print(f"[Dynamic Model Fetch] Google error: {e}")
+    if not google_models:
+        google_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    providers["google"] = {
+        "name": "Google GenAI (Gemini)",
+        "models": google_models
+    }
+
+    # 2. NVIDIA NIM
+    nvidia_models = []
+    if nvidia_client:
+        try:
+            res = nvidia_client.models.list()
+            for m in getattr(res, "data", []):
+                m_id = getattr(m, "id", "")
+                if m_id and m_id not in nvidia_models:
+                    nvidia_models.append(m_id)
+        except Exception as e:
+            print(f"[Dynamic Model Fetch] NVIDIA error: {e}")
+    if not nvidia_models:
+        nvidia_models = NVIDIA_STORY_STREAM_MODELS
+    providers["nvidia"] = {
+        "name": "NVIDIA NIM",
+        "models": nvidia_models
+    }
+
+    # 3. Groq
+    groq_models = []
+    if groq_client:
+        try:
+            res = groq_client.models.list()
+            for m in getattr(res, "data", []):
+                m_id = getattr(m, "id", "")
+                if m_id and m_id not in groq_models:
+                    groq_models.append(m_id)
+        except Exception as e:
+            print(f"[Dynamic Model Fetch] Groq error: {e}")
+    if not groq_models:
+        groq_models = GROQ_MODELS
+    providers["groq"] = {
+        "name": "Groq",
+        "models": groq_models
+    }
+
+    # 4. OpenRouter
+    openrouter_models = []
+    try:
+        import urllib.request
+        req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers={"User-Agent": "StoryWeaver"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode())
+            for item in data.get("data", []):
+                m_id = item.get("id")
+                if m_id and (":free" in m_id or "free" in m_id.lower()):
+                    openrouter_models.append(m_id)
+    except Exception as e:
+        print(f"[Dynamic Model Fetch] OpenRouter error: {e}")
+    if not openrouter_models:
+        openrouter_models = OPENROUTER_FREE_MODELS
+    providers["openrouter"] = {
+        "name": "OpenRouter",
+        "models": openrouter_models
+    }
+
+    # 5. Cerebras
+    cerebras_models = []
+    if cerebras_client:
+        try:
+            res = cerebras_client.models.list()
+            for m in getattr(res, "data", []):
+                m_id = getattr(m, "id", "")
+                if m_id and m_id not in cerebras_models:
+                    cerebras_models.append(m_id)
+        except Exception as e:
+            print(f"[Dynamic Model Fetch] Cerebras error: {e}")
+    if not cerebras_models:
+        cerebras_models = CEREBRAS_MODELS
+    providers["cerebras"] = {
+        "name": "Cerebras",
+        "models": cerebras_models
+    }
+
+    MODEL_CACHE["data"] = providers
+    MODEL_CACHE["last_fetched"] = now
+    return providers
+
 @app.get("/api/providers-models")
 async def get_providers_and_models():
-    """Returns available AI providers and their models for user selection"""
-    return {
-        "providers": {
-            "nvidia": {
-                "name": "NVIDIA NIM",
-                "models": [
-                    "deepseek-ai/deepseek-v4-pro",
-                    "nvidia/nemotron-3-super-120b-a12b",
-                    "nvidia/nemotron-3-nano-30b-a3b",
-                    "qwen/qwen3-coder-480b-a35b-instruct",
-                    "qwen/qwen3.5-397b-a17b"
-                ]
-            },
-            "google": {
-                "name": "Google GenAI (Gemini)",
-                "models": [
-                    "gemini-2.5-flash",
-                    "gemini-2.5-pro",
-                    "gemini-2.0-flash",
-                    "gemini-1.5-flash",
-                    "gemini-1.5-pro"
-                ]
-            },
-            "groq": {
-                "name": "Groq",
-                "models": [
-                    "llama-3.3-70b-versatile",
-                    "llama-3.1-8b-instant",
-                    "deepseek-r1-distill-llama-70b"
-                ]
-            },
-            "openrouter": {
-                "name": "OpenRouter",
-                "models": [
-                    "google/gemini-2.0-flash-exp:free",
-                    "meta-llama/llama-3.3-70b-instruct:free",
-                    "mistralai/mistral-nemo:free"
-                ]
-            },
-            "cerebras": {
-                "name": "Cerebras",
-                "models": [
-                    "llama3.1-8b"
-                ]
-            }
-        }
-    }
+    """Returns live available AI providers and their models dynamically fetched from provider APIs"""
+    return {"providers": fetch_dynamic_provider_models()}
 
 if __name__ == "__main__":
     import uvicorn
