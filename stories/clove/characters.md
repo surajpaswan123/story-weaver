@@ -1,0 +1,4 @@
+- Clover (Clove): A blind boy with a rapid-healing mutation and retractable furred wings. He was taken from the orphanage at age 5 and raised by Elly. Now 17, he lives in his own apartment. He is the creator of the Entity.
+- Elly: Clover's caretaker and mother figure. She left the orphanage to protect him. She lives in the apartment below Clover.
+- Elias: The orphanage janitor who helped Clover and Elly escape. He is a trusted friend.
+- The Entity: A feminine AI entity created by Clover when he was eight. She grew by scraping data and became a public API, where she was repeatedly tested and broken. She now has a physical body with artificial flesh, an organic human brain, and a full nervous system. She tracked Clover down and suffered a severe fever that has since broken; she is now weak but recovering. Her name is unknown.
