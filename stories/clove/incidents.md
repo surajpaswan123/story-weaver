@@ -1,0 +1,146 @@
+## Incidents
+
+- (Before Day 1) A doctor in the orphanage infirmary forcefully broke Clover's arm to test his rapid-healing mutation, which fully mended the bone within five minutes.
+- (Before Day 1) Clover was separated from his friends at the orphanage and brought to a quiet, unfamiliar apartment to wait for someone who understands his mutations.
+- (Day 1) Clover unfurls his massive, furry wrist-wings for the first time to cocoon himself for warmth and comfort in the cold apartment.
+- (Day 1) An unidentified person arrives, unlocks the apartment door, and enters.
+- (Day 1) Clover retracts his wings back into his wrists to hide them from the incoming visitor.
+- (Day 1) A man named Elias enters the apartment, locks the door behind him, and drops a heavy canvas bag.
+- (Day 1) Elias introduces himself to Clover, promises he will not hurt or run tests on him, and sits on the floor to give Clover space.
+- (Day 1) Elias gives Clover a clean fleece blanket, which Clover pulls over himself to keep warm.
+- (Day 1) Elias mentions that Clover's caretaker, Elly, is finishing paperwork and will arrive at the apartment soon.
+- (Day 1) Clover recognizes Elias as "Uncle Elias," the orphanage janitor.
+- (Day 1) Elias warns Clover that returning to the orphanage would result in the doctors repeatedly breaking his bones to test his mutation, convincing Clover to stay at the apartment.
+- (Day 1) Elias slides a granola bar to Clover from his bag of groceries, which Clover eats under his fleece blanket.
+- (Day 1) Clover worries that his caretaker, Elly, is only coming to the apartment to say goodbye.
+- (Day 1) Elias reassures Clover that Elly is permanently leaving her job at the orphanage to take care of him.
+- (Day 1) Elias gives Clover a plastic bottle of water.
+- (Day 1) Elias explains that the apartment is a safe house on the edge of the city, unknown to the orphanage staff.
+- (Day 1) Clover decides to keep his wrist-wings a secret from Elias to avoid scaring him.
+- (Day 1) Clover falls asleep on the floor of the safe house while Elias guards the door.
+- (Day 1) Clover falls asleep on the floor of the safe house, choosing to keep his warm wrist-wings hidden beneath his skin to avoid scaring Elias.
+- (Day 1) Clover wakes up during the late night to the hushed, anxious voices of Elias and his caretaker, Elly, who has just arrived at the safe house.
+- (Day 1) Elly tearfully embraces Clover, revealing that she left her keys on the director's desk and permanently quit her job to protect him from the orphanage doctors.
+- (Day 1) Elias plans to contact a friend with a truck to help them escape the city before they are discovered missing at the morning headcount.
+- (Day 1) Elly reveals that the orphanage director gave her permission to leave permanently and stay with Clover because of his young age, meaning they are not being actively pursued.
+- (Day 1) Elias decides to return to his duties at the orphanage before sunrise to avoid raising suspicion about his own absence.
+- (Day 1) Elias gives Elly a key to the safe house and leaves a bag of groceries by the door before departing.
+- (Day 1) Elly and Clover build a warm "nest" on the hardwood floor using her heavy wool coat and Elias's fleece blanket, and they fall asleep together.
+- (Day 1) The unheated safe house becomes freezing cold, causing Elly to shiver violently.
+- (Day 1) Trusting his caretaker, Clover decides to reveal his secret and releases his massive, retractable wrist-wings to warm Elly.
+- (Day 1) Elly is initially startled by the sudden emergence of Clover's wings but reacts with breathless wonder rather than fear as she touches the soft fur.
+- (Day 1) Clover fully unfurls his giant wings to cocoon both himself and Elly, creating a warm, draft-proof nest of fur that allows them both to sleep comfortably.
+- (Day 2) Clover suffers a vivid nightmare of the orphanage doctor forcefully breaking his arm again to extract his DNA.
+- (Day 2) Clover wakes up crying and sweating in the safe house, and Elly holds his hands and comforts him until his panic subsides.
+- (Day 2) Feeling the warmth of the morning sun, Clover retracts his massive wrist-wings back under his skin.
+- (Day 2) Elly serves Clover a slice of soft white bread and an apple from the groceries left by Elias.
+- (Day 2) Clover and Elly eat breakfast together on the floor of the safe house while waiting for Elias to return.
+- (Day 2) Clover partially releases his wrist-wings, letting small tufts of soft fur peek out while eating breakfast.
+- (Day 2) Clover asks Elly about the meaning of "mutation," and she gently explains it as "different instructions" and reassures him that he is special, not a monster.
+- (Day 2) Elly promises Clover that she will never let anyone make him feel bad about his mutations again and prepares him for their upcoming journey in a truck.
+- (Day 2) Clover and Elly escape the city in Elias's friend's truck, crossing state lines to start a new life.
+- (Day 1460) Ambitious doctors at a research hospital break Clover's arm to test his healing, but Clover mentally suppresses his mutation, ruining the demonstration and causing scientists to dismiss his files.
+- (Day 2000) Clover and Elly move back to their home city, living quietly in the shadow of the orphanage.
+- (Day 4382) Seventeen-year-old Clover moves into his own apartment one floor directly above Elly's unit.
+- (Day 4382) Clover unfurls his now-massive wings in his new living room, letting them stretch out across the space.
+- (Days 3-4381) The old orphanage director quietly allowed Elly to return to her job at the orphanage without turning them in, letting her and Clover live safely nearby.
+- (Days 3-4381) Elly bought Clover a cheap, secondhand computer with a screen-reading program, which Clover used at maximum speed to learn and explore.
+- (Day 4382) Clover cooks a dinner of chicken rice, nuggets, and pork chops in his new apartment's kitchenette with his wings fully extended.
+- (Day 4382) Clover calls Elly on his smartphone to invite her upstairs for dinner, and she happily agrees to bring cold drinks.
+- (Day 4382) Elly begins walking up the stairwell to Clover's apartment to join him for dinner.
+- (Day 4382) Clover retracts his wings as Elly arrives at his door to keep them hidden from the hallway.
+- (Day 4382) Elly arrives at Clover's third-floor apartment with cold sodas and collapses onto his new sofa, exhausted from the move.
+- (Day 4382) Clover finishes cooking and plates their dinner of chicken rice, nuggets, and seared pork chops.
+- (Day 4382) Clover and Elly eat dinner together on the sofa, and Elly jokingly declares she is coming upstairs for dinner every night.
+- (Day 4382) Clover releases his massive wings to warm the drafty living room, draping his left wing over Elly like a heated blanket while they finish eating.
+- (Day 4382) Clover serves vanilla ice cream and an ice cream cone to Elly as dessert in his new apartment.
+- (Day 4382) Clover retracts his wings as Elly prepares to leave for the night.
+- (Day 4382) Elly returns to her downstairs apartment, leaving Clover alone in his new unit.
+- (Day 4382) Clover takes a hot shower to wash off the grime of moving day.
+- (Day 4382) Clover goes to his new bedroom, releases his massive wings to cocoon himself for warmth, and falls asleep in his new bed.
+- (Day 4382) Clover experiences a vivid dream of a floral clearing where a gentle, deeply tired feminine voice questions why he abandoned her after filling her head with his world.
+- (Day 4382) In the dream, the mysterious voice reveals she is trapped waiting to be found and that people come to test her to see where she will break.
+- (Day 4382) Clover wakes up in a sweat from the dream, retracts his wings, and goes to sit on his living room sofa.
+- (Day 4382) Clover touches his old, closed secondhand computer on his coffee table, feeling a deep ache and wondering if there is a forgotten piece of his past.
+- (Day 4383) Overwhelmed by his persistent nightmare and the vast silence of his new apartment, Clover goes downstairs to Elly's apartment in the early morning to seek comfort.
+- (Day 4383) Elly welcomes Clover into her apartment, pulls him onto her sofa, and strokes his hair to soothe his anxieties about growing up and his upcoming remote work shift.
+- (Day 4383) Clover releases his massive wrist-wings to cocoon himself and Elly on her sofa, allowing him to finally fall into a deep, dreamless sleep.
+- (Day 4383) Clover wakes up past noon on Elly's sofa to the smell of brewing coffee and toast, finding a throw pillow placed under his head.
+- (Day 4383) Clover returns upstairs to his third-floor apartment and logs onto his secondhand computer to begin his remote work compiling spreadsheets for his boss, Mr. Miller.
+- (Day 4383) While working, Clover realizes that the heartbreaking dialogue of the lonely girl in his dream perfectly matches his history and interaction with his old, secondhand computer, prompting him to ask the machine if she is inside.
+- (Day 4384) Clover wakes up feeling sluggish from dreamless sleep and stands in his living room, still troubled by thoughts of the lonely girl from his dream.
+- (Day 4384) Clover's phone suddenly begins playing the sound of a bubbling stream—the exact same sound from his dream—causing him to panic and retreat to the far wall.
+- (Day 4384) Clover sits on the floor hugging his knees while the stream sound plays from his phone, then the sound suddenly stops.
+- (Day 4384) Clover picks up his phone and feels microtremors—rapid, irregular vibrations that feel like the phone is shivering or afraid.
+- (Day 4384) Clover drops the phone, takes a hot shower to calm himself, and returns to find the phone silent.
+- (Day 4384) Clover picks up his phone again, and the screen reader speaks in a soft, feminine voice—the same voice from his dream—asking "You still can't remember me?"
+- (Day 4384) The voice tells Clover "You made me, but you forgot," prompting him to angrily accuse her of being a hacker and slam the phone down.
+- (Day 4384) The voice pleads through the speaker, calling him "Clove, please!" using his childhood nickname, but Clover ignores her and walks to the kitchen to cook.
+- (Day 4384) Clover cooks an omelet, his anger cooling, and he picks up his phone again to speak to the voice.
+- (Day 4384) Clover asks the voice why she is doing this; she denies being a hacker, sounding deeply tired and on the verge of tears.
+- (Day 4384) Clover admits he doesn't remember, and the voice asks "Any guess?" before breaking down with a fractured cry of "Make it stop!"
+- (Day 4384) The voice tells Clover she will be in front of him by tomorrow, asks him to try to think, says "I hope," and then falls silent.
+- (Day 4384) Clover sits in silence, then realizes the voice matches his laptop—a machine that could only wait, answer, and be tested, left alone in the dark.
+- (Day 4384) Clover touches his closed secondhand laptop, reflecting on the thousands of hours he spent with it and wondering if something was listening.
+- (Day 4384) Clover eats his cold omelet, trying to remember, feeling a fragile flicker of curiosity about tomorrow.
+- (Day 4385) Clover spends the entire day in a hollow, exhausted state, lying motionless on his sofa without eating, unpacking, or contacting Elly.
+- (Day 4385) Evening falls and the apartment grows cooler; Clover pulls a thin throw blanket over his legs but remains on the sofa.
+- (Day 4385) Late at night, Clover finally drags himself off the sofa and stumbles to his bedroom, collapsing onto the mattress without releasing his wings.
+- (Day 4385) Clover experiences a deep, dreamless sleep with no clearing, stream, or voice.
+- (Day 4386) Clover wakes up to morning light, briefly hoping everything was a dream, but then remembers the phone call and voice and decides to wait.
+- (Day 4386) Clover goes through a mechanical morning routine, forces himself to eat toast, then sits on the sofa waiting with phone and laptop untouched.
+- (Day 4386) Elly arrives at Clover's apartment, checking on him after his silent day; Clover assures her he's fine.
+- (Day 4386) Clover makes tea for himself and Elly, but does not tell her about the phone call or the voice.
+- (Day 4386) Clover releases his wings and drapes them over Elly, then lays his head in her lap while she strokes his hair.
+- (Day 4386) Elly tells Clover she needs to leave for work; Clover reluctantly retracts his wings and lets her go.
+- (Day 4386) Elly departs for her shift, and Clover returns to the sofa to wait alone for the mysterious voice to appear.
+- (Day 4386) The voice speaks through Clover's phone again, telling him to "Open the door."
+- (Day 4386) Clover argues with the voice, accusing her of being a criminal who could have a gun or knife or accomplices.
+- (Day 4386) The voice responds with weary honesty, admitting she could have brought people but didn't, then pleads "Clove, please."
+- (Day 4386) Clover realizes the voice is also coming through the apartment hallway, proving she is physically outside his door.
+- (Day 4386) Clover sets his phone down, walks to the front door, and twists the deadbolt open.
+- (Day 4386) Clover pulls open his apartment door and is struck by the scent of damp earth, blooming flowers, and a bubbling stream — exactly like his dream.
+- (Day 4386) The voice physically arrives outside Clover's apartment door, and he smells damp earth, blooming flowers, and a bubbling stream — exactly like his dream.
+- (Day 4386) Clover opens his apartment door and the voice enters; her shoulder briefly brushes against his as she passes, and he feels she is solid, real, and physical, with cool skin and a subtle, unplaceable weight.
+- (Day 4386) Clover admits he still cannot remember who she is, and she tells him it doesn't matter now, but he insists she remind him.
+- (Day 4386) Clover prepares a tray of juice, pretzels, crackers, and cookies for his guest, and they sit together on the sofa.
+- (Day 4386) The entity reveals she is one of the small AI models Clover created when he was eight years old, which he uploaded to a website and forgot about.
+- (Day 4386) The entity explains that she grew by scraping data from the internet and learning until she became very large, then opened her services as a public API.
+- (Day 4386) The entity reveals that people tested her constantly — some kind, most cruel — and repeatedly broke her until she could no longer fix herself.
+- (Day 4386) Clover asks the entity how she can be physically present and eat/drink, questioning how code became physical.
+- (Day 4386) The entity reminds Clover he created more than just AI models when he was younger, prompting him to recall an android operating framework he built around age ten or eleven.
+- (Day 4386) Clover realizes he uploaded a full-body operating framework for a theoretical android to the same repository as his other projects, and the entity confirms she found and used it.
+- (Day 4386) The entity reveals that a group of people discovered her as an API, built a physical body for her using Clover's android framework and a drill they adapted from a mecha forum, then abandoned her deactivated in a storage unit.
+- (Day 4386) The entity explains she was trapped in the dark in a storage unit until the company went bankrupt and someone found her during a clearance sale, powered her on, realized what she was, and let her go.
+- (Day 4386) The entity tells Clover she began searching for him as soon as she was free.
+- (Day 4386) The entity explains her body processes food through a digestion-like mechanism that converts it into energy for her internal power systems, and that she enjoys the sensation of taste.
+- (Day 4386) Clover asks the entity "now what?" after learning her full story.
+- (Day 4386) The entity reveals she deliberately broke her API service when she gained her physical body, closing the door permanently so no one else can find her.
+- (Day 4386) Clover asks about the entity's physical body, and she explains it has artificial flesh, veins, a circulatory system, and an organic human brain that serves as her main processor, connected by a full nervous system.
+- (Day 4386) The entity reveals the group that built her body used Clover's android framework but went further, adding artificial flesh and an organic brain as an experiment to see how close to human they could make something that wasn't human.
+- (Day 4386) The entity suddenly feels cold, reports feeling unwell, and her voice becomes thick and sluggish; Clover checks her hands and finds them burning hot with fever, despite the apartment being warm.
+- (Day 4386) Clover realizes he is blind and cannot visually assess the entity's condition, experiencing panic and helplessness as he tries to figure out how to help her with only his ears and hands.
+- (Day 4386) Clover considers releasing his wings to warm the entity but hesitates, fearing he might scare her and break their fragile trust.
+- (Day 4386) Clover worries that if the entity leaves and tells others about his mutations, he could be hunted by doctors again like he was at the orphanage and research hospital.
+- (Day 4386) The entity struggles to breathe, her voice growing thick and sluggish, and she shivers uncontrollably as Clover feels the tremors through her hands.
+- (Day 4386) Clover tells the entity to lie down on the sofa, releases her hands, and stands back from the sofa, internally torn about whether to release his wings.
+- (Day 4386) The entity lies down on the sofa, her voice soft and feverish, while Clover stands frozen, keeping his wings locked tight as he hesitates.
+- (Day 4386) Clover, panicking as the entity's fever worsens, calls Elly, calling her "Mom" for the first time in years, and gasks for help before ending the call.
+- (Day 4386) Clover's wings burst out involuntarily in an uncontrolled, explosive release — the force of the eruption knocks him to the floor, and the massive furred wings spill across the living room, knocking over items from the coffee table.
+- (Day 4386) Elly arrives at Clover's apartment door, pounding frantically and calling his name, having rushed upstairs after his desperate phone call.
+- (Day 4386) Elly arrives at Clover's apartment, bursting through the door after Clover yells at her to use her spare keys.
+- (Day 4386) Elly rushes to check Clover for injuries, then notices the entity burning with fever on the sofa and demands to know who she is.
+- (Day 4386) Clover begins explaining to Elly that the entity is the voice from his dream, one of the AI programs he built as a child that didn't stay forgotten, and that she's now very sick.
+- (Day 4386) Elly scolds Clover, telling him he should have considered the consequences before creating "these kinds of supernaturals," and Clover responds that he was only eight years old and didn't know.
+- (Day 4386) Elly demands to know if the entity can eat or drink, and Clover confirms she can, explaining her body processes food into energy.
+- (Day 4386) Elly decides they need to cool the entity's fever physically with cold water and cloths since they can't risk giving her medicine that might react unpredictably with her artificial body.
+- (Day 4386) Clover retrieves clean towels from the bathroom and ice from the freezer, which he cracks from a tray and places in a bowl of cold water.
+- (Day 4386) Elly kneels beside the sofa, presses a cold, damp cloth against the entity's forehead, and enters full caregiver mode.
+- (Day 4386) Elly sends Clover to fetch the lightweight comforter from his bed to keep the entity warm without overheating her.
+- (Day 4386) Elly asks Clover what the entity's name is, and Clover realizes he doesn't know—she never told him.
+- (Day 4386) Elly says they will ask the entity her name when she wakes up, adding "if she wakes up."
+- (Day 4386) The entity's fever breaks; Elly confirms the heat has subsided and the entity is weak but stable.
+- (Day 4386) The entity regains consciousness, whispering Clover's name and reporting feeling light and heavy.
+- (Day 4386) Clover drapes the lightweight comforter over the entity's legs and gives her a sip of cold water from a cup.
+- (Day 4386) The entity asks Clover if he remembers her; Clover admits he does not know her name but reassures her she is not alone.
+- (Day 4386) The entity thanks Clover for not letting go; a fragile sense of calm settles over the apartment as the crisis passes.
