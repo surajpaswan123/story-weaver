@@ -4497,23 +4497,45 @@ async def get_providers_and_models():
         "providers": {
             "nvidia": {
                 "name": "NVIDIA NIM",
-                "models": NVIDIA_STORY_STREAM_MODELS
+                "models": [
+                    "deepseek-ai/deepseek-v4-pro",
+                    "nvidia/nemotron-3-super-120b-a12b",
+                    "nvidia/nemotron-3-nano-30b-a3b",
+                    "qwen/qwen3-coder-480b-a35b-instruct",
+                    "qwen/qwen3.5-397b-a17b"
+                ]
             },
             "google": {
-                "name": "Google GenAI",
-                "models": NOKEY_STORY_MODELS
+                "name": "Google GenAI (Gemini)",
+                "models": [
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-2.0-flash",
+                    "gemini-1.5-flash",
+                    "gemini-1.5-pro"
+                ]
             },
             "groq": {
                 "name": "Groq",
-                "models": GROQ_MODELS
+                "models": [
+                    "llama-3.3-70b-versatile",
+                    "llama-3.1-8b-instant",
+                    "deepseek-r1-distill-llama-70b"
+                ]
             },
             "openrouter": {
                 "name": "OpenRouter",
-                "models": OPENROUTER_FREE_MODELS
+                "models": [
+                    "google/gemini-2.0-flash-exp:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "mistralai/mistral-nemo:free"
+                ]
             },
             "cerebras": {
                 "name": "Cerebras",
-                "models": CEREBRAS_MODELS
+                "models": [
+                    "llama3.1-8b"
+                ]
             }
         }
     }
