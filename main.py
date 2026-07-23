@@ -4498,7 +4498,7 @@ MODEL_CACHE = {
 CACHE_TTL_SECONDS = 300
 
 def fetch_dynamic_provider_models() -> dict:
-    """Fetch live available models from each provider API dynamically"""
+    """Fetch live available models from each provider API dynamically using available keys"""
     now = time.time()
     if MODEL_CACHE["data"] and (now - MODEL_CACHE["last_fetched"] < CACHE_TTL_SECONDS):
         return MODEL_CACHE["data"]
@@ -4507,9 +4507,27 @@ def fetch_dynamic_provider_models() -> dict:
 
     # 1. Google GenAI (Gemini API)
     google_models = []
-    if clients:
+    g_keys = []
+    api_keys_file = os.path.join(BASE_DIR, "API keys.txt")
+    if os.path.exists(api_keys_file):
         try:
-            for m in clients[0].models.list():
+            with open(api_keys_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    k = line.strip()
+                    if k and not k.startswith("#"):
+                        g_keys.append(k)
+        except Exception:
+            pass
+    for env_k in ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"]:
+        val = os.getenv(env_k)
+        if val and val not in g_keys:
+            g_keys.append(val)
+
+    if g_keys:
+        try:
+            from google import genai
+            g_client = genai.Client(api_key=g_keys[0])
+            for m in g_client.models.list():
                 m_name = getattr(m, "name", "") or getattr(m, "id", "")
                 if "gemini" in m_name.lower():
                     clean_m = m_name.replace("models/", "")
@@ -4517,8 +4535,12 @@ def fetch_dynamic_provider_models() -> dict:
                         google_models.append(clean_m)
         except Exception as e:
             print(f"[Dynamic Model Fetch] Google error: {e}")
+
     if not google_models:
-        google_models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        google_models = [
+            "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview",
+            "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"
+        ]
     providers["google"] = {
         "name": "Google GenAI (Gemini)",
         "models": google_models
@@ -4526,17 +4548,23 @@ def fetch_dynamic_provider_models() -> dict:
 
     # 2. NVIDIA NIM
     nvidia_models = []
-    if nvidia_client:
+    nv_k = os.getenv("NVIDIA_API_KEY") or os.getenv("NVAPI_KEY") or os.getenv("NIM_API_KEY")
+    if nv_k:
         try:
-            res = nvidia_client.models.list()
-            for m in getattr(res, "data", []):
+            from openai import OpenAI
+            nv_client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=nv_k)
+            for m in nv_client.models.list().data:
                 m_id = getattr(m, "id", "")
                 if m_id and m_id not in nvidia_models:
                     nvidia_models.append(m_id)
         except Exception as e:
             print(f"[Dynamic Model Fetch] NVIDIA error: {e}")
     if not nvidia_models:
-        nvidia_models = NVIDIA_STORY_STREAM_MODELS
+        nvidia_models = [
+            "deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3-nano-30b-a3b", "qwen/qwen3.5-397b-a17b",
+            "meta/llama-3.3-70b-instruct", "google/gemma-4-31b-it"
+        ]
     providers["nvidia"] = {
         "name": "NVIDIA NIM",
         "models": nvidia_models
@@ -4544,17 +4572,22 @@ def fetch_dynamic_provider_models() -> dict:
 
     # 3. Groq
     groq_models = []
-    if groq_client:
+    gq_k = os.getenv("GROQ_API_KEY")
+    if gq_k:
         try:
-            res = groq_client.models.list()
-            for m in getattr(res, "data", []):
+            from openai import OpenAI
+            gq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=gq_k)
+            for m in gq_client.models.list().data:
                 m_id = getattr(m, "id", "")
                 if m_id and m_id not in groq_models:
                     groq_models.append(m_id)
         except Exception as e:
             print(f"[Dynamic Model Fetch] Groq error: {e}")
     if not groq_models:
-        groq_models = GROQ_MODELS
+        groq_models = [
+            "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+            "qwen/qwen3.6-27b", "openai/gpt-oss-120b"
+        ]
     providers["groq"] = {
         "name": "Groq",
         "models": groq_models
@@ -4574,7 +4607,10 @@ def fetch_dynamic_provider_models() -> dict:
     except Exception as e:
         print(f"[Dynamic Model Fetch] OpenRouter error: {e}")
     if not openrouter_models:
-        openrouter_models = OPENROUTER_FREE_MODELS
+        openrouter_models = [
+            "openrouter/free", "google/gemma-4-31b-it:free",
+            "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-nano-30b-a3b:free"
+        ]
     providers["openrouter"] = {
         "name": "OpenRouter",
         "models": openrouter_models
@@ -4582,17 +4618,19 @@ def fetch_dynamic_provider_models() -> dict:
 
     # 5. Cerebras
     cerebras_models = []
-    if cerebras_client:
+    cb_k = os.getenv("CEREBRAS_API_KEY")
+    if cb_k:
         try:
-            res = cerebras_client.models.list()
-            for m in getattr(res, "data", []):
+            from openai import OpenAI
+            cb_client = OpenAI(base_url="https://api.cerebras.ai/v1", api_key=cb_k)
+            for m in cb_client.models.list().data:
                 m_id = getattr(m, "id", "")
                 if m_id and m_id not in cerebras_models:
                     cerebras_models.append(m_id)
         except Exception as e:
             print(f"[Dynamic Model Fetch] Cerebras error: {e}")
     if not cerebras_models:
-        cerebras_models = CEREBRAS_MODELS
+        cerebras_models = ["gemma-4-31b", "gpt-oss-120b", "zai-glm-4.7"]
     providers["cerebras"] = {
         "name": "Cerebras",
         "models": cerebras_models
