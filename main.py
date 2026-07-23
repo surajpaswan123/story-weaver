@@ -733,6 +733,8 @@ class StoryInput(BaseModel):
     user_input: str
     story_id: str
     skip_rules_check: bool = False
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 import re
 def sanitize_id(name: str) -> str:
@@ -4488,7 +4490,33 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             print(f"STREAM ERROR: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+@app.get("/api/providers-models")
+async def get_providers_and_models():
+    """Returns available AI providers and their models for user selection"""
+    return {
+        "providers": {
+            "nvidia": {
+                "name": "NVIDIA NIM",
+                "models": NVIDIA_STORY_STREAM_MODELS
+            },
+            "google": {
+                "name": "Google GenAI",
+                "models": NOKEY_STORY_MODELS
+            },
+            "groq": {
+                "name": "Groq",
+                "models": GROQ_MODELS
+            },
+            "openrouter": {
+                "name": "OpenRouter",
+                "models": OPENROUTER_FREE_MODELS
+            },
+            "cerebras": {
+                "name": "Cerebras",
+                "models": CEREBRAS_MODELS
+            }
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
