@@ -1604,8 +1604,16 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let currentUserToken = null;
         let currentUser = null;
 
-        // Firebase Config helper (Loads config if window.FIREBASE_CONFIG is injected)
-        const windowFirebaseConfig = window.FIREBASE_CONFIG || {};
+        // Firebase Config helper
+        const windowFirebaseConfig = window.FIREBASE_CONFIG || {
+            apiKey: "AIzaSyBWmH6_XSn576HKCxPvZg60MyAep72uqWw",
+            authDomain: "story-weaver488.firebaseapp.com",
+            projectId: "story-weaver488",
+            storageBucket: "story-weaver488.firebasestorage.app",
+            messagingSenderId: "544914780483",
+            appId: "1:544914780483:web:a895c44b89cc59208dbff6",
+            measurementId: "G-14YN33YVFV"
+        };
 
         if (windowFirebaseConfig.apiKey && typeof firebase !== 'undefined') {
             try {
