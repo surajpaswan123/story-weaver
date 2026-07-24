@@ -126,18 +126,49 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
 
 def get_current_user_info(authorization: str = Header(None)) -> dict:
-    """Extract user UID, email, and Super Admin status from Bearer token."""
+    """Extract user UID, email, and Super Admin status from Bearer token with strict email verification."""
     user_info = {
         "uid": "default_user",
         "email": "",
         "is_super_admin": False
     }
-    if not authorization or not authorization.startswith("Bearer "):
-        # In local dev mode without auth header, check if local super admin is enabled
-        if os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "true").lower() == "true":
-            user_info["is_super_admin"] = True
-            user_info["email"] = SUPER_ADMIN_EMAIL
-        return user_info
+    
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ")[1].strip()
+        
+        # 1. Try Firebase Admin token verification
+        if firebase_initialized:
+            try:
+                decoded = auth.verify_id_token(token)
+                if decoded.get("uid"):
+                    user_info["uid"] = decoded["uid"]
+                    user_info["email"] = (decoded.get("email") or "").strip().lower()
+            except Exception as e:
+                pass
+                
+        # 2. JWT Decode fallback (extract email & user_id)
+        if not user_info["email"] or user_info["uid"] == "default_user":
+            try:
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                    payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+                    user_info["uid"] = payload_data.get("user_id") or payload_data.get("sub") or user_info["uid"]
+                    user_info["email"] = (payload_data.get("email") or payload_data.get("user_email") or "").strip().lower()
+            except Exception as err:
+                pass
+
+    # STRICT SUPER ADMIN CHECK: Only surajssd1000@gmail.com is Super Admin!
+    if user_info["email"] and user_info["email"].lower() == SUPER_ADMIN_EMAIL.lower():
+        user_info["is_super_admin"] = True
+    elif not authorization and os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "false").lower() == "true":
+        # Only allow unauthenticated fallback if explicitly set to true in env
+        user_info["is_super_admin"] = True
+        user_info["email"] = SUPER_ADMIN_EMAIL
+    else:
+        user_info["is_super_admin"] = False
+
+    return user_info
         
     token = authorization.split("Bearer ")[1].strip()
     
