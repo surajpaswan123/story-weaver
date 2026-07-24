@@ -11,12 +11,60 @@
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+async function populatePipelineModelDropdowns() {
+    try {
+        const res = await authFetch('/api/providers-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const providers = data.providers || {};
+        
+        let allModels = [];
+        for (const pKey in providers) {
+            const p = providers[pKey];
+            if (p.models && Array.isArray(p.models)) {
+                p.models.forEach(m => {
+                    if (!allModels.includes(m)) allModels.push(m);
+                });
+            }
+        }
+
+        const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
+        ids.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const currentVal = sel.dataset.val || sel.value || '';
+            sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
+            
+            allModels.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            if (currentVal && !allModels.includes(currentVal)) {
+                const opt = document.createElement('option');
+                opt.value = currentVal;
+                opt.textContent = `${currentVal} (Custom)`;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (e) {
+        console.warn('Failed to populate pipeline model dropdowns:', e);
+    }
+}
+
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
         renderUserSettingsUI();
+        await populatePipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -55,10 +103,10 @@ function renderUserSettingsUI() {
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
 
-    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
-    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
-    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
-    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
+    if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
+    if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
+    if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
+    if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
 }
 
 function toggleSettingsModal() {
@@ -193,12 +241,60 @@ let logsPollingInterval = null;
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+async function populatePipelineModelDropdowns() {
+    try {
+        const res = await authFetch('/api/providers-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const providers = data.providers || {};
+        
+        let allModels = [];
+        for (const pKey in providers) {
+            const p = providers[pKey];
+            if (p.models && Array.isArray(p.models)) {
+                p.models.forEach(m => {
+                    if (!allModels.includes(m)) allModels.push(m);
+                });
+            }
+        }
+
+        const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
+        ids.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const currentVal = sel.dataset.val || sel.value || '';
+            sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
+            
+            allModels.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            if (currentVal && !allModels.includes(currentVal)) {
+                const opt = document.createElement('option');
+                opt.value = currentVal;
+                opt.textContent = `${currentVal} (Custom)`;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (e) {
+        console.warn('Failed to populate pipeline model dropdowns:', e);
+    }
+}
+
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
         renderUserSettingsUI();
+        await populatePipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -237,10 +333,10 @@ function renderUserSettingsUI() {
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
 
-    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
-    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
-    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
-    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
+    if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
+    if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
+    if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
+    if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
 }
 
 function toggleSettingsModal() {
@@ -374,12 +470,60 @@ let logsPollingInterval = null;
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+async function populatePipelineModelDropdowns() {
+    try {
+        const res = await authFetch('/api/providers-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const providers = data.providers || {};
+        
+        let allModels = [];
+        for (const pKey in providers) {
+            const p = providers[pKey];
+            if (p.models && Array.isArray(p.models)) {
+                p.models.forEach(m => {
+                    if (!allModels.includes(m)) allModels.push(m);
+                });
+            }
+        }
+
+        const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
+        ids.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const currentVal = sel.dataset.val || sel.value || '';
+            sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
+            
+            allModels.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            if (currentVal && !allModels.includes(currentVal)) {
+                const opt = document.createElement('option');
+                opt.value = currentVal;
+                opt.textContent = `${currentVal} (Custom)`;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (e) {
+        console.warn('Failed to populate pipeline model dropdowns:', e);
+    }
+}
+
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
         renderUserSettingsUI();
+        await populatePipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -418,10 +562,10 @@ function renderUserSettingsUI() {
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
 
-    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
-    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
-    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
-    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
+    if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
+    if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
+    if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
+    if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
 }
 
 function toggleSettingsModal() {
@@ -555,12 +699,60 @@ let logsPollingInterval = null;
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+async function populatePipelineModelDropdowns() {
+    try {
+        const res = await authFetch('/api/providers-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const providers = data.providers || {};
+        
+        let allModels = [];
+        for (const pKey in providers) {
+            const p = providers[pKey];
+            if (p.models && Array.isArray(p.models)) {
+                p.models.forEach(m => {
+                    if (!allModels.includes(m)) allModels.push(m);
+                });
+            }
+        }
+
+        const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
+        ids.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const currentVal = sel.dataset.val || sel.value || '';
+            sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
+            
+            allModels.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            if (currentVal && !allModels.includes(currentVal)) {
+                const opt = document.createElement('option');
+                opt.value = currentVal;
+                opt.textContent = `${currentVal} (Custom)`;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (e) {
+        console.warn('Failed to populate pipeline model dropdowns:', e);
+    }
+}
+
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
         renderUserSettingsUI();
+        await populatePipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -599,10 +791,10 @@ function renderUserSettingsUI() {
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
 
-    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
-    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
-    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
-    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
+    if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
+    if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
+    if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
+    if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
 }
 
 function toggleSettingsModal() {
@@ -2605,12 +2797,60 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+async function populatePipelineModelDropdowns() {
+    try {
+        const res = await authFetch('/api/providers-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const providers = data.providers || {};
+        
+        let allModels = [];
+        for (const pKey in providers) {
+            const p = providers[pKey];
+            if (p.models && Array.isArray(p.models)) {
+                p.models.forEach(m => {
+                    if (!allModels.includes(m)) allModels.push(m);
+                });
+            }
+        }
+
+        const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
+        ids.forEach(id => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const currentVal = sel.dataset.val || sel.value || '';
+            sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
+            
+            allModels.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            if (currentVal && !allModels.includes(currentVal)) {
+                const opt = document.createElement('option');
+                opt.value = currentVal;
+                opt.textContent = `${currentVal} (Custom)`;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (e) {
+        console.warn('Failed to populate pipeline model dropdowns:', e);
+    }
+}
+
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
         renderUserSettingsUI();
+        await populatePipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -2649,10 +2889,10 @@ function renderUserSettingsUI() {
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
 
-    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
-    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
-    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
-    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
+    if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
+    if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
+    if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
+    if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
 }
 
 function toggleSettingsModal() {
