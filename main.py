@@ -722,6 +722,33 @@ HIGH_THINKING_MODELS = {
 }
 HIGH_THINKING_BUDGET = -1  # -1 = dynamic thinking: let the model decide how long to think, no fixed cap
 
+
+def is_audio_capable_model(model_name: str, model_info: dict = None) -> bool:
+    """Dynamic Audio Capability Resolver:
+    1. Checks API metadata modalities (e.g. OpenRouter/OpenAI 'modalities' field).
+    2. Checks model ID against dynamic audio/multimodal keyword patterns.
+    3. Handles future audio models (e.g. gemini, gpt-4o, omni, whisper, speech, audio)."""
+    if not model_name:
+        return False
+
+    name = str(model_name).lower().strip()
+
+    # 1. API Metadata Modality Check if provided
+    if model_info and isinstance(model_info, dict):
+        modalities = model_info.get("modalities") or model_info.get("architecture", {}).get("modality") or []
+        if isinstance(modalities, list) and ("audio" in modalities or any("audio" in str(m).lower() for m in modalities)):
+            return True
+        if isinstance(modalities, str) and "audio" in modalities.lower():
+            return True
+
+    # 2. Dynamic Keyword Pattern Check for Audio / Multimodal
+    audio_keywords = [
+        "audio", "speech", "voic", "sound", "listen", "whisper",
+        "omni", "realtime", "multimodal", "gemini", "gpt-4o", "gpt-5", "qwen-audio"
+    ]
+    return any(kw in name for kw in audio_keywords)
+
+
 def is_thinking_model(model: str) -> bool:
     """Check if a model supports thinking - :search variants of pro models can think too."""
     base_model = model.replace(":search", "")
