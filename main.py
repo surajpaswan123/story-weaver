@@ -1743,7 +1743,7 @@ What inventory changes occurred? Return JSON array only."""
         changes = json.loads(json_text)
         
         if not changes or not isinstance(changes, list):
-            print(f"  [INVENTORY] No changes detected ✓")
+            print(f"  [INVENTORY] No changes detected [OK]")
             return
         
         print(f"  [INVENTORY] {len(changes)} change(s) detected!")
@@ -1963,7 +1963,7 @@ def verify_reference_files(story_id: str):
 
         # Check for no changes needed
         if "NO_CHANGES_NEEDED" in result or "no_changes_needed" in result.lower()[:50]:
-            print(f"  [VERIFY] {filename} is accurate ✓")
+            print(f"  [VERIFY] {filename} is accurate [OK]")
             return True
 
         # Try to parse as JSON diff patches
@@ -3876,7 +3876,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
 
     rules_reminder = ""
     if rules_text:
-        rules_reminder = f"\n\n⚠️ MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
+        rules_reminder = f"\n\n[WARNING] MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
 
     # Inject current time state so the story generator knows what day/time it is
     time_state = parse_current_time_state(story_id)
@@ -4294,7 +4294,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     # Build system message: instructions + all story context + rules reminder at the end
     rules_reminder = ""
     if rules_text:
-        rules_reminder = f"\n\n⚠️ MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
+        rules_reminder = f"\n\n[WARNING] MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
     
     system_msg = f"{system_instruction}\n\n{story_context}{rules_reminder}"
 
