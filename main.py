@@ -1,3 +1,36 @@
+import sys
+import time
+from collections import deque
+
+# Server Log Buffer & Interceptor
+SERVER_LOGS = deque(maxlen=500)
+
+class LogInterceptor:
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+
+    def write(self, message):
+        if message:
+            try:
+                self.original_stream.write(message)
+                self.original_stream.flush()
+            except Exception:
+                pass
+            timestamp = time.strftime("%H:%M:%S")
+            for line in message.splitlines():
+                cleaned = line.strip()
+                if cleaned:
+                    SERVER_LOGS.append(f"[{timestamp}] {cleaned}")
+
+    def flush(self):
+        try:
+            self.original_stream.flush()
+        except Exception:
+            pass
+
+sys.stdout = LogInterceptor(sys.stdout)
+sys.stderr = LogInterceptor(sys.stderr)
+
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends
 from fastapi.staticfiles import StaticFiles
@@ -4679,3 +4712,8 @@ if __name__ == "__main__":
         reload=True,
         reload_dirs=[project_dir],
     )
+
+
+@app.get("/api/logs")
+async def get_server_logs():
+    return {"logs": list(SERVER_LOGS)}
