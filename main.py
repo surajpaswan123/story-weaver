@@ -256,7 +256,11 @@ def load_user_keys(uid: str) -> dict:
         "openai_base_url": "https://api.openai.com/v1",
         "openrouter_api_key": "",
         "groq_api_key": "",
-        "nvidia_api_key": ""
+        "nvidia_api_key": "",
+        "story_model": "",
+        "background_model": "",
+        "rules_model": "",
+        "audio_model": ""
     }
     key_file = get_user_keys_file(uid)
     if os.path.exists(key_file):
@@ -450,78 +454,102 @@ def _retry_on_429(fn, label="API", max_retries=MAX_429_RETRIES, delays=RETRY_429
 
 
 def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: dict = None, label: str = "Task", temperature: float = 1.0) -> tuple:
-    """Execute background/task completion dynamically tailored to the user's available API keys.
-    Super Admin gets the full multi-provider fallback system; Standard users use their saved custom keys."""
+    """Execute background/task completion dynamically tailored to the user's available API keys and configured pipeline models.
+    Super Admin and Standard Users can configure specific pipeline models in Settings."""
     if not user_info:
         user_info = {"uid": "default_user", "is_super_admin": True}
 
-    if user_info.get("is_super_admin"):
-        # Super Admin gets full system fallback chain
-        return _call_with_full_fallback(system_prompt, user_prompt, temperature=temperature, label=label)
-
-    # Standard User: Only use their configured custom keys
+    uid = user_info.get("uid", "default_user")
+    user_keys = load_user_keys(uid)
     active_clients = get_effective_ai_clients(user_info)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
 
-    # 1. User Gemini Key
+    # Check if a custom pipeline model is configured for this task label
+    target_model = ""
+    if label.startswith("BA/"):
+        target_model = user_keys.get("background_model", "").strip()
+    elif label == "RulesEditor":
+        target_model = user_keys.get("rules_model", "").strip()
+    elif label == "Audio":
+        target_model = user_keys.get("audio_model", "").strip()
+
+    # If specific model configured by user/admin, try target_model FIRST across providers
+    if target_model:
+        # 1. Try with OpenAI client if matches
+        if active_clients.get("openai_client"):
+            try:
+                print(f"  [{label}] Trying user configured target OpenAI/{target_model}...")
+                kwargs = {"model": target_model, "messages": messages}
+                if not target_model.startswith("o"):
+                    kwargs["temperature"] = temperature
+                resp = active_clients["openai_client"].chat.completions.create(**kwargs)
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"Configured/{target_model}"
+            except Exception as e:
+                print(f"  [{label}] Configured OpenAI/{target_model} note: {e}")
+
+        # 2. Try with GenAI client if matches
+        if active_clients.get("genai_clients"):
+            for c in active_clients["genai_clients"]:
+                try:
+                    print(f"  [{label}] Trying user configured target GenAI/{target_model}...")
+                    base_m = target_model.replace(":search", "")
+                    resp = c.models.generate_content(
+                        model=base_m,
+                        contents=f"{system_prompt}\n\n{user_prompt}",
+                        config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                    )
+                    if resp.text and resp.text.strip():
+                        return resp.text, f"Configured/{target_model}"
+                except Exception as e:
+                    print(f"  [{label}] Configured GenAI/{target_model} note: {e}")
+
+        # 3. Try with NVIDIA client if matches
+        if active_clients.get("nvidia_client"):
+            try:
+                print(f"  [{label}] Trying user configured target NVIDIA/{target_model}...")
+                resp = active_clients["nvidia_client"].chat.completions.create(
+                    model=target_model, messages=messages, temperature=temperature
+                )
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"Configured/{target_model}"
+            except Exception as e:
+                print(f"  [{label}] Configured NVIDIA/{target_model} note: {e}")
+
+    # Fallback to Super Admin system chain or Standard User available keys
+    if user_info.get("is_super_admin"):
+        return _call_with_full_fallback(system_prompt, user_prompt, temperature=temperature, label=label)
+
+    # Standard User Fallback
     if active_clients.get("genai_clients"):
         for c in active_clients["genai_clients"]:
             for m in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]:
                 try:
-                    print(f"  [{label}] Trying User Gemini/{m}...")
                     resp = c.models.generate_content(
-                        model=m,
-                        contents=f"{system_prompt}\n\n{user_prompt}",
+                        model=m, contents=f"{system_prompt}\n\n{user_prompt}",
                         config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
                     )
                     if resp.text and resp.text.strip():
                         return resp.text, f"UserGemini/{m}"
                 except Exception as e:
-                    print(f"  [{label}] User Gemini/{m} failed: {e}")
+                    pass
 
-    # 2. User OpenAI Key
     if active_clients.get("openai_client"):
         c = active_clients["openai_client"]
         for m in ["gpt-4o-mini", "gpt-4o", "o3-mini"]:
             try:
-                print(f"  [{label}] Trying User OpenAI/{m}...")
                 kwargs = {"model": m, "messages": messages}
-                if not m.startswith("o"):
-                    kwargs["temperature"] = temperature
+                if not m.startswith("o"): kwargs["temperature"] = temperature
                 resp = c.chat.completions.create(**kwargs)
                 res = resp.choices[0].message.content or ""
-                if res.strip():
-                    return res, f"UserOpenAI/{m}"
+                if res.strip(): return res, f"UserOpenAI/{m}"
             except Exception as e:
-                print(f"  [{label}] User OpenAI/{m} failed: {e}")
-
-    # 3. User OpenRouter / Groq / NVIDIA keys if present
-    if active_clients.get("openrouter_client"):
-        try:
-            print(f"  [{label}] Trying User OpenRouter...")
-            resp = active_clients["openrouter_client"].chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free", messages=messages, temperature=temperature
-            )
-            res = resp.choices[0].message.content or ""
-            if res.strip():
-                return res, "UserOpenRouter"
-        except Exception as e:
-            print(f"  [{label}] User OpenRouter failed: {e}")
-
-    if active_clients.get("groq_client"):
-        try:
-            print(f"  [{label}] Trying User Groq...")
-            resp = active_clients["groq_client"].chat.completions.create(
-                model="llama-3.3-70b-versatile", messages=messages, temperature=temperature
-            )
-            res = resp.choices[0].message.content or ""
-            if res.strip():
-                return res, "UserGroq"
-        except Exception as e:
-            print(f"  [{label}] User Groq failed: {e}")
+                pass
 
     raise Exception("No active API keys found for standard user. Please enter your API key in Settings (⚙️).")
 
@@ -5218,6 +5246,10 @@ class UserKeysPayload(BaseModel):
     openrouter_api_key: Optional[str] = ""
     groq_api_key: Optional[str] = ""
     nvidia_api_key: Optional[str] = ""
+    story_model: Optional[str] = ""
+    background_model: Optional[str] = ""
+    rules_model: Optional[str] = ""
+    audio_model: Optional[str] = ""
 
 @app.get("/api/user/settings")
 async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
