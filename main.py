@@ -4347,7 +4347,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
             
             # === Step 1: Model 1 (Media Analyzer) — ZERO story context ===
             print("[PIPELINE] Step 1: Starting media analysis (zero context)...")
-            media_analysis = analyze_media_only(audio_bytes, audio_mime, audio.filename or "audio")
+            media_analysis = analyze_media_only(audio_bytes, audio_mime, audio.filename or "audio", user_info=user_info)
             print(f"[PIPELINE] Step 1 done: {len(media_analysis)} chars")
             
 
