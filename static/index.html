@@ -1370,6 +1370,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                 if (data.stories.length === 0) {
                     storyList.innerHTML = '<div class="text-xs text-stone-400 text-center py-4">No stories yet</div>';
+                    currentStoryId = null;
+                    storyTitle.textContent = '—';
+                    loadStory();
                     return;
                 }
 
@@ -1662,6 +1665,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.innerHTML = '';
                 truncationBanner.classList.add('hidden');
 
+                if (!currentStoryId || currentStoryId === 'default' || currentStoryId === 'null') {
+                    storyDisplay.innerHTML = '<div class="h-full flex flex-col items-center justify-center text-stone-500 italic p-6 text-center"><span class="text-4xl mb-3">📖</span><p class="text-lg font-medium text-stone-400">No stories yet</p><p class="text-xs text-stone-500 mt-1">Create a new story using the + button above to start weaving!</p></div>';
+                    return;
+                }
+
                 const chatRes = await authFetch(`/story/${currentStoryId}/chat?last=9999`);
                 const chatData = await chatRes.json();
                 allChatEntries = chatData.messages || [];
@@ -1694,7 +1702,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.scrollTop = storyDisplay.scrollHeight;
             } catch (err) {
                 console.error('Failed to load story:', err);
-                storyDisplay.innerHTML = '<p class="text-stone-500 italic text-center mt-16">Failed to load story.</p>';
+                storyDisplay.innerHTML = '<div class="h-full flex flex-col items-center justify-center text-stone-500 italic p-6 text-center"><span class="text-4xl mb-3">📖</span><p class="text-lg font-medium text-stone-400">No stories yet</p><p class="text-xs text-stone-500 mt-1">Create a new story using the + button above to start weaving!</p></div>';
             }
         }
 
