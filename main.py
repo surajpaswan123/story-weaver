@@ -222,7 +222,8 @@ def get_effective_ai_clients(user_info: dict) -> dict:
 
     if user_keys.get("openai_api_key"):
         try:
-            user_clients["openai_client"] = OpenAI(api_key=user_keys["openai_api_key"])
+            base_url = (user_keys.get("openai_base_url") or "https://api.openai.com/v1").strip()
+            user_clients["openai_client"] = OpenAI(base_url=base_url, api_key=user_keys["openai_api_key"])
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client for {uid[:8]}: {e}")
 
@@ -252,6 +253,7 @@ def load_user_keys(uid: str) -> dict:
     keys = {
         "gemini_api_key": "",
         "openai_api_key": "",
+        "openai_base_url": "https://api.openai.com/v1",
         "openrouter_api_key": "",
         "groq_api_key": "",
         "nvidia_api_key": ""
@@ -4968,6 +4970,27 @@ from concurrent.futures import ThreadPoolExecutor
 DYNAMIC_PROVIDER_MODELS = dict(STATIC_PROVIDER_MODELS)
 LAST_DYNAMIC_FETCH = 0
 
+
+def fetch_openai_live_models(api_key: str = None, base_url: str = None):
+    key = api_key or os.getenv("OPENAI_API_KEY")
+    url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/models"
+    if not key:
+        return None
+    try:
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "openai", models
+    except Exception as e:
+        print(f"[Live Fetch Note] OpenAI models fetch ({url}): {e}")
+    return None
+
+
 def fetch_openrouter_live_models():
     try:
         req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers={"User-Agent": "StoryWeaver/1.0"})
@@ -5024,6 +5047,7 @@ def refresh_live_provider_models():
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
+                executor.submit(fetch_openai_live_models),
                 executor.submit(fetch_openrouter_live_models),
                 executor.submit(fetch_nvidia_live_models),
                 executor.submit(fetch_groq_live_models)
@@ -5074,6 +5098,7 @@ if __name__ == "__main__":
 class UserKeysPayload(BaseModel):
     gemini_api_key: Optional[str] = ""
     openai_api_key: Optional[str] = ""
+    openai_base_url: Optional[str] = "https://api.openai.com/v1"
     openrouter_api_key: Optional[str] = ""
     groq_api_key: Optional[str] = ""
     nvidia_api_key: Optional[str] = ""
