@@ -4631,6 +4631,12 @@ STATIC_PROVIDER_MODELS = {
     }
 }
 
+from fastapi import Response
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
+
 @app.get("/api/providers-models")
 async def get_providers_and_models():
     """Returns available AI providers and their models instantly without network delays"""
