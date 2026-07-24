@@ -4583,6 +4583,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             print(f"STREAM ERROR: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
 STATIC_PROVIDER_MODELS = {
     "google": {
         "name": "Google GenAI (Gemini)",
