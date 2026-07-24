@@ -1110,33 +1110,41 @@ def is_valid_auto_category_name(category: str, existing_categories: set[str], kn
         return True
     return category.endswith("s")
 
-def get_story_dir(story_id: str, create: bool = True):
+def get_story_dir(story_id: str, uid: str = "default_user", create: bool = True):
+    safe_uid = sanitize_id(uid or "default_user")
     safe_id = sanitize_id(story_id)
-    story_dir = os.path.join(STORIES_DIR, safe_id)
+    user_dir = os.path.join(STORIES_DIR, safe_uid)
+    story_dir = os.path.join(user_dir, safe_id)
+    
+    # Fallback/backward compatibility for root stories
+    root_dir = os.path.join(STORIES_DIR, safe_id)
+    if not os.path.exists(story_dir) and os.path.exists(root_dir) and safe_uid == "default_user":
+        return root_dir
+
     if create:
         os.makedirs(story_dir, exist_ok=True)
     return story_dir
 
-def get_story_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "story.md")
+def get_story_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "story.md")
 
-def get_element_path(story_id: str, category: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), f"{category}.md")
+def get_element_path(story_id: str, category: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), f"{category}.md")
 
-def get_summary_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "summary.md")
+def get_summary_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "summary.md")
 
-def get_style_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "style.md")
+def get_style_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "style.md")
 
-def get_rules_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "rules.md")
+def get_rules_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "rules.md")
 
-def get_consistency_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "consistency.md")
+def get_consistency_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "consistency.md")
 
-def get_chat_log_path(story_id: str, create: bool = True):
-    return os.path.join(get_story_dir(story_id, create=create), "chat_log.json")
+def get_chat_log_path(story_id: str, uid: str = "default_user", create: bool = True):
+    return os.path.join(get_story_dir(story_id, uid=uid, create=create), "chat_log.json")
 
 def has_any_generation_provider() -> bool:
     return any([
@@ -1150,9 +1158,9 @@ def has_any_generation_provider() -> bool:
         cerebras_client is not None,
     ])
 
-def append_chat_entry(story_id: str, role: str, text: str, model: str = ""):
+def append_chat_entry(story_id: str, role: str, text: str, model: str = "", uid: str = "default_user"):
     """Append a chat entry to the story's chat log."""
-    path = get_chat_log_path(story_id)
+    path = get_chat_log_path(story_id, uid=uid)
     entries = []
     if os.path.exists(path):
         try:
@@ -1169,11 +1177,11 @@ def append_chat_entry(story_id: str, role: str, text: str, model: str = ""):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(entries, f, ensure_ascii=False)
 
-def get_turn_count(story_id: str) -> int:
+def get_turn_count(story_id: str, uid: str = "default_user") -> int:
     """Count completed AI turns for THIS story, derived from chat_log.json instead of a
     shared global counter. Self-correcting on undo (which already removes the AI+user
     pair from chat_log.json) - no manual increment/decrement bookkeeping needed."""
-    path = get_chat_log_path(story_id, create=False)
+    path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return 0
     try:
@@ -1183,7 +1191,7 @@ def get_turn_count(story_id: str) -> int:
         return 0
     return sum(1 for e in entries if e.get("role") == "ai")
 
-def get_recent_story_text(story_id: str, num_turns: int = 10) -> str:
+def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "default_user") -> str:
     """Build the 'recent narrative' context from the last N AI-generated turns
     in chat_log.json, instead of dumping the entire story.md every time.
 
@@ -1192,7 +1200,7 @@ def get_recent_story_text(story_id: str, num_turns: int = 10) -> str:
     chat_log's ai text and story.md's saved text are the same value, written
     at the same point, so this is a clean turn-boundary tail of story.md
     rather than an arbitrary line-count slice."""
-    path = get_chat_log_path(story_id, create=False)
+    path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return ""
     try:
@@ -1213,26 +1221,57 @@ async def read_root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 @app.get("/stories")
-async def list_stories():
-    """List all stories with metadata."""
+async def list_stories(user_id: str = Depends(get_current_user_id)):
+    """List stories belonging specifically to the authenticated user."""
+    # 1. Check Firestore if active
+    if db_firestore and user_id != "default_user":
+        fs_stories = list_user_stories_firestore(user_id)
+        if fs_stories:
+            formatted = []
+            for s in fs_stories:
+                formatted.append({
+                    "id": s["id"],
+                    "name": s.get("title", s["id"].replace("-", " ").title()),
+                    "size": 2048,
+                    "modified": s.get("updated_at", 0)
+                })
+            return {"stories": formatted}
+
+    # 2. Local disk storage user isolation
+    safe_uid = sanitize_id(user_id)
+    user_dir = os.path.join(STORIES_DIR, safe_uid)
     stories = []
-    if os.path.exists(STORIES_DIR):
-        for name in sorted(os.listdir(STORIES_DIR)):
-            story_dir = os.path.join(STORIES_DIR, name)
+    
+    # Check user-specific folder
+    if os.path.exists(user_dir):
+        for name in sorted(os.listdir(user_dir)):
+            story_dir = os.path.join(user_dir, name)
             if os.path.isdir(story_dir):
                 story_file = os.path.join(story_dir, "story.md")
-                size = 0
-                modified = 0
-                if os.path.exists(story_file):
-                    stat = os.stat(story_file)
-                    size = stat.st_size
-                    modified = stat.st_mtime
+                size = os.path.getsize(story_file) if os.path.exists(story_file) else 0
+                modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
                 stories.append({
                     "id": name,
                     "name": name.replace("-", " ").replace("_", " ").title(),
                     "size": size,
                     "modified": modified
                 })
+                
+    # Fallback for default user reading unassigned root stories
+    if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
+        for name in sorted(os.listdir(STORIES_DIR)):
+            story_dir = os.path.join(STORIES_DIR, name)
+            if os.path.isdir(story_dir) and name != safe_uid and not any(s["id"] == name for s in stories):
+                story_file = os.path.join(story_dir, "story.md")
+                size = os.path.getsize(story_file) if os.path.exists(story_file) else 0
+                modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
+                stories.append({
+                    "id": name,
+                    "name": name.replace("-", " ").replace("_", " ").title(),
+                    "size": size,
+                    "modified": modified
+                })
+
     return {"stories": stories}
 
 class CreateStoryInput(BaseModel):
@@ -1273,7 +1312,7 @@ async def delete_story(story_id: str):
 @app.get("/story/{story_id}/chat")
 async def get_chat_log(story_id: str, last: int = 10):
     """Get recent chat messages for display."""
-    path = get_chat_log_path(story_id, create=False)
+    path = get_chat_log_path(story_id, uid=uid, create=False)
     entries = []
     
     if os.path.exists(path):
@@ -3719,7 +3758,7 @@ async def trigger_analysis(story_id: str):
 async def undo_last(story_id: str):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
     story_path = get_story_path(story_id, create=False)
-    chat_path = get_chat_log_path(story_id, create=False)
+    chat_path = get_chat_log_path(story_id, uid=uid, create=False)
 
     if not os.path.exists(story_path):
         raise HTTPException(status_code=404, detail="Story not found")
