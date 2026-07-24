@@ -4462,8 +4462,14 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/generate")
-async def generate_story(input_data: StoryInput, user_id: str = Depends(get_current_user_id)):
+async def generate_story(input_data: StoryInput, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
+    user_info = get_current_user_info(authorization)
+    if not user_info["is_super_admin"]:
+        user_keys = load_user_keys(user_id)
+        if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Super Admin keys are reserved for surajssd1000@gmail.com. Please open Settings (⚙️) and enter your Gemini or OpenAI API Key.")
+
     if not has_any_generation_provider():
         raise HTTPException(status_code=500, detail="No AI providers are configured or reachable.")
 
@@ -5073,12 +5079,44 @@ threading.Thread(target=refresh_live_provider_models, daemon=True).start()
 
 
 @app.get("/api/providers-models")
-async def get_providers_and_models():
-    """Returns available AI providers and their live real-time models without blocking response"""
+async def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
+    """Returns available AI providers and models based on user role and saved API keys."""
     # Trigger background refresh if cache is older than 30 minutes
     if time.time() - LAST_DYNAMIC_FETCH > 1800:
         threading.Thread(target=refresh_live_provider_models, daemon=True).start()
-    return {"providers": DYNAMIC_PROVIDER_MODELS}
+
+    is_super_admin = user_info.get("is_super_admin", False)
+    if is_super_admin:
+        return {"providers": DYNAMIC_PROVIDER_MODELS}
+
+    # Standard User: Only return providers for which the user has configured an API key
+    uid = user_info.get("uid", "default_user")
+    user_keys = load_user_keys(uid)
+
+    allowed_providers = {}
+    if user_keys.get("gemini_api_key"):
+        allowed_providers["google"] = DYNAMIC_PROVIDER_MODELS.get("google", STATIC_PROVIDER_MODELS["google"])
+    if user_keys.get("openai_api_key"):
+        # Fetch or default OpenAI models
+        live_openai = fetch_openai_live_models(user_keys["openai_api_key"], user_keys.get("openai_base_url"))
+        models_list = live_openai[1] if live_openai else OPENAI_MODELS
+        allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": models_list}
+    if user_keys.get("openrouter_api_key"):
+        allowed_providers["openrouter"] = DYNAMIC_PROVIDER_MODELS.get("openrouter", STATIC_PROVIDER_MODELS["openrouter"])
+    if user_keys.get("groq_api_key"):
+        allowed_providers["groq"] = DYNAMIC_PROVIDER_MODELS.get("groq", STATIC_PROVIDER_MODELS["groq"])
+    if user_keys.get("nvidia_api_key"):
+        allowed_providers["nvidia"] = DYNAMIC_PROVIDER_MODELS.get("nvidia", STATIC_PROVIDER_MODELS["nvidia"])
+
+    if not allowed_providers:
+        allowed_providers = {
+            "notice": {
+                "name": "⚠️ Key Required (Open Settings ⚙️)",
+                "models": ["Please enter your API Key in Settings (⚙️)"]
+            }
+        }
+
+    return {"providers": allowed_providers}
 
 if __name__ == "__main__":
     import uvicorn
