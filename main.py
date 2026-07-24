@@ -448,6 +448,84 @@ def _retry_on_429(fn, label="API", max_retries=MAX_429_RETRIES, delays=RETRY_429
     raise last_err
 
 
+
+def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: dict = None, label: str = "Task", temperature: float = 1.0) -> tuple:
+    """Execute background/task completion dynamically tailored to the user's available API keys.
+    Super Admin gets the full multi-provider fallback system; Standard users use their saved custom keys."""
+    if not user_info:
+        user_info = {"uid": "default_user", "is_super_admin": True}
+
+    if user_info.get("is_super_admin"):
+        # Super Admin gets full system fallback chain
+        return _call_with_full_fallback(system_prompt, user_prompt, temperature=temperature, label=label)
+
+    # Standard User: Only use their configured custom keys
+    active_clients = get_effective_ai_clients(user_info)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # 1. User Gemini Key
+    if active_clients.get("genai_clients"):
+        for c in active_clients["genai_clients"]:
+            for m in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]:
+                try:
+                    print(f"  [{label}] Trying User Gemini/{m}...")
+                    resp = c.models.generate_content(
+                        model=m,
+                        contents=f"{system_prompt}\n\n{user_prompt}",
+                        config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                    )
+                    if resp.text and resp.text.strip():
+                        return resp.text, f"UserGemini/{m}"
+                except Exception as e:
+                    print(f"  [{label}] User Gemini/{m} failed: {e}")
+
+    # 2. User OpenAI Key
+    if active_clients.get("openai_client"):
+        c = active_clients["openai_client"]
+        for m in ["gpt-4o-mini", "gpt-4o", "o3-mini"]:
+            try:
+                print(f"  [{label}] Trying User OpenAI/{m}...")
+                kwargs = {"model": m, "messages": messages}
+                if not m.startswith("o"):
+                    kwargs["temperature"] = temperature
+                resp = c.chat.completions.create(**kwargs)
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"UserOpenAI/{m}"
+            except Exception as e:
+                print(f"  [{label}] User OpenAI/{m} failed: {e}")
+
+    # 3. User OpenRouter / Groq / NVIDIA keys if present
+    if active_clients.get("openrouter_client"):
+        try:
+            print(f"  [{label}] Trying User OpenRouter...")
+            resp = active_clients["openrouter_client"].chat.completions.create(
+                model="google/gemini-2.0-flash-exp:free", messages=messages, temperature=temperature
+            )
+            res = resp.choices[0].message.content or ""
+            if res.strip():
+                return res, "UserOpenRouter"
+        except Exception as e:
+            print(f"  [{label}] User OpenRouter failed: {e}")
+
+    if active_clients.get("groq_client"):
+        try:
+            print(f"  [{label}] Trying User Groq...")
+            resp = active_clients["groq_client"].chat.completions.create(
+                model="llama-3.3-70b-versatile", messages=messages, temperature=temperature
+            )
+            res = resp.choices[0].message.content or ""
+            if res.strip():
+                return res, "UserGroq"
+        except Exception as e:
+            print(f"  [{label}] User Groq failed: {e}")
+
+    raise Exception("No active API keys found for standard user. Please enter your API key in Settings (⚙️).")
+
+
 def _call_with_full_fallback(
     system_prompt: str,
     user_prompt: str,
@@ -4441,7 +4519,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 new_text_for_analysis = get_recent_story_text(story_id, BATCH_SIZE) or full_response
                 analysis_thread = threading.Thread(
                     target=background_analysis,
-                    args=(story_id, updated_story, new_text_for_analysis)
+                    args=(story_id, updated_story, new_text_for_analysis, user_info)
                 )
                 analysis_thread.start()
                 yield f"data: {json.dumps({'type': 'finalizing', 'message': 'Updating story memory...'})}\n\n"
