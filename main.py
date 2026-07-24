@@ -97,7 +97,9 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         try:
             decoded = auth.verify_id_token(token)
             if decoded.get("uid"):
-                return decoded["uid"]
+                uid = decoded["uid"]
+                print(f"[Auth Log] Firebase Admin verified UID: {uid[:8]}...")
+                return uid
         except Exception:
             pass
     try:
@@ -105,11 +107,12 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         if len(parts) >= 2:
             payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
             payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
-            uid = payload_data.get("user_id") or payload_data.get("sub")
+            uid = payload_data.get("user_id") or payload_data.get("sub") or payload_data.get("email")
             if uid:
+                print(f"[Auth Log] JWT Decoded UID: {uid[:12]}...")
                 return uid
-    except Exception:
-        pass
+    except Exception as err:
+        print(f"[Auth Note] Token decode note: {err}")
     return "default_user"
     token = authorization.split("Bearer ")[1].strip()
     try:
@@ -1241,6 +1244,8 @@ async def read_root():
 @app.get("/stories")
 async def list_stories(user_id: str = Depends(get_current_user_id)):
     """List stories belonging specifically to the authenticated user."""
+    print(f"[Stories Route] Listing stories for user_id: {user_id}")
+    
     # 1. Check Firestore if active
     if db_firestore and user_id != "default_user":
         fs_stories = list_user_stories_firestore(user_id)
@@ -1260,7 +1265,6 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
     user_dir = os.path.join(STORIES_DIR, safe_uid)
     stories = []
     
-    # Check user-specific folder
     if os.path.exists(user_dir):
         for name in sorted(os.listdir(user_dir)):
             story_dir = os.path.join(user_dir, name)
@@ -1274,8 +1278,8 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                     "size": size,
                     "modified": modified
                 })
-                
-    # Fallback for default user reading unassigned root stories
+
+    # Only show root unassigned stories if user is NOT logged in (default_user)
     if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
         for name in sorted(os.listdir(STORIES_DIR)):
             story_dir = os.path.join(STORIES_DIR, name)
