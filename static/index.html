@@ -74,6 +74,7 @@ async function saveUserSettings(e) {
     const payload = {
         gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
         openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
     };
@@ -246,6 +247,7 @@ async function saveUserSettings(e) {
     const payload = {
         gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
         openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
     };
@@ -417,6 +419,7 @@ async function saveUserSettings(e) {
     const payload = {
         gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
         openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
     };
@@ -588,6 +591,7 @@ async function saveUserSettings(e) {
     const payload = {
         gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
         openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
     };
@@ -2620,6 +2624,7 @@ async function saveUserSettings(e) {
     const payload = {
         gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
         openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
     };
@@ -2785,10 +2790,17 @@ let logsPollingInterval = null;
                 <input type="password" id="input-gemini-key" placeholder="AIzaSy..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
             </div>
 
+
             <div>
-                <label class="block font-medium text-stone-300 mb-1">OpenAI API Key (Official SDK)</label>
-                <input type="password" id="input-openai-key" placeholder="sk-proj-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <label class="block font-medium text-stone-300 mb-1">OpenAI API Key (OpenAI-Style API)</label>
+                <input type="password" id="input-openai-key" placeholder="sk-proj-... or custom key" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
             </div>
+
+            <div>
+                <label class="block font-medium text-stone-300 mb-1">OpenAI Base URL (Optional Custom Endpoint)</label>
+                <input type="text" id="input-openai-base-url" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+            </div>
+
 
             <div>
                 <label class="block font-medium text-stone-300 mb-1">OpenRouter API Key (Optional)</label>
