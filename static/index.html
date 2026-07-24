@@ -2205,7 +2205,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
 <!-- SETTINGS MODAL -->
 <div id="settings-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
-    <div class="bg-stone-900 border border-stone-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 text-stone-200 relative overflow-hidden">
+    <div class="bg-stone-900 border border-stone-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 text-stone-200 relative max-h-[90vh] overflow-y-auto thin-scroll">
         <div class="flex items-center justify-between border-b border-stone-800 pb-3">
             <div class="flex items-center gap-2">
                 <span class="text-xl">⚙️</span>
@@ -2254,6 +2254,38 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             <div>
                 <label class="block font-medium text-stone-300 mb-1">Groq API Key (Optional)</label>
                 <input type="password" id="input-groq-key" placeholder="gsk_..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+            </div>
+
+            <!-- Pipeline Model Overrides -->
+            <div class="border-t border-stone-800 pt-4 mt-2">
+                <h4 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span>🔧</span> Pipeline Model Overrides</h4>
+                <p class="text-[10px] text-stone-500 mb-3">Override which AI model is used for each pipeline task. Leave as "Default" to use the system's automatic selection.</p>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">📖 Story Model</label>
+                        <select id="input-story-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                            <option value="">Default (Auto)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">📝 Background Model</label>
+                        <select id="input-background-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                            <option value="">Default (Auto)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">📜 Rules Model</label>
+                        <select id="input-rules-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                            <option value="">Default (Auto)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">🎵 Audio Model</label>
+                        <select id="input-audio-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                            <option value="">Default (Auto)</option>
+                        </select>
+                    </div>
+                </div>
             </div>
 
             <div id="settings-status-msg" class="min-h-[20px]"></div>
