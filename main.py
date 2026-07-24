@@ -1571,7 +1571,7 @@ def get_turn_count(story_id: str, uid: str = "default_user") -> int:
     """Count completed AI turns for THIS story, derived from chat_log.json instead of a
     shared global counter. Self-correcting on undo (which already removes the AI+user
     pair from chat_log.json) - no manual increment/decrement bookkeeping needed."""
-    path = get_chat_log_path(story_id, uid=uid, create=False)
+    path = get_chat_log_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return 0
     try:
@@ -1590,7 +1590,7 @@ def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "defaul
     chat_log's ai text and story.md's saved text are the same value, written
     at the same point, so this is a clean turn-boundary tail of story.md
     rather than an arbitrary line-count slice."""
-    path = get_chat_log_path(story_id, uid=uid, create=False)
+    path = get_chat_log_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return ""
     try:
@@ -1703,7 +1703,7 @@ async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id
 @app.get("/story/{story_id}/chat")
 async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get_current_user_id)):
     """Get recent chat messages for display."""
-    path = get_chat_log_path(story_id, uid=uid, create=False)
+    path = get_chat_log_path(story_id, uid=user_id, create=False)
     entries = []
     
     if os.path.exists(path):
@@ -4149,7 +4149,7 @@ async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_use
 async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
     story_path = get_story_path(story_id, uid=user_id, create=False)
-    chat_path = get_chat_log_path(story_id, uid=uid, create=False)
+    chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
 
     if not os.path.exists(story_path):
         raise HTTPException(status_code=404, detail="Story not found")
@@ -4241,8 +4241,15 @@ async def generate_with_audio(
     user_input: str = Form(...),
     story_id: str = Form(...),
     skip_rules_check: bool = Form(False),
-    audio: UploadFile = File(...)
+    audio: UploadFile = File(...),
+    user_id: str = Depends(get_current_user_id),
+    authorization: str = Header(None)
 ):
+    user_info = get_current_user_info(authorization)
+    if not user_info["is_super_admin"]:
+        user_keys = load_user_keys(user_id)
+        if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Super Admin keys are reserved for surajssd1000@gmail.com. Please open Settings (⚙️) and enter your Gemini or OpenAI API Key.")
     """Generate story with audio context. Prioritizes gemini-nokey proxy, falls back to native API."""
     print(f"DEBUG: Audio generation request for {story_id}, audio: {audio.filename}", flush=True)
 
