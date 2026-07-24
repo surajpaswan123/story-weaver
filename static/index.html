@@ -1274,12 +1274,22 @@ let logsPollingInterval = null;
                         <div id="user-profile" class="hidden flex items-center gap-2">
                             <img id="user-avatar" class="w-6 h-6 rounded-full border border-stone-600" src="" alt="User Avatar">
                             <span id="user-name" class="text-xs text-stone-300"></span>
+                            <button onclick="toggleSettingsModal()" class="text-xs text-amber-400 hover:text-amber-300 underline ml-1">⚙️ Settings</button>
+                            <button onclick="toggleSettingsModal()" class="text-xs text-amber-400 hover:text-amber-300 underline ml-1">⚙️ Settings</button>
                             <button onclick="handleGoogleLogout()" class="text-xs text-stone-400 hover:text-stone-200 underline ml-1">Logout</button>
                         </div>
                     </div>
                     <button id="analyze-btn" onclick="triggerAnalysis()" aria-label="Force background analysis"
                         class="hidden text-xs bg-stone-700 hover:bg-stone-600 text-stone-200 px-2 py-1 rounded transition-colors">
                         <span aria-hidden="true">⚡</span> Analyze Now
+                    </button>
+                    <button id="open-settings-btn" onclick="toggleSettingsModal()" aria-label="Open API & Account Settings"
+                        class="text-xs bg-amber-700/90 hover:bg-amber-600 text-amber-100 font-medium px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 shadow-sm border border-amber-600/40 cursor-pointer">
+                        <span aria-hidden="true">⚙️</span> Settings
+                    </button>
+                    <button id="open-settings-btn" onclick="toggleSettingsModal()" aria-label="Open API & Account Settings"
+                        class="text-xs bg-amber-700/90 hover:bg-amber-600 text-amber-100 font-medium px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 shadow-sm border border-amber-600/40 cursor-pointer">
+                        <span aria-hidden="true">⚙️</span> Settings
                     </button>
                     <button id="toggle-logs-btn" onclick="toggleLogsSidebar()" aria-label="Toggle Server Logs Sidebar"
                         class="text-xs bg-stone-700 hover:bg-stone-600 text-stone-200 px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 shadow-sm">
