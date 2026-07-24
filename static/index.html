@@ -668,7 +668,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // ===== SIDEBAR =====
         async function loadStoryList() {
             try {
-                const res = await fetch('/stories');
+                const res = await authFetch('/stories');
                 const data = await res.json();
                 storyList.innerHTML = '';
 
@@ -726,7 +726,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (!name || !name.trim()) return;
 
             try {
-                const res = await fetch('/stories/create', {
+                const res = await authFetch('/stories/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: name.trim() })
@@ -742,7 +742,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function deleteStory(storyId) {
             if (!confirm(`Delete this story and ALL its files? This cannot be undone.`)) return;
             try {
-                const res = await fetch(`/story/${storyId}`, { method: 'DELETE' });
+                const res = await authFetch(`/story/${storyId}`, { method: 'DELETE' });
                 if (!res.ok) {
                     alert('Failed to delete story. Please try again.');
                     return;
@@ -750,7 +750,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 announceToScreenReader('Story deleted.');
                 if (currentStoryId === storyId) {
                     // Switch to first available story after refresh
-                    const listRes = await fetch('/stories');
+                    const listRes = await authFetch('/stories');
                     const listData = await listRes.json();
                     const remaining = listData.stories.filter(s => s.id !== storyId);
                     if (remaining.length > 0) {
@@ -779,7 +779,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 btn.textContent = '⏳ Analyzing...';
                 announceStatus('Starting background analysis...');
 
-                const res = await fetch(`/analyze/${currentStoryId}`, { method: 'POST' });
+                const res = await authFetch(`/analyze/${currentStoryId}`, { method: 'POST' });
                 if (!res.ok) throw new Error(await res.text());
 
                 announceStatus('Analysis started in background.');
@@ -966,7 +966,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.innerHTML = '';
                 truncationBanner.classList.add('hidden');
 
-                const chatRes = await fetch(`/story/${currentStoryId}/chat?last=9999`);
+                const chatRes = await authFetch(`/story/${currentStoryId}/chat?last=9999`);
                 const chatData = await chatRes.json();
                 allChatEntries = chatData.messages || [];
 
@@ -995,7 +995,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function loadRecentStory() {
             try {
-                const res = await fetch(`/story/${currentStoryId}?tail=1000`);
+                const res = await authFetch(`/story/${currentStoryId}?tail=1000`);
                 const data = await res.json();
                 storyDisplay.innerHTML = '';
                 if (data.content) renderStoryContent(data.content);
@@ -1007,7 +1007,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function loadFullStory() {
             try {
                 truncationBanner.innerHTML = '<div class="text-xs text-stone-500 py-2">Loading full story...</div>';
-                const res = await fetch(`/story/${currentStoryId}/full`);
+                const res = await authFetch(`/story/${currentStoryId}/full`);
                 const data = await res.json();
 
                 storyDisplay.innerHTML = '';
@@ -1058,7 +1058,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function loadElements() {
             try {
-                const res = await fetch(`/story/${currentStoryId}/elements`);
+                const res = await authFetch(`/story/${currentStoryId}/elements`);
                 const data = await res.json();
 
                 if (Object.keys(data).length === 0) {
@@ -1092,7 +1092,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // ===== SUMMARY =====
         async function loadSummary() {
             try {
-                const res = await fetch(`/story/${currentStoryId}/summary`);
+                const res = await authFetch(`/story/${currentStoryId}/summary`);
                 const data = await res.json();
                 document.getElementById('summary-textarea').value = data.summary || '';
                 document.getElementById('summary-status').textContent = data.summary ? 'Last loaded just now' : 'No summary yet — it will be created after AI generates content.';
@@ -1104,7 +1104,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveSummary() {
             const text = document.getElementById('summary-textarea').value;
             try {
-                await fetch(`/story/${currentStoryId}/summary`, {
+                await authFetch(`/story/${currentStoryId}/summary`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ summary: text })
@@ -1121,7 +1121,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // ===== STYLE GUIDE =====
         async function loadStyle() {
             try {
-                const res = await fetch(`/story/${currentStoryId}/style`);
+                const res = await authFetch(`/story/${currentStoryId}/style`);
                 const data = await res.json();
                 document.getElementById('style-textarea').value = data.text || '';
                 document.getElementById('style-status').textContent = data.text ? 'Loaded' : 'No style guide yet — add your writing preferences.';
@@ -1131,7 +1131,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveStyle() {
             const text = document.getElementById('style-textarea').value;
             try {
-                await fetch(`/story/${currentStoryId}/style`, {
+                await authFetch(`/story/${currentStoryId}/style`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: text })
@@ -1147,7 +1147,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // ===== WORLD RULES =====
         async function loadRules() {
             try {
-                const res = await fetch(`/story/${currentStoryId}/rules`);
+                const res = await authFetch(`/story/${currentStoryId}/rules`);
                 const data = await res.json();
                 document.getElementById('rules-textarea').value = data.text || '';
                 document.getElementById('rules-status').textContent = data.text ? 'Loaded' : 'No rules yet — define your world constraints.';
@@ -1157,7 +1157,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveRules() {
             const text = document.getElementById('rules-textarea').value;
             try {
-                await fetch(`/story/${currentStoryId}/rules`, {
+                await authFetch(`/story/${currentStoryId}/rules`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: text })
@@ -1173,7 +1173,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // ===== CONSISTENCY LOG =====
         async function loadConsistency() {
             try {
-                const res = await fetch(`/story/${currentStoryId}/consistency`);
+                const res = await authFetch(`/story/${currentStoryId}/consistency`);
                 const data = await res.json();
                 const logDiv = document.getElementById('consistency-log');
                 if (data.text && data.text.trim()) {
@@ -1343,7 +1343,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 } else {
                     const providerVal = document.getElementById('provider-select')?.value || 'auto';
                     const modelVal = document.getElementById('model-select')?.value || 'auto';
-                    response = await fetch('/generate', {
+                    response = await authFetch('/generate', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
@@ -1543,7 +1543,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const promptToRegenerate = lastUserPrompt;
             try {
                 announceStatus('Undoing last generation...');
-                const res = await fetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
+                const res = await authFetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
                 if (!res.ok) {
                     const err = await res.json();
                     throw new Error(err.detail || 'Undo failed');
@@ -1605,7 +1605,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             container.remove();
             try {
                 announceStatus('Undoing last generation...');
-                const res = await fetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
+                const res = await authFetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
                 if (!res.ok) {
                     const err = await res.json();
                     throw new Error(err.detail || 'Undo failed');
@@ -1687,6 +1687,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         if (userName) userName.textContent = user.displayName || user.email;
                         console.log('[Auth] Signed in as:', user.email);
                         loadStoryList();
+                        loadStory();
                     } else {
                         currentUser = null;
                         currentUserToken = null;
@@ -1729,9 +1730,16 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
-        // Helper to fetch with Firebase Bearer Auth Token
+        // Helper to fetch with Firebase Bearer Auth Token (with auto-refresh)
         async function authFetch(url, options = {}) {
             options.headers = options.headers || {};
+            if (typeof firebase !== 'undefined' && firebase.auth && firebase.auth().currentUser) {
+                try {
+                    currentUserToken = await firebase.auth().currentUser.getIdToken();
+                } catch (e) {
+                    console.warn('[AuthFetch] Could not refresh token:', e);
+                }
+            }
             if (currentUserToken) {
                 options.headers['Authorization'] = `Bearer ${currentUserToken}`;
             }
@@ -1785,18 +1793,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         // ===== INIT =====
         loadProvidersAndModels();
-        // Retry loading story list in case server is still starting
-        (async function initStoryList() {
-            for (let i = 0; i < 3; i++) {
-                try {
-                    const res = await authFetch('/stories');
-                    if (res.ok) { loadStoryList(); return; }
-                } catch (e) { }
-                await new Promise(r => setTimeout(r, 2000));
-            }
-            loadStoryList(); // final attempt, will show retry button if it fails
-        })();
-        loadStory();
 
         document.getElementById('new-story-btn').addEventListener('click', createNewStory);
         sendBtn.addEventListener('click', () => submitStory());
