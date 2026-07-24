@@ -788,7 +788,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             <!-- Input Area -->
             <div class="p-3 bg-stone-50 border-t border-stone-200" role="form" aria-label="Story input">
                 <!-- Provider and Model Selectors -->
-                <div class="flex flex-wrap items-center gap-2 mb-2 bg-stone-100 p-2 rounded-lg border border-stone-200 text-xs">
+                <div class="flex flex-wrap items-center gap-2 mb-2 bg-stone-100 p-2 rounded-lg border border-stone-200 text-xs relative overflow-hidden">
+                    <!-- Model Fetch Progress Bar -->
+                    <div id="models-loader-bar" class="absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-600 transition-all duration-500 w-1/3"></div>
+
                     <div class="flex items-center gap-1.5">
                         <span class="font-medium text-stone-600 flex items-center gap-1">⚡ <span>Provider:</span></span>
                         <select id="provider-select" onchange="onProviderChange()" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
@@ -802,6 +805,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             <option value="auto">Auto (Default Recommended)</option>
                         </select>
                     </div>
+
+                    <!-- Online Models Status Tag -->
+                    <span id="models-status-tag" class="text-[10px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex items-center gap-1">
+                        <span class="animate-spin text-[9px]">🔄</span> Fetching online models...
+                    </span>
                 </div>
 
                 <!-- Audio attachment badge -->
@@ -2027,29 +2035,63 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             return fetch(url, options);
         }
 
-        // ===== PROVIDER & MODEL SELECTION LOGIC =====
+        // ===== PROVIDER & MODEL SELECTION LOGIC WITH AUTO-RETRY & PROGRESS BAR =====
         let providersData = {};
+        let modelsRetryCount = 0;
 
         async function loadProvidersAndModels() {
+            const loaderBar = document.getElementById('models-loader-bar');
+            const statusTag = document.getElementById('models-status-tag');
+
+            if (loaderBar) { loaderBar.classList.remove('hidden'); loaderBar.style.width = '35%'; }
+            if (statusTag) {
+                statusTag.classList.remove('hidden');
+                statusTag.innerHTML = `<span class="animate-spin text-[9px]">🔄</span> ${modelsRetryCount > 0 ? `Retrying online models (${modelsRetryCount})...` : 'Fetching online models...'}`;
+            }
+
             try {
                 const res = await fetch('/api/providers-models');
-                if (!res.ok) return;
+                if (loaderBar) loaderBar.style.width = '75%';
+
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
                 const data = await res.json();
                 providersData = data.providers || {};
-                
+
                 const providerSelect = document.getElementById('provider-select');
-                if (!providerSelect) return;
-                
-                providerSelect.innerHTML = '<option value="auto">Auto (Best Fallback)</option>';
-                for (const [key, p] of Object.entries(providersData)) {
-                    const opt = document.createElement('option');
-                    opt.value = key;
-                    opt.textContent = p.name || key.toUpperCase();
-                    providerSelect.appendChild(opt);
+                if (providerSelect) {
+                    const currentSelection = providerSelect.value;
+                    providerSelect.innerHTML = '<option value="auto">Auto (Best Fallback)</option>';
+                    for (const [key, p] of Object.entries(providersData)) {
+                        const opt = document.createElement('option');
+                        opt.value = key;
+                        opt.textContent = p.name || key.toUpperCase();
+                        providerSelect.appendChild(opt);
+                    }
+                    if (currentSelection && providersData[currentSelection]) {
+                        providerSelect.value = currentSelection;
+                    }
+                    onProviderChange();
                 }
-                onProviderChange();
+
+                // Success! Fill progress bar and show ready status
+                if (loaderBar) { loaderBar.style.width = '100%'; setTimeout(() => loaderBar.classList.add('hidden'), 500); }
+                if (statusTag) {
+                    const totalModels = Object.values(providersData).reduce((sum, p) => sum + (p.models ? p.models.length : 0), 0);
+                    statusTag.className = "text-[10px] text-emerald-700 font-medium bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1";
+                    statusTag.innerHTML = `<span>✓</span> ${totalModels} Online Models Ready`;
+                    setTimeout(() => statusTag.classList.add('hidden'), 5000);
+                }
             } catch (e) {
-                console.warn('Failed to load providers:', e);
+                console.warn('[Model Fetch] Connection offline / retry needed:', e);
+                modelsRetryCount++;
+                if (loaderBar) loaderBar.style.width = '20%';
+                if (statusTag) {
+                    statusTag.className = "text-[10px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex items-center gap-1";
+                    statusTag.innerHTML = `<span class="animate-spin text-[9px]">🔄</span> Connection offline — retrying (${modelsRetryCount})...`;
+                }
+                // Persistent retry loop: keep retrying every 3s until network connects
+                setTimeout(loadProvidersAndModels, 3000);
             }
         }
 
