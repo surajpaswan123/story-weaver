@@ -1858,7 +1858,7 @@ SAFETY_SETTINGS = [
 # Model 3: Story Generator — full context + Model 1 + Model 2 results
 # ============================================================
 
-def analyze_media_only(media_bytes: bytes, mime_type: str, filename: str = "media") -> str:
+def analyze_media_only(media_bytes: bytes, mime_type: str, filename: str = "media", user_info: dict = None) -> str:
     """Model 1: Analyze media with ZERO story context. Returns objective description.
     This prevents the hallucination problem where the model invents details from story context."""
     
@@ -1880,8 +1880,15 @@ Just describe the raw media file objectively, like a music reviewer or art criti
     import base64 as b64mod
     media_b64 = b64mod.b64encode(media_bytes).decode("utf-8")
     
+    # Get user-specific clients if available, otherwise use global
+    active_genai_clients = clients  # default global
+    if user_info:
+        eff = get_effective_ai_clients(user_info)
+        if eff.get("genai_clients"):
+            active_genai_clients = eff["genai_clients"]
+    
     # 0. Try Google GenAI native keys FIRST
-    for client in clients:
+    for client in active_genai_clients:
         for model_name in ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"]:
             try:
                 print(f"  [MediaAnalyzer] Trying {model_name} via native API...")
@@ -1945,7 +1952,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
     return f"[Media analysis unavailable — file: {filename}, type: {mime_type}, size: {len(media_bytes)} bytes]"
 
 
-def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: str):
+def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: str, user_info: dict = None):
     """Silent post-editor: checks rules/style and streams the (possibly refined) text
     live as the editor model generates it. No suspicion/rollback safety net —
     whatever the model streams is forwarded straight to the client. If a rewrite
@@ -1956,6 +1963,13 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
     if not rules_text and not style_text:
         yield generated_text
         return
+
+    # Get user-specific clients if available, otherwise use global
+    active_genai_clients = clients  # default global
+    if user_info:
+        eff = get_effective_ai_clients(user_info)
+        if eff.get("genai_clients"):
+            active_genai_clients = eff["genai_clients"]
 
     system_prompt = """You are an invisible copy-editor embedded in a story pipeline.
 Your output is streamed DIRECTLY to the reader — they must never know you exist.
@@ -1980,7 +1994,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
     check_prompt += f"=== GENERATED TEXT ===\n{generated_text}"
 
     # 0. PRIMARY: Google GenAI gemini-3.5-flash-lite (fastest ~300 TPS)
-    for c in clients:
+    for c in active_genai_clients:
         try:
             primary_model = "gemini-3.5-flash-lite"
             print(f"  [RulesEditor] Streaming with GenAI/{primary_model} (primary - 300 TPS)...")
@@ -2066,7 +2080,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
                 print(f"  [RulesEditor] Nokey/{model_name} streaming failed: {e}")
 
     # 3. Fallback to other GenAI models, streamed live
-    for c in clients:
+    for c in active_genai_clients:
         for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"]:
             try:
                 print(f"  [RulesEditor] Streaming with GenAI/{model_name}...")
@@ -2114,7 +2128,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
     yield generated_text
 
 
-def update_inventory(story_id: str, new_text: str):
+def update_inventory(story_id: str, new_text: str, user_id: str = "default_user"):
     """Model 4 (INVENTORY TRACKER): Runs in background after generation.
     Reads new story text + current items.md, detects quantity/status changes,
     and updates items.md with tags like [CONSUMED], [DESTROYED], [qty: N]."""
@@ -2326,7 +2340,7 @@ What inventory changes occurred? Return JSON array only."""
         print(f"  [INVENTORY] Failed (non-critical): {e}")
 
 
-def verify_reference_files(story_id: str):
+def verify_reference_files(story_id: str, user_id: str = "default_user"):
     """Phase 2 Verification Layer: Runs AFTER background_analysis completes.
     Reads story.md, summary.md, and incidents.md as READ-ONLY source of truth,
     then checks all other reference .md files in parallel using different models.
@@ -3734,7 +3748,7 @@ def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: se
         return []
 
 
-def background_analysis(story_id: str, full_story: str, new_text: str):
+def background_analysis(story_id: str, full_story: str, new_text: str, user_id: str = "default_user", user_info: dict = None):
     """Single background task: extract elements, update summary, and check consistency in ONE API call."""
     try:
         story_dir = get_story_dir(story_id, uid=user_id)
@@ -3767,7 +3781,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str):
         # Read ALL current elements for context to avoid duplication
         existing_elements = ""
         for cat in custom_categories:
-            path = get_element_path(story_id, cat)
+            path = get_element_path(story_id, cat, uid=user_id)
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read().strip()
@@ -4116,13 +4130,13 @@ def background_analysis(story_id: str, full_story: str, new_text: str):
 
         # === Model 4: Inventory Tracker — update item status/quantities ===
         try:
-            update_inventory(story_id, new_text)
+            update_inventory(story_id, new_text, user_id=user_id)
         except Exception as inv_err:
             print(f"  [INVENTORY] Error (non-critical): {inv_err}")
 
         # === Phase 2: Verification Layer — cross-check all reference files ===
         try:
-            verify_reference_files(story_id)
+            verify_reference_files(story_id, user_id=user_id)
         except Exception as verify_err:
             print(f"  [VERIFY] Error (non-critical): {verify_err}")
 
@@ -4143,7 +4157,7 @@ async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_use
         # Run in background
         thread = threading.Thread(
             target=background_analysis,
-            args=(story_id, full_story, "") # Pass empty new_text to just re-analyze everything
+            args=(story_id, full_story, "", user_id) # Pass empty new_text to just re-analyze everything
         )
         thread.start()
         return {"status": "analysis_started", "message": "Background analysis triggerd."}
@@ -4539,7 +4553,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 print("Rules Editor: running (rules.md and/or style.md has content)")
                 refined_text = ""
                 last_display_chunk = None
-                for piece in refine_with_rules_stream(full_response, rules_text, style_text):
+                for piece in refine_with_rules_stream(full_response, rules_text, style_text, user_info=user_info):
                     refined_text += piece
                     if last_display_chunk is not None and piece == last_display_chunk:
                         continue
@@ -4617,7 +4631,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 new_text_for_analysis = get_recent_story_text(story_id, BATCH_SIZE) or full_response
                 analysis_thread = threading.Thread(
                     target=background_analysis,
-                    args=(story_id, updated_story, new_text_for_analysis, user_info)
+                    args=(story_id, updated_story, new_text_for_analysis, user_id, user_info)
                 )
                 analysis_thread.start()
                 yield f"data: {json.dumps({'type': 'finalizing', 'message': 'Updating story memory...'})}\n\n"
@@ -4976,7 +4990,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 print("Rules Editor: running (rules.md and/or style.md has content)")
                 refined_text = ""
                 last_display_chunk = None
-                for piece in refine_with_rules_stream(full_response, rules_text, style_text):
+                for piece in refine_with_rules_stream(full_response, rules_text, style_text, user_info=user_info):
                     refined_text += piece
                     if last_display_chunk is not None and piece == last_display_chunk:
                         continue
@@ -5056,7 +5070,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 new_text_for_analysis = get_recent_story_text(input_data.story_id, BATCH_SIZE, uid=user_id) or full_response
                 analysis_thread = threading.Thread(
                     target=background_analysis,
-                    args=(input_data.story_id, updated_story, new_text_for_analysis)
+                    args=(input_data.story_id, updated_story, new_text_for_analysis, user_id, user_info)
                 )
                 analysis_thread.start()
                 yield f"data: {json.dumps({'type': 'finalizing', 'message': 'Updating story memory...'})}\n\n"
