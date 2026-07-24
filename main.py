@@ -2128,7 +2128,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
     yield generated_text
 
 
-def update_inventory(story_id: str, new_text: str, user_id: str = "default_user"):
+def update_inventory(story_id: str, new_text: str, user_id: str = "default_user", user_info: dict = None):
     """Model 4 (INVENTORY TRACKER): Runs in background after generation.
     Reads new story text + current items.md, detects quantity/status changes,
     and updates items.md with tags like [CONSUMED], [DESTROYED], [qty: N]."""
@@ -2209,17 +2209,26 @@ Rules:
 
 What inventory changes occurred? Return JSON array only."""
 
-    # Use NVIDIA as primary, nokey as fallback
+    # Use user-specific AI clients when available
     try:
-        result, model_used = _call_with_full_fallback(
-            system_prompt=system_prompt,
-            user_prompt=check_prompt,
-            temperature=0.1,
-            label="INVENTORY",
-            nvidia_models=NVIDIA_BACKGROUND_MODELS,
-            nvidia_use_thinking=False,
-            nokey_models=NOKEY_TASK_MODELS,
-        )
+        if user_info:
+            result, model_used = run_user_task_completion(
+                system_prompt=system_prompt,
+                user_prompt=check_prompt,
+                user_info=user_info,
+                label="BA/Inventory",
+                temperature=0.1,
+            )
+        else:
+            result, model_used = _call_with_full_fallback(
+                system_prompt=system_prompt,
+                user_prompt=check_prompt,
+                temperature=0.1,
+                label="INVENTORY",
+                nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                nvidia_use_thinking=False,
+                nokey_models=NOKEY_TASK_MODELS,
+            )
         result = result.strip()
         print(f"  [INVENTORY] Got response from {model_used}")
         
@@ -2340,7 +2349,7 @@ What inventory changes occurred? Return JSON array only."""
         print(f"  [INVENTORY] Failed (non-critical): {e}")
 
 
-def verify_reference_files(story_id: str, user_id: str = "default_user"):
+def verify_reference_files(story_id: str, user_id: str = "default_user", user_info: dict = None):
     """Phase 2 Verification Layer: Runs AFTER background_analysis completes.
     Reads story.md, summary.md, and incidents.md as READ-ONLY source of truth,
     then checks all other reference .md files in parallel using different models.
@@ -2610,17 +2619,26 @@ def verify_reference_files(story_id: str, user_id: str = "default_user"):
                 f"Return NO_CHANGES_NEEDED or a JSON array of patches. NEVER return the complete file."
             )
 
-            # Full fallback chain for verification
+            # Use user-specific AI clients when available
             try:
-                result, model_used = _call_with_full_fallback(
-                    system_prompt=system_prompt,
-                    user_prompt=check_prompt,
-                    temperature=0.1,
-                    label=f"VERIFY/{filename}",
-                    nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                    nvidia_use_thinking=False,
-                    nokey_models=NOKEY_TASK_MODELS,
-                )
+                if user_info:
+                    result, model_used = run_user_task_completion(
+                        system_prompt=system_prompt,
+                        user_prompt=check_prompt,
+                        user_info=user_info,
+                        label="BA/Verify",
+                        temperature=0.1,
+                    )
+                else:
+                    result, model_used = _call_with_full_fallback(
+                        system_prompt=system_prompt,
+                        user_prompt=check_prompt,
+                        temperature=0.1,
+                        label=f"VERIFY/{filename}",
+                        nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                        nvidia_use_thinking=False,
+                        nokey_models=NOKEY_TASK_MODELS,
+                    )
                 result = result.strip()
                 print(f"  [VERIFY] {filename} checked via {model_used}")
                 outcome = _process_verify_result(result, filename, file_path, current_content)
@@ -2636,15 +2654,24 @@ def verify_reference_files(story_id: str, user_id: str = "default_user"):
                             f"corrected content of '{filename}' directly (not patches this time). "
                             f"Preserve everything that's already accurate - only fix what's actually wrong."
                         )
-                        retry_result, retry_model = _call_with_full_fallback(
-                            system_prompt=system_prompt,
-                            user_prompt=retry_prompt,
-                            temperature=0.1,
-                            label=f"VERIFY/{filename}/retry",
-                            nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                            nvidia_use_thinking=False,
-                            nokey_models=NOKEY_TASK_MODELS,
-                        )
+                        if user_info:
+                            retry_result, retry_model = run_user_task_completion(
+                                system_prompt=system_prompt,
+                                user_prompt=retry_prompt,
+                                user_info=user_info,
+                                label="BA/Verify",
+                                temperature=0.1,
+                            )
+                        else:
+                            retry_result, retry_model = _call_with_full_fallback(
+                                system_prompt=system_prompt,
+                                user_prompt=retry_prompt,
+                                temperature=0.1,
+                                label=f"VERIFY/{filename}/retry",
+                                nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                                nvidia_use_thinking=False,
+                                nokey_models=NOKEY_TASK_MODELS,
+                            )
                         retry_result = strip_thought_tags(retry_result.strip())
                         retry_result = _strip_markdown_fences(retry_result)
                         print(f"  [VERIFY] {filename} retry-as-rewrite via {retry_model}")
@@ -3117,11 +3144,34 @@ def _clean_generated_story_text(text: str) -> tuple[str, list[str]]:
 
     return cleaned, notes
 
-def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None, skip_thinking_models: bool = False, nvidia_models: list = None, selected_provider: str = None, selected_model: str = None):
+def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None, skip_thinking_models: bool = False, nvidia_models: list = None, selected_provider: str = None, selected_model: str = None, user_info: dict = None):
     """Try user selected provider/model first, then fallback: NVIDIA -> Google GenAI -> Groq -> OpenRouter -> Cerebras.
     Returns (stream, model_name, is_thinking) where is_thinking indicates the model may think for a while."""
     nvidia_models = nvidia_models or NVIDIA_STORY_STREAM_MODELS
     skip_nokey_models = set(skip_nokey_models or [])
+    
+    # Resolve user-specific AI clients (ALL providers: Gemini, OpenAI, NVIDIA, Groq, OpenRouter)
+    if user_info:
+        _eff = get_effective_ai_clients(user_info)
+        active_genai_clients = _eff.get("genai_clients") or clients
+        active_nvidia_client = _eff.get("nvidia_client") or nvidia_client
+        active_nokey_client = _eff.get("nokey_client") or nokey_client
+        active_groq_client = _eff.get("groq_client") or groq_client
+        active_openrouter_client = _eff.get("openrouter_client") or openrouter_client
+        active_openai_client = _eff.get("openai_client") or official_openai_client
+        active_mistral_client = _eff.get("mistral_client") or mistral_client
+        active_hf_client = _eff.get("hf_client") or hf_client
+        active_cerebras_client = _eff.get("cerebras_client") or cerebras_client
+    else:
+        active_genai_clients = clients
+        active_nvidia_client = nvidia_client
+        active_nokey_client = nokey_client
+        active_groq_client = groq_client
+        active_openrouter_client = openrouter_client
+        active_openai_client = official_openai_client
+        active_mistral_client = mistral_client
+        active_hf_client = hf_client
+        active_cerebras_client = cerebras_client
     
     # Calculate approximate token count (chars / 4)
     approx_tokens = (len(system_msg) + len(user_msg)) / 4
@@ -3135,9 +3185,9 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         target_model = selected_model if (selected_model and selected_model != "auto") else None
         
         # 1. User selected Google GenAI
-        if selected_provider == "google" and clients:
+        if selected_provider == "google" and active_genai_clients:
             g_models = [target_model] if target_model else GEMINI_STORY_MODELS
-            for key_idx, c in enumerate(clients):
+            for key_idx, c in enumerate(active_genai_clients):
                 for m_name in g_models:
                     try:
                         base_m = m_name.replace("models/", "")
@@ -3159,14 +3209,14 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                         print(f"  Google GenAI {m_name} failed: {err}")
 
         # 2. User selected NVIDIA NIM
-        elif selected_provider == "nvidia" and nvidia_client:
+        elif selected_provider == "nvidia" and active_nvidia_client:
             nv_models = [target_model] if target_model else NVIDIA_STORY_STREAM_MODELS
             for m_name in nv_models:
                 try:
                     print(f"=== Streaming User Selected NVIDIA ({m_name}) ===")
                     _thinks = nvidia_model_thinks(m_name)
                     request_kwargs = build_nvidia_request_kwargs(m_name, 1.0, stream=True)
-                    stream = nvidia_client.chat.completions.create(
+                    stream = active_nvidia_client.chat.completions.create(
                         messages=chat_messages,
                         **request_kwargs,
                     )
@@ -3184,12 +3234,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     print(f"  NVIDIA {m_name} failed: {err}")
 
         # 3. User selected Groq
-        elif selected_provider == "groq" and groq_client:
+        elif selected_provider == "groq" and active_groq_client:
             gq_models = [target_model] if target_model else GROQ_MODELS
             for m_name in gq_models:
                 try:
                     print(f"=== Streaming User Selected Groq ({m_name}) ===")
-                    stream = groq_client.chat.completions.create(
+                    stream = active_groq_client.chat.completions.create(
                         model=m_name, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
                     )
                     def gq_adapter():
@@ -3203,12 +3253,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     print(f"  Groq {m_name} failed: {err}")
 
         # 4. User selected OpenRouter
-        elif selected_provider == "openrouter" and openrouter_client:
+        elif selected_provider == "openrouter" and active_openrouter_client:
             or_models = [target_model] if target_model else OPENROUTER_FREE_MODELS
             for m_name in or_models:
                 try:
                     print(f"=== Streaming User Selected OpenRouter ({m_name}) ===")
-                    stream = openrouter_client.chat.completions.create(
+                    stream = active_openrouter_client.chat.completions.create(
                         model=m_name, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
                     )
                     def or_adapter():
@@ -3222,7 +3272,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     print(f"  OpenRouter {m_name} failed: {err}")
     
     # 0. Try NVIDIA FIRST for story generation (deepseek-v4-pro primary)
-    if nvidia_client:
+    if active_nvidia_client:
         for model in nvidia_models:
             try:
                 context_mode = nvidia_model_context_mode(model)
@@ -3233,7 +3283,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 _model_thinks = nvidia_model_thinks(model)
                 request_kwargs = build_nvidia_request_kwargs(model, 1.0, stream=True)
                 stream = _retry_on_429(
-                    lambda model=model: nvidia_client.chat.completions.create(
+                    lambda model=model: active_nvidia_client.chat.completions.create(
                         messages=chat_messages,
                         **request_kwargs,
                     ),
@@ -3256,7 +3306,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 print(f"  NVIDIA {model} streaming failed: {e}")
 
     # 1. Fallback to Nokey
-    if nokey_client:
+    if active_nokey_client:
         for model in NOKEY_STORY_MODELS:
             if model in skip_nokey_models:
                 print(f"  -> Skipping Nokey {model} (already tried)")
@@ -3277,7 +3327,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     if _model_thinks:
                         extra_body_content["google"] = {**extra_body_content["google"], "thinking_config": {"thinkingBudget": HIGH_THINKING_BUDGET, "includeThoughts": True}}
 
-                    stream = nokey_client.chat.completions.create(
+                    stream = active_nokey_client.chat.completions.create(
                         model=model,
                         messages=chat_messages,
                         temperature=1.0,
@@ -3320,8 +3370,8 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     break
 
     # 2. Fallback to Google GenAI keys
-    if clients:
-        for key_idx, c in enumerate(clients):
+    if active_genai_clients:
+        for key_idx, c in enumerate(active_genai_clients):
             for model_name in GEMINI_STORY_MODELS:
                 try:
                     _thinks = is_thinking_model(model_name)
@@ -3356,7 +3406,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     continue
 
     # 3. Try remaining Nokey models (non-story specific)
-    if nokey_client:
+    if active_nokey_client:
         for model in NOKEY_MODELS:
             if model in skip_nokey_models:
                 print(f"  -> Skipping Gemini Nokey {model} (already tried)")
@@ -3380,7 +3430,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     else:
                         print(f"  -> Thinking disabled for {model}")
                     
-                    stream = nokey_client.chat.completions.create(
+                    stream = active_nokey_client.chat.completions.create(
                         model=model,
                         messages=chat_messages,
                         temperature=1.0,
@@ -3436,12 +3486,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
     approx_tokens = (len(system_msg) + len(user_msg)) / 4
     
     # 2. Try Groq (Fastest) - STRICT LIMIT: 6000 TPM
-    if groq_client:
+    if active_groq_client:
         if approx_tokens < 6000:
             for model in GROQ_MODELS:
                 try:
                     print(f"=== Streaming with Groq ({model}) ===")
-                    stream = groq_client.chat.completions.create(
+                    stream = active_groq_client.chat.completions.create(
                         model=model,
                         messages=chat_messages,
                         temperature=1.0,
@@ -3476,11 +3526,11 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
             print(f"=== Skipping Groq (Context too large: ~{int(approx_tokens)} tokens > 6000 limit) ===")
 
     # 3. Try Mistral (Stream) - Reliable Fallback
-    if mistral_client:
+    if active_mistral_client:
         for model in MISTRAL_MODELS:
             try:
                 print(f"=== Streaming with Mistral ({model}) ===")
-                stream = mistral_client.chat.completions.create(
+                stream = active_mistral_client.chat.completions.create(
                     model=model,
                     messages=chat_messages,
                     temperature=1.0,
@@ -3518,11 +3568,11 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 print(f"  Mistral {model} streaming failed: {e}")
 
     # 4. Try OpenRouter (Rotate)
-    if openrouter_client:
+    if active_openrouter_client:
         for model in OPENROUTER_FREE_MODELS:
             try:
                 print(f"=== Streaming with OpenRouter ({model}) ===")
-                stream = openrouter_client.chat.completions.create(
+                stream = active_openrouter_client.chat.completions.create(
                     model=model,
                     messages=chat_messages,
                     temperature=1.0,
@@ -3553,11 +3603,11 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 # Try next free model
 
     # 5. Try Hugging Face (Stream)
-    if hf_client:
+    if active_hf_client:
         for model in HF_MODELS:
             try:
                 print(f"=== Streaming with Hugging Face ({model}) ===")
-                stream = hf_client.chat.completions.create(
+                stream = active_hf_client.chat.completions.create(
                     model=model,
                     messages=chat_messages,
                     temperature=1.0,
@@ -3578,12 +3628,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 print(f"  Hugging Face {model} streaming failed: {e}")
 
     # 6. Try Cerebras (Stream - Layer 5)
-    if cerebras_client:
+    if active_cerebras_client:
         if approx_tokens < 8000: # Cerebras limit ~8k
             for model in CEREBRAS_MODELS:
                 try:
                     print(f"=== Streaming with Cerebras ({model}) ===")
-                    stream = cerebras_client.chat.completions.create(
+                    stream = active_cerebras_client.chat.completions.create(
                         model=model,
                         messages=chat_messages,
                         temperature=1.0,
@@ -3607,7 +3657,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
 
     # 7. Fallback to Google GenAI
     errors = []
-    for key_idx, c in enumerate(clients):
+    for key_idx, c in enumerate(active_genai_clients):
 
         print(f"=== Streaming with API key {key_idx + 1} ===", flush=True)
         for model_name in FALLBACK_MODELS:
@@ -3649,9 +3699,9 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     continue
         print(f"=== All models failed/skipped on key {key_idx + 1}, switching key ===", flush=True)
     error_summary = "\n".join(errors)
-    raise Exception(f"All models failed across {len(clients)} key(s).\n{error_summary}")
+    raise Exception(f"All models failed across {len(active_genai_clients)} key(s).\n{error_summary}")
 
-def retry_empty_stream_with_fallback(system_msg: str, user_msg: str, failed_model_name: str, is_thinking: bool, nvidia_models: list = None):
+def retry_empty_stream_with_fallback(system_msg: str, user_msg: str, failed_model_name: str, is_thinking: bool, nvidia_models: list = None, user_info: dict = None):
     """Retry once when a Nokey stream ends without any visible text."""
     if not failed_model_name or not failed_model_name.startswith("Nokey/"):
         return None
@@ -3669,7 +3719,7 @@ def retry_empty_stream_with_fallback(system_msg: str, user_msg: str, failed_mode
         print(f"DEBUG: Empty-stream retry failed after {failed_model_name}: {e}")
         return None
 
-def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: set, nvidia_models: list = None) -> list[str]:
+def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: set, nvidia_models: list = None, user_info: dict = None) -> list[str]:
     """Uses Gemini 3.1 Pro with a thinking budget to review existing files and invent new tracking categories if the story needs them."""
     if not new_text.strip():
         return []
@@ -3710,16 +3760,25 @@ def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: se
             f"NEW EXCERPT:\n{new_text}"
         )
         
-        # Full fallback chain for auto-spawn analysis
-        response_text, model_used = _call_with_full_fallback(
-            system_prompt="You are a narrative architect analyzing story structure.",
-            user_prompt=prompt,
-            temperature=0.2,
-            label="Auto-Spawn",
-            nvidia_models=nvidia_models,
-            nvidia_use_thinking=False,
-            nokey_models=NOKEY_TASK_MODELS,
-        )
+        # Use user-specific AI clients when available
+        if user_info:
+            response_text, model_used = run_user_task_completion(
+                system_prompt="You are a narrative architect analyzing story structure.",
+                user_prompt=prompt,
+                user_info=user_info,
+                label="BA/Auto-Spawn",
+                temperature=0.2,
+            )
+        else:
+            response_text, model_used = _call_with_full_fallback(
+                system_prompt="You are a narrative architect analyzing story structure.",
+                user_prompt=prompt,
+                temperature=0.2,
+                label="Auto-Spawn",
+                nvidia_models=nvidia_models,
+                nvidia_use_thinking=False,
+                nokey_models=NOKEY_TASK_MODELS,
+            )
         print(f"  [Auto-Spawn] Got response from {model_used}")
         
         new_cats = parse_json_array_response(response_text)
@@ -3772,6 +3831,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
             new_text,
             set(custom_categories),
             nvidia_models=NVIDIA_BACKGROUND_MODELS,
+            user_info=user_info,
         )
         custom_categories.extend(newly_spawned)
 
@@ -3962,12 +4022,23 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
 
         combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
 
-        text, model_used = generate_with_fallback(
-            combined_prompt,
-            nvidia_models=NVIDIA_BACKGROUND_MODELS,
-            nvidia_use_thinking=False,
-            nokey_models=NOKEY_BACKGROUND_MODELS,
-        )
+        # Use user-specific AI clients when user_info is available
+        bg_system = "You are an expert story continuity manager."
+        if user_info:
+            text, model_used = run_user_task_completion(
+                system_prompt=bg_system,
+                user_prompt=combined_prompt,
+                user_info=user_info,
+                label="BA/Analysis",
+                temperature=0.7,
+            )
+        else:
+            text, model_used = generate_with_fallback(
+                combined_prompt,
+                nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                nvidia_use_thinking=False,
+                nokey_models=NOKEY_BACKGROUND_MODELS,
+            )
         print(f"Background analysis done with {model_used}")
 
         # Strip model thinking/reasoning before parsing into sections
@@ -4130,13 +4201,13 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
 
         # === Model 4: Inventory Tracker — update item status/quantities ===
         try:
-            update_inventory(story_id, new_text, user_id=user_id)
+            update_inventory(story_id, new_text, user_id=user_id, user_info=user_info)
         except Exception as inv_err:
             print(f"  [INVENTORY] Error (non-critical): {inv_err}")
 
         # === Phase 2: Verification Layer — cross-check all reference files ===
         try:
-            verify_reference_files(story_id, user_id=user_id)
+            verify_reference_files(story_id, user_id=user_id, user_info=user_info)
         except Exception as verify_err:
             print(f"  [VERIFY] Error (non-critical): {verify_err}")
 
@@ -4459,7 +4530,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             
             # Stream Model 3 (Story Generator) ??? NO audio bytes, just text
             try:
-                stream, model_name, is_thinking = stream_with_fallback(pipeline_system, pipeline_user)
+                stream, model_name, is_thinking = stream_with_fallback(pipeline_system, pipeline_user, user_info=user_info)
                 model_used_ref = model_name
                 stream_model_name = model_name
                 stream_is_thinking = is_thinking
@@ -4843,7 +4914,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 user_msg,
                 nvidia_models=NVIDIA_STORY_STREAM_MODELS,
                 selected_provider=input_data.provider,
-                selected_model=input_data.model
+                selected_model=input_data.model,
+                user_info=user_info
             )
             print(f"DEBUG: Stream started, model: {model_used}, thinking: {is_thinking}")
             model_used_ref = model_used
