@@ -72,11 +72,13 @@ try:
         firebase_admin.initialize_app(cred)
         firebase_initialized = True
     else:
-        try:
-            firebase_admin.initialize_app()
-            firebase_initialized = True
-        except Exception:
-            pass
+        # Check if GOOGLE_APPLICATION_CREDENTIALS is explicitly in environment before trying ADC
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            try:
+                firebase_admin.initialize_app()
+                firebase_initialized = True
+            except Exception:
+                pass
             
     if firebase_initialized:
         db_firestore = firestore.client()
@@ -447,7 +449,7 @@ def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = F
     if use_thinking:
         if model == "deepseek-ai/deepseek-v4-pro":
             # MAX reasoning for best story quality
-            extra_body["reasoning_effort"] = "medium"
+            extra_body["reasoning_effort"] = "max"
         elif model == "nvidia/nemotron-3-super-120b-a12b":
             extra_body["reasoning_effort"] = "high"
         elif model == "nvidia/nemotron-3-nano-30b-a3b":
