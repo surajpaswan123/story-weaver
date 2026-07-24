@@ -4697,10 +4697,100 @@ from fastapi import Response
 async def favicon():
     return Response(status_code=204)
 
+
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+DYNAMIC_PROVIDER_MODELS = dict(STATIC_PROVIDER_MODELS)
+LAST_DYNAMIC_FETCH = 0
+
+def fetch_openrouter_live_models():
+    try:
+        req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers={"User-Agent": "StoryWeaver/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "openrouter", models
+    except Exception as e:
+        print(f"[Live Fetch Note] OpenRouter models fetch: {e}")
+    return None
+
+def fetch_nvidia_live_models():
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        return None
+    try:
+        req = urllib.request.Request("https://integrate.api.nvidia.com/v1/models", headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "nvidia", models
+    except Exception as e:
+        print(f"[Live Fetch Note] NVIDIA models fetch: {e}")
+    return None
+
+def fetch_groq_live_models():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    try:
+        req = urllib.request.Request("https://api.groq.com/openai/v1/models", headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "groq", models
+    except Exception as e:
+        print(f"[Live Fetch Note] Groq models fetch: {e}")
+    return None
+
+def refresh_live_provider_models():
+    global DYNAMIC_PROVIDER_MODELS, LAST_DYNAMIC_FETCH
+    try:
+        print("[Live Fetch] Fetching real-time online AI model lists...")
+        updated = dict(STATIC_PROVIDER_MODELS)
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(fetch_openrouter_live_models),
+                executor.submit(fetch_nvidia_live_models),
+                executor.submit(fetch_groq_live_models)
+            ]
+            for f in futures:
+                res = f.result()
+                if res:
+                    provider_key, live_models = res
+                    if provider_key in updated:
+                        existing = updated[provider_key]["models"]
+                        # Prepend static defaults so recommended models stay top, followed by all live online models
+                        merged = list(existing) + [m for m in live_models if m not in existing]
+                        updated[provider_key]["models"] = merged
+
+        DYNAMIC_PROVIDER_MODELS = updated
+        LAST_DYNAMIC_FETCH = time.time()
+        print(f"[Live Fetch OK] Successfully loaded online model lists! (OpenRouter: {len(DYNAMIC_PROVIDER_MODELS.get('openrouter', {}).get('models', []))} models)")
+    except Exception as e:
+        print(f"[Live Fetch Note] Background fetch error: {e}")
+
+# Trigger background live fetch on module load
+threading.Thread(target=refresh_live_provider_models, daemon=True).start()
+
+
 @app.get("/api/providers-models")
 async def get_providers_and_models():
-    """Returns available AI providers and their models instantly without network delays"""
-    return {"providers": STATIC_PROVIDER_MODELS}
+    """Returns available AI providers and their live real-time models without blocking response"""
+    # Trigger background refresh if cache is older than 30 minutes
+    if time.time() - LAST_DYNAMIC_FETCH > 1800:
+        threading.Thread(target=refresh_live_provider_models, daemon=True).start()
+    return {"providers": DYNAMIC_PROVIDER_MODELS}
 
 if __name__ == "__main__":
     import uvicorn
