@@ -2274,6 +2274,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     response = await new Promise((resolve, reject) => {
                         const xhr = new XMLHttpRequest();
                         xhr.open('POST', '/generate-audio');
+                        if (currentUserToken) {
+                            xhr.setRequestHeader('Authorization', `Bearer ${currentUserToken}`);
+                        }
                         xhr.responseType = 'blob';
 
                         xhr.upload.onprogress = (e) => {
