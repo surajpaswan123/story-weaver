@@ -122,6 +122,188 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         print(f"[Auth Error] Failed to verify Firebase token: {e}")
         return "default_user"
 
+
+SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
+
+def get_current_user_info(authorization: str = Header(None)) -> dict:
+    """Extract user UID, email, and Super Admin status from Bearer token."""
+    user_info = {
+        "uid": "default_user",
+        "email": "",
+        "is_super_admin": False
+    }
+    if not authorization or not authorization.startswith("Bearer "):
+        # In local dev mode without auth header, check if local super admin is enabled
+        if os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "true").lower() == "true":
+            user_info["is_super_admin"] = True
+            user_info["email"] = SUPER_ADMIN_EMAIL
+        return user_info
+        
+    token = authorization.split("Bearer ")[1].strip()
+    
+    # 1. Try Firebase Admin token verification
+    if firebase_initialized:
+        try:
+            decoded = auth.verify_id_token(token)
+            if decoded.get("uid"):
+                user_info["uid"] = decoded["uid"]
+                user_info["email"] = (decoded.get("email") or "").strip().lower()
+        except Exception:
+            pass
+            
+    # 2. JWT Decode fallback
+    if not user_info["email"] or user_info["uid"] == "default_user":
+        try:
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+                user_info["uid"] = payload_data.get("user_id") or payload_data.get("sub") or user_info["uid"]
+                user_info["email"] = (payload_data.get("email") or payload_data.get("user_email") or "").strip().lower()
+        except Exception as err:
+            print(f"[Auth Note] Token user_info decode note: {err}")
+
+    if user_info["email"] and user_info["email"] == SUPER_ADMIN_EMAIL:
+        user_info["is_super_admin"] = True
+    elif user_info["uid"] == "default_user" and os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "true").lower() == "true":
+        user_info["is_super_admin"] = True
+
+    return user_info
+
+def get_user_keys_file(uid: str) -> str:
+    """Get absolute path to user_keys.json inside user stories directory."""
+    safe_uid = re.sub(r'[^a-zA-Z0-9_-]', '_', uid or "default_user").lower()
+    user_dir = os.path.join(STORIES_DIR, safe_uid)
+    os.makedirs(user_dir, exist_ok=True)
+    return os.path.join(user_dir, "user_keys.json")
+
+
+def get_effective_ai_clients(user_info: dict) -> dict:
+    """Return dictionary of available AI client instances for the requesting user.
+    Super Admin (surajssd1000@gmail.com) gets full access to system .env keys.
+    Standard users get dynamic clients instantiated from their custom API keys."""
+    uid = user_info.get("uid", "default_user")
+    is_super_admin = user_info.get("is_super_admin", False)
+
+    if is_super_admin:
+        return {
+            "genai_clients": clients,
+            "nvidia_client": nvidia_client,
+            "openrouter_client": openrouter_client,
+            "groq_client": groq_client,
+            "mistral_client": mistral_client,
+            "hf_client": hf_client,
+            "nokey_client": nokey_client,
+            "cerebras_client": cerebras_client,
+            "openai_client": official_openai_client,
+            "is_super_admin": True
+        }
+
+    # Load custom keys for standard user
+    user_keys = load_user_keys(uid)
+    user_clients = {
+        "genai_clients": [],
+        "nvidia_client": None,
+        "openrouter_client": None,
+        "groq_client": None,
+        "mistral_client": None,
+        "hf_client": None,
+        "nokey_client": None,
+        "cerebras_client": None,
+        "openai_client": None,
+        "is_super_admin": False
+    }
+
+    if user_keys.get("gemini_api_key"):
+        try:
+            user_clients["genai_clients"].append(genai.Client(api_key=user_keys["gemini_api_key"]))
+        except Exception as e:
+            print(f"[UserClient] Failed to create Gemini client for {uid[:8]}: {e}")
+
+    if user_keys.get("openai_api_key"):
+        try:
+            user_clients["openai_client"] = OpenAI(api_key=user_keys["openai_api_key"])
+        except Exception as e:
+            print(f"[UserClient] Failed to create OpenAI client for {uid[:8]}: {e}")
+
+    if user_keys.get("openrouter_api_key"):
+        try:
+            user_clients["openrouter_client"] = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=user_keys["openrouter_api_key"])
+        except Exception as e:
+            print(f"[UserClient] Failed to create OpenRouter client for {uid[:8]}: {e}")
+
+    if user_keys.get("groq_api_key"):
+        try:
+            user_clients["groq_client"] = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=user_keys["groq_api_key"])
+        except Exception as e:
+            print(f"[UserClient] Failed to create Groq client for {uid[:8]}: {e}")
+
+    if user_keys.get("nvidia_api_key"):
+        try:
+            user_clients["nvidia_client"] = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=user_keys["nvidia_api_key"])
+        except Exception as e:
+            print(f"[UserClient] Failed to create NVIDIA client for {uid[:8]}: {e}")
+
+    return user_clients
+
+
+def load_user_keys(uid: str) -> dict:
+    """Load user-specific custom API keys from user_keys.json or Firestore."""
+    keys = {
+        "gemini_api_key": "",
+        "openai_api_key": "",
+        "openrouter_api_key": "",
+        "groq_api_key": "",
+        "nvidia_api_key": ""
+    }
+    key_file = get_user_keys_file(uid)
+    if os.path.exists(key_file):
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                keys.update({k: v for k, v in data.items() if k in keys})
+        except Exception as e:
+            print(f"[UserKeys Load Error] {e}")
+
+    # Read from Firestore if available
+    if db_firestore and uid and uid != "default_user":
+        try:
+            doc_ref = db_firestore.collection("users").document(uid).collection("settings").document("keys")
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict() or {}
+                for k in keys:
+                    if data.get(k):
+                        keys[k] = data[k]
+        except Exception as e:
+            print(f"[UserKeys Firestore Load Error] {e}")
+
+    return keys
+
+def save_user_keys(uid: str, new_keys: dict):
+    """Save user-specific custom API keys to user_keys.json and Firestore."""
+    keys = load_user_keys(uid)
+    for k in keys:
+        if k in new_keys and isinstance(new_keys[k], str):
+            keys[k] = new_keys[k].strip()
+
+    key_file = get_user_keys_file(uid)
+    try:
+        with open(key_file, "w", encoding="utf-8") as f:
+            json.dump(keys, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[UserKeys Save Error] {e}")
+
+    if db_firestore and uid and uid != "default_user":
+        try:
+            doc_ref = db_firestore.collection("users").document(uid).collection("settings").document("keys")
+            doc_ref.set(keys, merge=True)
+        except Exception as e:
+            print(f"[UserKeys Firestore Save Error] {e}")
+
+    return keys
+
+
 def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: str, title: str = None):
     """Save a specific file content into Firestore under users/{uid}/stories/{story_id}"""
     if db_firestore and uid and uid != "default_user":
@@ -598,6 +780,27 @@ NOKEY_SAFETY_OFF = {
         ]
     }
 }
+
+
+
+# Official OpenAI Client
+official_openai_client = None
+official_openai_key = os.getenv("OPENAI_API_KEY")
+if official_openai_key:
+    try:
+        official_openai_client = OpenAI(api_key=official_openai_key)
+        print("Official OpenAI client initialized.")
+    except Exception as e:
+        print(f"Failed to initialize Official OpenAI client: {e}")
+
+OPENAI_MODELS = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3-mini",
+    "o1",
+    "o1-mini",
+    "gpt-4-turbo",
+]
 
 
 # Cerebras Configuration (Llama 3.3 Speed King - Layer 5)
@@ -4865,6 +5068,54 @@ if __name__ == "__main__":
         reload=True,
         reload_dirs=[project_dir],
     )
+
+
+
+class UserKeysPayload(BaseModel):
+    gemini_api_key: Optional[str] = ""
+    openai_api_key: Optional[str] = ""
+    openrouter_api_key: Optional[str] = ""
+    groq_api_key: Optional[str] = ""
+    nvidia_api_key: Optional[str] = ""
+
+@app.get("/api/user/settings")
+async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
+    """Retrieve user settings, role, and masked custom API keys."""
+    uid = user_info["uid"]
+    keys = load_user_keys(uid)
+    masked_keys = {}
+    for k, v in keys.items():
+        if v and len(v) > 8:
+            masked_keys[k] = v[:4] + "..." + v[-4:]
+        elif v:
+            masked_keys[k] = "••••••••"
+        else:
+            masked_keys[k] = ""
+
+    return {
+        "uid": uid,
+        "email": user_info["email"],
+        "is_super_admin": user_info["is_super_admin"],
+        "has_custom_keys": any(bool(v) for v in keys.values()),
+        "masked_keys": masked_keys,
+        "super_admin_email": SUPER_ADMIN_EMAIL
+    }
+
+@app.post("/api/user/settings")
+async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depends(get_current_user_info)):
+    """Update user-specific custom API keys."""
+    uid = user_info["uid"]
+    new_keys = payload.model_dump()
+    saved = save_user_keys(uid, new_keys)
+    return {
+        "status": "success",
+        "message": "User API keys saved successfully!",
+        "has_gemini": bool(saved.get("gemini_api_key")),
+        "has_openai": bool(saved.get("openai_api_key")),
+        "has_openrouter": bool(saved.get("openrouter_api_key")),
+        "has_groq": bool(saved.get("groq_api_key")),
+        "has_nvidia": bool(saved.get("nvidia_api_key"))
+    }
 
 
 @app.get("/api/logs")
