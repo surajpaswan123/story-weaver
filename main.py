@@ -89,10 +89,28 @@ except Exception as fb_err:
     print(f"[Firebase] Firebase note: {fb_err} — running in local mode.")
 
 def get_current_user_id(authorization: str = Header(None)) -> str:
-    """Extract user UID from Firebase ID token in Authorization header.
-    Returns 'default_user' if no token provided or Firebase not active."""
-    if not authorization or not authorization.startswith("Bearer ") or not firebase_initialized:
+    """Extract user UID from Firebase ID token in Authorization header."""
+    if not authorization or not authorization.startswith("Bearer "):
         return "default_user"
+    token = authorization.split("Bearer ")[1].strip()
+    if firebase_initialized:
+        try:
+            decoded = auth.verify_id_token(token)
+            if decoded.get("uid"):
+                return decoded["uid"]
+        except Exception:
+            pass
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+            payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+            uid = payload_data.get("user_id") or payload_data.get("sub")
+            if uid:
+                return uid
+    except Exception:
+        pass
+    return "default_user"
     token = authorization.split("Bearer ")[1].strip()
     try:
         decoded = auth.verify_id_token(token)
@@ -848,7 +866,7 @@ SNAPSHOT_FILES = {"summary.md", "incidents.md", "items.md", "time.md", "characte
 def save_snapshot(story_id: str):
     """Save a snapshot of all tracked .md files before a generation.
     Only keeps the latest snapshot (for single undo)."""
-    story_dir = get_story_dir(story_id)
+    story_dir = get_story_dir(story_id, uid=user_id)
     snap_dir = os.path.join(story_dir, "_snapshots")
     os.makedirs(snap_dir, exist_ok=True)
     
@@ -867,7 +885,7 @@ def save_snapshot(story_id: str):
 
 def restore_snapshot(story_id: str):
     """Restore .md files from the latest snapshot (called on undo)."""
-    story_dir = get_story_dir(story_id)
+    story_dir = get_story_dir(story_id, uid=user_id)
     snap_dir = os.path.join(story_dir, "_snapshots")
     
     if not os.path.exists(snap_dir):
@@ -1278,10 +1296,10 @@ class CreateStoryInput(BaseModel):
     name: str
 
 @app.post("/stories/create")
-async def create_story(input_data: CreateStoryInput):
+async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_current_user_id)):
     """Create a new story."""
     safe_id = sanitize_id(input_data.name)
-    story_dir = get_story_dir(safe_id)
+    story_dir = get_story_dir(safe_id, uid=user_id)
     story_path = os.path.join(story_dir, "story.md")
     if not os.path.exists(story_path):
         with open(story_path, "w", encoding="utf-8") as f:
@@ -1295,12 +1313,12 @@ async def create_story(input_data: CreateStoryInput):
     return {"id": safe_id, "name": input_data.name}
 
 @app.delete("/story/{story_id}")
-async def delete_story(story_id: str):
+async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Delete a story and all its files."""
     import shutil
     import stat
     safe_id = sanitize_id(story_id)
-    story_dir = os.path.join(STORIES_DIR, safe_id)
+    story_dir = get_story_dir(safe_id, uid=user_id, create=False)
     if os.path.exists(story_dir):
         # Windows fix: handle read-only files
         def on_rm_error(func, path, exc_info):
@@ -1310,7 +1328,7 @@ async def delete_story(story_id: str):
     return {"success": True}
 
 @app.get("/story/{story_id}/chat")
-async def get_chat_log(story_id: str, last: int = 10):
+async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get_current_user_id)):
     """Get recent chat messages for display."""
     path = get_chat_log_path(story_id, uid=uid, create=False)
     entries = []
@@ -1324,7 +1342,7 @@ async def get_chat_log(story_id: str, last: int = 10):
     
     # Fallback: if no chat log but story.md has content, show it as one AI message
     if not entries:
-        story_path = get_story_path(story_id, create=False)
+        story_path = get_story_path(story_id, uid=user_id, create=False)
         if os.path.exists(story_path):
             with open(story_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
@@ -1338,9 +1356,9 @@ async def get_chat_log(story_id: str, last: int = 10):
     return {"messages": entries[-last:]}
 
 @app.get("/story/{story_id}")
-async def get_story(story_id: str, tail: int = 3000):
+async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_current_user_id)):
     """Get story content. Only returns the last `tail` characters by default to avoid memory issues."""
-    path = get_story_path(story_id, create=False)
+    path = get_story_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"content": "", "total_length": 0, "truncated": False}
     with open(path, "r", encoding="utf-8") as f:
@@ -1359,16 +1377,16 @@ async def get_story(story_id: str, tail: int = 3000):
     return {"content": truncated_content, "total_length": total_length, "truncated": True}
 
 @app.get("/story/{story_id}/full")
-async def get_full_story(story_id: str):
+async def get_full_story(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Get the full story content (for export/download)."""
-    path = get_story_path(story_id, create=False)
+    path = get_story_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"content": ""}
     with open(path, "r", encoding="utf-8") as f:
         return {"content": f.read()}
 
 @app.get("/story/{story_id}/elements")
-async def get_elements(story_id: str):
+async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Get all extracted story elements."""
     elements = {}
     for cat in ELEMENT_CATEGORIES:
@@ -1379,9 +1397,9 @@ async def get_elements(story_id: str):
     return elements
 
 @app.get("/story/{story_id}/summary")
-async def get_summary(story_id: str):
+async def get_summary(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Get the AI-maintained story summary."""
-    path = get_summary_path(story_id, create=False)
+    path = get_summary_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"summary": ""}
     with open(path, "r", encoding="utf-8") as f:
@@ -1391,9 +1409,9 @@ class SummaryInput(BaseModel):
     summary: str
 
 @app.put("/story/{story_id}/summary")
-async def update_summary(story_id: str, input_data: SummaryInput):
+async def update_summary(story_id: str, input_data: SummaryInput, user_id: str = Depends(get_current_user_id)):
     """Manually update the story summary."""
-    path = get_summary_path(story_id)
+    path = get_summary_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.summary)
     return {"success": True}
@@ -1403,40 +1421,40 @@ class TextInput(BaseModel):
 
 # --- Style Guide ---
 @app.get("/story/{story_id}/style")
-async def get_style(story_id: str):
-    path = get_style_path(story_id, create=False)
+async def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
+    path = get_style_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
     with open(path, "r", encoding="utf-8") as f:
         return {"text": f.read()}
 
 @app.put("/story/{story_id}/style")
-async def update_style(story_id: str, input_data: TextInput):
-    path = get_style_path(story_id)
+async def update_style(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+    path = get_style_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.text)
     return {"success": True}
 
 # --- World Rules ---
 @app.get("/story/{story_id}/rules")
-async def get_rules(story_id: str):
-    path = get_rules_path(story_id, create=False)
+async def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
+    path = get_rules_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
     with open(path, "r", encoding="utf-8") as f:
         return {"text": f.read()}
 
 @app.put("/story/{story_id}/rules")
-async def update_rules(story_id: str, input_data: TextInput):
-    path = get_rules_path(story_id)
+async def update_rules(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+    path = get_rules_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.text)
     return {"success": True}
 
 # --- Consistency Log ---
 @app.get("/story/{story_id}/consistency")
-async def get_consistency(story_id: str):
-    path = get_consistency_path(story_id, create=False)
+async def get_consistency(story_id: str, user_id: str = Depends(get_current_user_id)):
+    path = get_consistency_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
     with open(path, "r", encoding="utf-8") as f:
@@ -1726,7 +1744,7 @@ def update_inventory(story_id: str, new_text: str):
     if not new_text.strip():
         return
     
-    story_dir = get_story_dir(story_id)
+    story_dir = get_story_dir(story_id, uid=user_id)
     items_path = os.path.join(story_dir, "items.md")
     
     if not os.path.exists(items_path):
@@ -1941,7 +1959,7 @@ def verify_reference_files(story_id: str):
         print("[VERIFY] No NVIDIA, nokey, or native API clients, skipping verification.")
         return
 
-    story_dir = get_story_dir(story_id)
+    story_dir = get_story_dir(story_id, uid=user_id)
 
     # Files that are source of truth (READ-ONLY) or managed elsewhere
     IGNORE_FILES = {
@@ -3341,7 +3359,7 @@ def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: se
 def background_analysis(story_id: str, full_story: str, new_text: str):
     """Single background task: extract elements, update summary, and check consistency in ONE API call."""
     try:
-        story_dir = get_story_dir(story_id)
+        story_dir = get_story_dir(story_id, uid=user_id)
         
         # Files that are automatically managed differently and shouldn't be treated as element lists
         IGNORE_FILES = {"story.md", "summary.md", "consistency.md", "rules.md", "style.md", "context.md", "audio_log.md"}
@@ -3365,8 +3383,8 @@ def background_analysis(story_id: str, full_story: str, new_text: str):
         )
         custom_categories.extend(newly_spawned)
 
-        summary_path = get_summary_path(story_id)
-        rules_path = get_rules_path(story_id)
+        summary_path = get_summary_path(story_id, uid=user_id)
+        rules_path = get_rules_path(story_id, uid=user_id)
 
         # Read ALL current elements for context to avoid duplication
         existing_elements = ""
@@ -3380,13 +3398,13 @@ def background_analysis(story_id: str, full_story: str, new_text: str):
                 if content:
                     existing_elements += f"=== {cat.upper()} ===\n{content}\n\n"
 
-        summary_path = get_summary_path(story_id)
+        summary_path = get_summary_path(story_id, uid=user_id)
         existing_summary = ""
         if os.path.exists(summary_path):
             with open(summary_path, "r", encoding="utf-8") as f:
                 existing_summary = f.read()
 
-        rules_path = get_rules_path(story_id)
+        rules_path = get_rules_path(story_id, uid=user_id)
         rules_text = ""
         if os.path.exists(rules_path):
             with open(rules_path, "r", encoding="utf-8") as f:
@@ -3734,10 +3752,10 @@ def background_analysis(story_id: str, full_story: str, new_text: str):
         print(f"Background analysis failed (non-critical): {e}")
 
 @app.post("/analyze/{story_id}")
-async def trigger_analysis(story_id: str):
+async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Manually trigger background analysis for a story."""
     try:
-        story_path = get_story_path(story_id, create=False)
+        story_path = get_story_path(story_id, uid=user_id, create=False)
         if not os.path.exists(story_path):
             raise HTTPException(status_code=404, detail="Story not found")
         
@@ -3755,9 +3773,9 @@ async def trigger_analysis(story_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/story/{story_id}/undo")
-async def undo_last(story_id: str):
+async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
-    story_path = get_story_path(story_id, create=False)
+    story_path = get_story_path(story_id, uid=user_id, create=False)
     chat_path = get_chat_log_path(story_id, uid=uid, create=False)
 
     if not os.path.exists(story_path):
@@ -3864,7 +3882,7 @@ async def generate_with_audio(
     print(f"DEBUG: Audio size: {len(audio_bytes)} bytes, mime: {audio_mime}, format: {audio_format}")
 
     story_path = get_story_path(story_id)
-    story_dir = get_story_dir(story_id)
+    story_dir = get_story_dir(story_id, uid=user_id)
 
     # Read the full story text
     full_story_text = ""
@@ -4007,7 +4025,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
             
             # Read style.md for rules editor (used later in post-processing)
             style_text = ""
-            style_path = get_style_path(story_id)
+            style_path = get_style_path(story_id, uid=user_id)
             if os.path.exists(style_path):
                 with open(style_path, "r", encoding="utf-8") as f:
                     style_text = f.read().strip()
@@ -4235,13 +4253,13 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/generate")
-async def generate_story(input_data: StoryInput):
+async def generate_story(input_data: StoryInput, user_id: str = Depends(get_current_user_id)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
     if not has_any_generation_provider():
         raise HTTPException(status_code=500, detail="No AI providers are configured or reachable.")
 
-    story_path = get_story_path(input_data.story_id)
-    story_dir = get_story_dir(input_data.story_id)
+    story_path = get_story_path(input_data.story_id, uid=user_id)
+    story_dir = get_story_dir(input_data.story_id, uid=user_id)
 
     # Read the full story text (needed later for appending)
     full_story_text = ""
@@ -4276,7 +4294,7 @@ async def generate_story(input_data: StoryInput):
     style_text = ""
     all_md_files = {f for f in os.listdir(story_dir) if f.endswith(".md")}
 
-    rules_path = get_rules_path(input_data.story_id)
+    rules_path = get_rules_path(input_data.story_id, uid=user_id)
     if os.path.exists(rules_path):
         with open(rules_path, "r", encoding="utf-8") as f:
             rules_text = f.read().strip()
@@ -4627,7 +4645,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     print(f"FILE WRITE ERROR: {write_err}")
             
             # Log AI response to chat log
-            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref)
+            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref, uid=user_id)
             chat_logged = True
             
             # Trigger background analysis (BATCHED) - and WAIT for it before signaling done,
@@ -4636,7 +4654,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             # items.md/time.md/etc. until this turn's updates have actually been written.
             updated_story = full_story_text + ("\n\n" if full_story_text else "") + full_response
             
-            turn_counter = get_turn_count(input_data.story_id)
+            turn_counter = get_turn_count(input_data.story_id, uid=user_id)
             print(f"Turn {turn_counter} completed. (Batch size: {BATCH_SIZE})")
 
             if turn_counter % BATCH_SIZE == 0:
@@ -4644,7 +4662,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 # Analyze everything since the last run (last BATCH_SIZE turns), not just this
                 # single turn - if BATCH_SIZE > 1, skipped turns would otherwise never get
                 # extracted into characters.md/locations.md/etc.
-                new_text_for_analysis = get_recent_story_text(input_data.story_id, BATCH_SIZE) or full_response
+                new_text_for_analysis = get_recent_story_text(input_data.story_id, BATCH_SIZE, uid=user_id) or full_response
                 analysis_thread = threading.Thread(
                     target=background_analysis,
                     args=(input_data.story_id, updated_story, new_text_for_analysis)
@@ -4671,7 +4689,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             f.write(clean_text("\n\n" + full_response))
                         response_persisted = True
                         if not chat_logged:
-                            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref)
+                            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref, uid=user_id)
                             chat_logged = True
                     except Exception as save_err:
                         print(f"Failed to save partial response: {save_err}")
