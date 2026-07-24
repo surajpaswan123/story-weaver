@@ -1980,11 +1980,18 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     } else {
                         currentUser = null;
                         currentUserToken = null;
+                        currentStoryId = '';
+                        lastUserPrompt = '';
+                        const storyListEl = document.getElementById('story-list');
+                        const storyDisplayEl = document.getElementById('story-display');
+                        if (storyListEl) storyListEl.innerHTML = '';
+                        if (storyDisplayEl) storyDisplayEl.innerHTML = '';
+                        
                         if (loginScreen) loginScreen.classList.remove('hidden');
                         if (appContainer) appContainer.classList.add('hidden');
                         if (loginBtn) loginBtn.classList.remove('hidden');
                         if (userProfile) userProfile.classList.add('hidden');
-                        console.log('[Auth] No active session — showing mandatory login gate.');
+                        console.log('[Auth] No active session — cleared UI & showing mandatory login gate.');
                     }
                 });
             } catch (e) {
