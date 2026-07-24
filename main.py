@@ -447,7 +447,7 @@ def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = F
     if use_thinking:
         if model == "deepseek-ai/deepseek-v4-pro":
             # MAX reasoning for best story quality
-            extra_body["reasoning_effort"] = "max"
+            extra_body["reasoning_effort"] = "medium"
         elif model == "nvidia/nemotron-3-super-120b-a12b":
             extra_body["reasoning_effort"] = "high"
         elif model == "nvidia/nemotron-3-nano-30b-a3b":
