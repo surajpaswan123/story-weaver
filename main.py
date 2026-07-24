@@ -1509,7 +1509,32 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
         check_prompt += f"=== STYLE GUIDE ===\n{style_text}\n\n"
     check_prompt += f"=== GENERATED TEXT ===\n{generated_text}"
 
-    # 0. Try NVIDIA FIRST (deepseek-v4-pro etc.), streamed live
+    # 0. PRIMARY: Google GenAI gemini-3.5-flash-lite (fastest ~300 TPS)
+    for c in clients:
+        try:
+            primary_model = "gemini-3.5-flash-lite"
+            print(f"  [RulesEditor] Streaming with GenAI/{primary_model} (primary - 300 TPS)...")
+            stream = c.models.generate_content_stream(
+                model=primary_model,
+                contents=f"{system_prompt}\n\n{check_prompt}",
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    safety_settings=SAFETY_SETTINGS,
+                ),
+            )
+            got_any = False
+            for chunk in stream:
+                text = _safe_chunk_text(chunk)
+                if text:
+                    got_any = True
+                    yield text
+            if got_any:
+                print(f"  [RulesEditor] Streamed successfully via GenAI/{primary_model}")
+                return
+        except Exception as e:
+            print(f"  [RulesEditor] GenAI/{primary_model} failed: {e}")
+
+    # 1. Fallback: NVIDIA (deepseek-v4-pro etc.), streamed live
     if nvidia_client:
         for model in NVIDIA_RULES_MODELS:
             try:
@@ -1537,7 +1562,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
             except Exception as e:
                 print(f"  [RulesEditor] NVIDIA/{model} streaming failed: {e}")
 
-    # 1. Fallback to Nokey, streamed live
+    # 2. Fallback to Nokey, streamed live
     if nokey_client:
         for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview"]:
             try:
@@ -1570,7 +1595,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
             except Exception as e:
                 print(f"  [RulesEditor] Nokey/{model_name} streaming failed: {e}")
 
-    # 2. Fallback to GenAI native, streamed live
+    # 3. Fallback to other GenAI models, streamed live
     for c in clients:
         for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"]:
             try:
@@ -1596,7 +1621,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
             except Exception as e:
                 print(f"  [RulesEditor] GenAI/{model_name} streaming failed: {e}")
 
-    # 3. Last resort: full fallback chain (non-streaming) — yielded as one piece
+    # 4. Last resort: full fallback chain (non-streaming) — yielded as one piece
     try:
         result, model_used = _call_with_full_fallback(
             system_prompt=system_prompt,
