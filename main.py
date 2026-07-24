@@ -1612,27 +1612,14 @@ async def read_root():
 
 @app.get("/stories")
 async def list_stories(user_id: str = Depends(get_current_user_id)):
-    """List stories belonging specifically to the authenticated user."""
+    """List stories belonging specifically to the authenticated user (merges local disk and Firestore)."""
     print(f"[Stories Route] Listing stories for user_id: {user_id}")
-    
-    # 1. Check Firestore if active
-    if db_firestore and user_id != "default_user":
-        fs_stories = list_user_stories_firestore(user_id)
-        if fs_stories:
-            formatted = []
-            for s in fs_stories:
-                formatted.append({
-                    "id": s["id"],
-                    "name": s.get("title", s["id"].replace("-", " ").title()),
-                    "size": 2048,
-                    "modified": s.get("updated_at", 0)
-                })
-            return {"stories": formatted}
+    stories = []
+    seen_ids = set()
 
-    # 2. Local disk storage user isolation
+    # 1. Local disk storage user isolation
     safe_uid = sanitize_id(user_id)
     user_dir = os.path.join(STORIES_DIR, safe_uid)
-    stories = []
     
     if os.path.exists(user_dir):
         for name in sorted(os.listdir(user_dir)):
@@ -1647,12 +1634,26 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                     "size": size,
                     "modified": modified
                 })
+                seen_ids.add(name)
+
+    # 2. Merge Firestore stories if active
+    if db_firestore and user_id != "default_user":
+        fs_stories = list_user_stories_firestore(user_id)
+        for s in fs_stories:
+            if s["id"] not in seen_ids:
+                stories.append({
+                    "id": s["id"],
+                    "name": s.get("title", s["id"].replace("-", " ").title()),
+                    "size": 2048,
+                    "modified": s.get("updated_at", 0)
+                })
+                seen_ids.add(s["id"])
 
     # Only show root unassigned stories if user is NOT logged in (default_user)
     if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
         for name in sorted(os.listdir(STORIES_DIR)):
             story_dir = os.path.join(STORIES_DIR, name)
-            if os.path.isdir(story_dir) and name != safe_uid and not any(s["id"] == name for s in stories):
+            if os.path.isdir(story_dir) and name != safe_uid and name not in seen_ids:
                 story_file = os.path.join(story_dir, "story.md")
                 size = os.path.getsize(story_file) if os.path.exists(story_file) else 0
                 modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
@@ -1670,7 +1671,7 @@ class CreateStoryInput(BaseModel):
 
 @app.post("/stories/create")
 async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_current_user_id)):
-    """Create a new story."""
+    """Create a new story locally and sync metadata to Firestore."""
     safe_id = sanitize_id(input_data.name)
     story_dir = get_story_dir(safe_id, uid=user_id)
     story_path = os.path.join(story_dir, "story.md")
@@ -1679,10 +1680,14 @@ async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_
             f.write("")
     # Create all element files with headers so they exist from the start
     for cat in ELEMENT_CATEGORIES:
-        cat_path = get_element_path(safe_id, cat)
+        cat_path = get_element_path(safe_id, cat, uid=user_id)
         if not os.path.exists(cat_path):
             with open(cat_path, "w", encoding="utf-8") as f:
                 f.write(f"## {cat.title()}\n")
+
+    # Sync to Firestore if active
+    save_story_to_firestore(user_id, safe_id, "story.md", "", input_data.name)
+
     return {"id": safe_id, "name": input_data.name}
 
 @app.delete("/story/{story_id}")
