@@ -971,6 +971,15 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 allChatEntries = chatData.messages || [];
 
                 if (allChatEntries.length === 0) {
+                    // Fallback to loading story.md content directly
+                    const storyRes = await authFetch(`/story/${currentStoryId}?tail=3000`);
+                    if (storyRes.ok) {
+                        const storyData = await storyRes.json();
+                        if (storyData.content && storyData.content.trim()) {
+                            renderStoryContent(storyData.content);
+                            return;
+                        }
+                    }
                     storyDisplay.innerHTML = '<p class="text-stone-500 italic text-center mt-16">The page is blank. Waiting for your first words...</p>';
                     return;
                 }
@@ -1805,7 +1814,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         // Keep Send disabled whenever the textbox is empty, so there's nothing to accidentally submit.
         function updateSendButtonState() {
-            sendBtn.disabled = input.value.trim().length === 0;
+            sendBtn.disabled = input.disabled || input.value.trim().length === 0;
         }
         input.addEventListener('input', updateSendButtonState);
         updateSendButtonState();
