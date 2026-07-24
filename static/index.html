@@ -48,12 +48,17 @@ function renderUserSettingsUI() {
         }
     }
 
-    // Populate masked placeholders
+    // Populate masked placeholders & pipeline models
     const masked = currentUserSettings.masked_keys || {};
     if (masked.gemini_api_key) document.getElementById('input-gemini-key').placeholder = `Current: ${masked.gemini_api_key}`;
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+
+    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
+    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
+    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
+    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
 }
 
 function toggleSettingsModal() {
@@ -77,6 +82,10 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        story_model: document.getElementById('input-story-model').value.trim(),
+        background_model: document.getElementById('input-background-model').value.trim(),
+        rules_model: document.getElementById('input-rules-model').value.trim(),
+        audio_model: document.getElementById('input-audio-model').value.trim(),
     };
 
     try {
@@ -221,12 +230,17 @@ function renderUserSettingsUI() {
         }
     }
 
-    // Populate masked placeholders
+    // Populate masked placeholders & pipeline models
     const masked = currentUserSettings.masked_keys || {};
     if (masked.gemini_api_key) document.getElementById('input-gemini-key').placeholder = `Current: ${masked.gemini_api_key}`;
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+
+    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
+    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
+    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
+    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
 }
 
 function toggleSettingsModal() {
@@ -250,6 +264,10 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        story_model: document.getElementById('input-story-model').value.trim(),
+        background_model: document.getElementById('input-background-model').value.trim(),
+        rules_model: document.getElementById('input-rules-model').value.trim(),
+        audio_model: document.getElementById('input-audio-model').value.trim(),
     };
 
     try {
@@ -393,12 +411,17 @@ function renderUserSettingsUI() {
         }
     }
 
-    // Populate masked placeholders
+    // Populate masked placeholders & pipeline models
     const masked = currentUserSettings.masked_keys || {};
     if (masked.gemini_api_key) document.getElementById('input-gemini-key').placeholder = `Current: ${masked.gemini_api_key}`;
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+
+    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
+    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
+    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
+    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
 }
 
 function toggleSettingsModal() {
@@ -422,6 +445,10 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        story_model: document.getElementById('input-story-model').value.trim(),
+        background_model: document.getElementById('input-background-model').value.trim(),
+        rules_model: document.getElementById('input-rules-model').value.trim(),
+        audio_model: document.getElementById('input-audio-model').value.trim(),
     };
 
     try {
@@ -565,12 +592,17 @@ function renderUserSettingsUI() {
         }
     }
 
-    // Populate masked placeholders
+    // Populate masked placeholders & pipeline models
     const masked = currentUserSettings.masked_keys || {};
     if (masked.gemini_api_key) document.getElementById('input-gemini-key').placeholder = `Current: ${masked.gemini_api_key}`;
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+
+    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
+    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
+    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
+    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
 }
 
 function toggleSettingsModal() {
@@ -594,6 +626,10 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        story_model: document.getElementById('input-story-model').value.trim(),
+        background_model: document.getElementById('input-background-model').value.trim(),
+        rules_model: document.getElementById('input-rules-model').value.trim(),
+        audio_model: document.getElementById('input-audio-model').value.trim(),
     };
 
     try {
@@ -2606,12 +2642,17 @@ function renderUserSettingsUI() {
         }
     }
 
-    // Populate masked placeholders
+    // Populate masked placeholders & pipeline models
     const masked = currentUserSettings.masked_keys || {};
     if (masked.gemini_api_key) document.getElementById('input-gemini-key').placeholder = `Current: ${masked.gemini_api_key}`;
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+
+    if (masked.story_model) document.getElementById('input-story-model').value = masked.story_model;
+    if (masked.background_model) document.getElementById('input-background-model').value = masked.background_model;
+    if (masked.rules_model) document.getElementById('input-rules-model').value = masked.rules_model;
+    if (masked.audio_model) document.getElementById('input-audio-model').value = masked.audio_model;
 }
 
 function toggleSettingsModal() {
@@ -2635,6 +2676,10 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        story_model: document.getElementById('input-story-model').value.trim(),
+        background_model: document.getElementById('input-background-model').value.trim(),
+        rules_model: document.getElementById('input-rules-model').value.trim(),
+        audio_model: document.getElementById('input-audio-model').value.trim(),
     };
 
     try {
