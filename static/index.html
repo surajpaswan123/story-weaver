@@ -12,6 +12,14 @@
 let currentUserSettings = null;
 
 
+
+function isAudioModel(modelName) {
+    if (!modelName) return false;
+    const name = String(modelName).toLowerCase();
+    const keywords = ['audio', 'speech', 'voic', 'sound', 'listen', 'whisper', 'omni', 'realtime', 'multimodal', 'gemini', 'gpt-4o', 'gpt-5', 'qwen-audio'];
+    return keywords.some(kw => name.includes(kw));
+}
+
 async function populatePipelineModelDropdowns() {
     try {
         const res = await authFetch('/api/providers-models');
@@ -242,6 +250,14 @@ let logsPollingInterval = null;
 let currentUserSettings = null;
 
 
+
+function isAudioModel(modelName) {
+    if (!modelName) return false;
+    const name = String(modelName).toLowerCase();
+    const keywords = ['audio', 'speech', 'voic', 'sound', 'listen', 'whisper', 'omni', 'realtime', 'multimodal', 'gemini', 'gpt-4o', 'gpt-5', 'qwen-audio'];
+    return keywords.some(kw => name.includes(kw));
+}
+
 async function populatePipelineModelDropdowns() {
     try {
         const res = await authFetch('/api/providers-models');
@@ -471,6 +487,14 @@ let logsPollingInterval = null;
 let currentUserSettings = null;
 
 
+
+function isAudioModel(modelName) {
+    if (!modelName) return false;
+    const name = String(modelName).toLowerCase();
+    const keywords = ['audio', 'speech', 'voic', 'sound', 'listen', 'whisper', 'omni', 'realtime', 'multimodal', 'gemini', 'gpt-4o', 'gpt-5', 'qwen-audio'];
+    return keywords.some(kw => name.includes(kw));
+}
+
 async function populatePipelineModelDropdowns() {
     try {
         const res = await authFetch('/api/providers-models');
@@ -699,6 +723,14 @@ let logsPollingInterval = null;
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+
+function isAudioModel(modelName) {
+    if (!modelName) return false;
+    const name = String(modelName).toLowerCase();
+    const keywords = ['audio', 'speech', 'voic', 'sound', 'listen', 'whisper', 'omni', 'realtime', 'multimodal', 'gemini', 'gpt-4o', 'gpt-5', 'qwen-audio'];
+    return keywords.some(kw => name.includes(kw));
+}
 
 async function populatePipelineModelDropdowns() {
     try {
@@ -2797,6 +2829,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 
+
+
+function isAudioModel(modelName) {
+    if (!modelName) return false;
+    const name = String(modelName).toLowerCase();
+    const keywords = ['audio', 'speech', 'voic', 'sound', 'listen', 'whisper', 'omni', 'realtime', 'multimodal', 'gemini', 'gpt-4o', 'gpt-5', 'qwen-audio'];
+    return keywords.some(kw => name.includes(kw));
+}
 
 async function populatePipelineModelDropdowns() {
     try {
