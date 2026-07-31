@@ -114,6 +114,11 @@ function renderUserSettingsUI() {
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
+        if (masked.nvidia_api_key && document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').placeholder = `Current: ${masked.nvidia_api_key}`;
+                        <div>
+                            <label class="block text-xs text-stone-400 mb-1">🖥️ NVIDIA NIM API Key</label>
+                            <input type="password" id="input-nvidia-key" placeholder="nvapi-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-sm" />
+                        </div>
 
     if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
     if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
@@ -142,6 +147,7 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
         groq_api_key: document.getElementById('input-groq-key').value.trim(),
+        nvidia_api_key: document.getElementById('input-nvidia-key')?.value?.trim() || '',
         story_model: document.getElementById('input-story-model').value.trim(),
         background_model: document.getElementById('input-background-model').value.trim(),
         rules_model: document.getElementById('input-rules-model').value.trim(),
@@ -167,6 +173,7 @@ async function saveUserSettings(e) {
         document.getElementById('input-openai-key').value = '';
         document.getElementById('input-openrouter-key').value = '';
         document.getElementById('input-groq-key').value = '';
+        if (document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').value = '';
 
         await fetchUserSettings();
         // Refresh provider/model dropdowns to reflect newly saved API keys
