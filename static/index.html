@@ -114,11 +114,8 @@ function renderUserSettingsUI() {
     if (masked.openai_api_key) document.getElementById('input-openai-key').placeholder = `Current: ${masked.openai_api_key}`;
     if (masked.openrouter_api_key) document.getElementById('input-openrouter-key').placeholder = `Current: ${masked.openrouter_api_key}`;
     if (masked.groq_api_key) document.getElementById('input-groq-key').placeholder = `Current: ${masked.groq_api_key}`;
-        if (masked.nvidia_api_key && document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').placeholder = `Current: ${masked.nvidia_api_key}`;
-                        <div>
-                            <label class="block text-xs text-stone-400 mb-1">🖥️ NVIDIA NIM API Key</label>
-                            <input type="password" id="input-nvidia-key" placeholder="nvapi-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-sm" />
-                        </div>
+    if (masked.nvidia_api_key && document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').placeholder = `Current: ${masked.nvidia_api_key}`;
+    if (masked.openai_base_url && document.getElementById('input-openai-base-url')) document.getElementById('input-openai-base-url').placeholder = `Current: ${masked.openai_base_url}`;
 
     if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
     if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
@@ -2161,7 +2158,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         // ===== INIT =====
-        loadProvidersAndModels();
+        // loadProvidersAndModels() is called after login via onAuthStateChanged or handleGuestLogin
 
         document.getElementById('new-story-btn').addEventListener('click', createNewStory);
         sendBtn.addEventListener('click', () => submitStory());
@@ -2263,6 +2260,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             <div>
                 <label class="block font-medium text-stone-300 mb-1">Groq API Key (Optional)</label>
                 <input type="password" id="input-groq-key" placeholder="gsk_..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+            </div>
+
+            <div>
+                <label class="block font-medium text-stone-300 mb-1">NVIDIA NIM API Key (Optional)</label>
+                <input type="password" id="input-nvidia-key" placeholder="nvapi-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
             </div>
 
             <!-- Pipeline Model Overrides -->
