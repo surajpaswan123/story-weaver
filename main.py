@@ -5400,7 +5400,7 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         "uid": uid,
         "email": user_info["email"],
         "is_super_admin": user_info["is_super_admin"],
-        "has_custom_keys": any(bool(v) for v in keys.values()),
+        "has_custom_keys": any(bool(v) for k, v in keys.items() if k.endswith("_api_key")),
         "masked_keys": masked_keys,
         "super_admin_email": SUPER_ADMIN_EMAIL
     }
