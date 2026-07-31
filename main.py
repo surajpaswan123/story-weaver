@@ -114,13 +114,6 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
     except Exception as err:
         print(f"[Auth Note] Token decode note: {err}")
     return "default_user"
-    token = authorization.split("Bearer ")[1].strip()
-    try:
-        decoded = auth.verify_id_token(token)
-        return decoded.get("uid", "default_user")
-    except Exception as e:
-        print(f"[Auth Error] Failed to verify Firebase token: {e}")
-        return "default_user"
 
 
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
@@ -167,37 +160,6 @@ def get_current_user_info(authorization: str = Header(None)) -> dict:
         user_info["email"] = SUPER_ADMIN_EMAIL
     else:
         user_info["is_super_admin"] = False
-
-    return user_info
-        
-    token = authorization.split("Bearer ")[1].strip()
-    
-    # 1. Try Firebase Admin token verification
-    if firebase_initialized:
-        try:
-            decoded = auth.verify_id_token(token)
-            if decoded.get("uid"):
-                user_info["uid"] = decoded["uid"]
-                user_info["email"] = (decoded.get("email") or "").strip().lower()
-        except Exception:
-            pass
-            
-    # 2. JWT Decode fallback
-    if not user_info["email"] or user_info["uid"] == "default_user":
-        try:
-            parts = token.split(".")
-            if len(parts) >= 2:
-                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-                payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
-                user_info["uid"] = payload_data.get("user_id") or payload_data.get("sub") or user_info["uid"]
-                user_info["email"] = (payload_data.get("email") or payload_data.get("user_email") or "").strip().lower()
-        except Exception as err:
-            print(f"[Auth Note] Token user_info decode note: {err}")
-
-    if user_info["email"] and user_info["email"] == SUPER_ADMIN_EMAIL:
-        user_info["is_super_admin"] = True
-    elif user_info["uid"] == "default_user" and os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "true").lower() == "true":
-        user_info["is_super_admin"] = True
 
     return user_info
 
@@ -320,9 +282,18 @@ def load_user_keys(uid: str) -> dict:
 def save_user_keys(uid: str, new_keys: dict):
     """Save user-specific custom API keys to user_keys.json and Firestore."""
     keys = load_user_keys(uid)
+    # Non-secret fields can be set to empty (to clear a model override)
+    NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model"}
     for k in keys:
         if k in new_keys and isinstance(new_keys[k], str):
-            keys[k] = new_keys[k].strip()
+            val = new_keys[k].strip()
+            if val:
+                # Always accept non-empty values
+                keys[k] = val
+            elif k in NON_SECRET_FIELDS:
+                # Allow clearing non-secret fields (model overrides, base_url)
+                keys[k] = val
+            # else: skip empty strings for secret keys — preserves existing value
 
     key_file = get_user_keys_file(uid)
     try:
@@ -5412,9 +5383,13 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
     """Retrieve user settings, role, and masked custom API keys."""
     uid = user_info["uid"]
     keys = load_user_keys(uid)
+    # Non-secret fields that should be returned in full (not masked)
+    NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model"}
     masked_keys = {}
     for k, v in keys.items():
-        if v and len(v) > 8:
+        if k in NON_SECRET_FIELDS:
+            masked_keys[k] = v or ""
+        elif v and len(v) > 8:
             masked_keys[k] = v[:4] + "..." + v[-4:]
         elif v:
             masked_keys[k] = "••••••••"
