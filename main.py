@@ -32,7 +32,7 @@ sys.stdout = LogInterceptor(sys.stdout)
 sys.stderr = LogInterceptor(sys.stderr)
 
 from typing import Optional, List, Dict
-from fastapi import FastAPI, HTTPException, Header, Request, Depends
+from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -358,6 +358,61 @@ def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: st
             doc_ref.set(update_payload, merge=True)
         except Exception as e:
             print(f"[Firestore Write Error] {e}")
+
+def restore_story_directory_from_firestore(uid: str, story_id: str):
+    """Restore all files for a story from Firestore if they are missing locally."""
+    if not db_firestore or not uid or uid == "default_user":
+        return
+    try:
+        doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict() or {}
+            files = data.get("files", {})
+            if files:
+                story_dir = get_story_dir(story_id, uid=uid)
+                os.makedirs(story_dir, exist_ok=True)
+                for file_key, file_content in files.items():
+                    file_name = file_key.replace("_json", ".json").replace("_md", ".md")
+                    local_path = os.path.join(story_dir, file_name)
+                    if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+                        with open(local_path, "w", encoding="utf-8") as f:
+                            f.write(file_content)
+                        print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
+    except Exception as e:
+        print(f"[Firestore Restore Error] {e}")
+
+def sync_story_directory_to_firestore(uid: str, story_id: str):
+    """Sync all local files for a story to Firestore."""
+    if not db_firestore or not uid or uid == "default_user":
+        return
+    try:
+        story_dir = get_story_dir(story_id, uid=uid)
+        if not os.path.exists(story_dir):
+            return
+        
+        files_payload = {}
+        for name in os.listdir(story_dir):
+            if name.endswith(".md") or name.endswith(".json"):
+                if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                    continue
+                file_path = os.path.join(story_dir, name)
+                if os.path.isfile(file_path):
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        file_content = f.read()
+                    file_key = name.replace(".json", "_json").replace(".md", "_md")
+                    files_payload[file_key] = file_content
+                    
+        if files_payload:
+            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+            doc_ref.set({
+                "updated_at": time.time(),
+                "files": files_payload
+            }, merge=True)
+            print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
+    except Exception as e:
+        print(f"[Firestore Sync Error] {e}")
+
 
 def get_story_from_firestore(uid: str, story_id: str, file_name: str) -> str:
     """Read a specific file content from Firestore under users/{uid}/stories/{story_id}"""
@@ -1709,6 +1764,7 @@ async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id
 
 @app.get("/story/{story_id}/chat")
 async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     """Get recent chat messages for display."""
     path = get_chat_log_path(story_id, uid=user_id, create=False)
     entries = []
@@ -1737,6 +1793,7 @@ async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get
 
 @app.get("/story/{story_id}")
 async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     """Get story content. Only returns the last `tail` characters by default to avoid memory issues."""
     path = get_story_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -1758,6 +1815,7 @@ async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_
 
 @app.get("/story/{story_id}/full")
 async def get_full_story(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     """Get the full story content (for export/download)."""
     path = get_story_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -1767,6 +1825,7 @@ async def get_full_story(story_id: str, user_id: str = Depends(get_current_user_
 
 @app.get("/story/{story_id}/elements")
 async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     """Get all extracted story elements."""
     elements = {}
     for cat in ELEMENT_CATEGORIES:
@@ -1778,6 +1837,7 @@ async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id
 
 @app.get("/story/{story_id}/summary")
 async def get_summary(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     """Get the AI-maintained story summary."""
     path = get_summary_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -1791,9 +1851,11 @@ class SummaryInput(BaseModel):
 @app.put("/story/{story_id}/summary")
 async def update_summary(story_id: str, input_data: SummaryInput, user_id: str = Depends(get_current_user_id)):
     """Manually update the story summary."""
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_summary_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.summary)
+    sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
 class TextInput(BaseModel):
@@ -1802,6 +1864,7 @@ class TextInput(BaseModel):
 # --- Style Guide ---
 @app.get("/story/{story_id}/style")
 async def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_style_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
@@ -1810,14 +1873,17 @@ async def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
 
 @app.put("/story/{story_id}/style")
 async def update_style(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_style_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.text)
+    sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
 # --- World Rules ---
 @app.get("/story/{story_id}/rules")
 async def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_rules_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
@@ -1826,14 +1892,17 @@ async def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
 
 @app.put("/story/{story_id}/rules")
 async def update_rules(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_rules_path(story_id, uid=user_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(input_data.text)
+    sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
 # --- Consistency Log ---
 @app.get("/story/{story_id}/consistency")
 async def get_consistency(story_id: str, user_id: str = Depends(get_current_user_id)):
+    restore_story_directory_from_firestore(user_id, story_id)
     path = get_consistency_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
         return {"text": ""}
@@ -4240,6 +4309,7 @@ async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_use
 @app.post("/story/{story_id}/undo")
 async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
+    restore_story_directory_from_firestore(user_id, story_id)
     story_path = get_story_path(story_id, uid=user_id, create=False)
     chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
 
@@ -4321,6 +4391,7 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
 
     # Turn count is derived from chat_log.json each time (get_turn_count), which we just
     # trimmed above - no manual counter to decrement anymore.
+    sync_story_directory_to_firestore(user_id, story_id)
 
     return {"removed_text": ai_text_clean, "restored_prompt": restored_prompt}
 
@@ -4334,9 +4405,11 @@ async def generate_with_audio(
     story_id: str = Form(...),
     skip_rules_check: bool = Form(False),
     audio: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
     user_id: str = Depends(get_current_user_id),
     authorization: str = Header(None)
 ):
+    restore_story_directory_from_firestore(user_id, story_id)
     user_info = get_current_user_info(authorization)
     # Guest mode restriction: audio upload not available
     if user_info.get("is_guest", False):
@@ -4725,11 +4798,15 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
+    background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
+    if background_tasks:
+        background_tasks.add_task(sync_story_directory_to_firestore, user_id, story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/generate")
-async def generate_story(input_data: StoryInput, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
+async def generate_story(input_data: StoryInput, background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
+    restore_story_directory_from_firestore(user_id, input_data.story_id)
     user_info = get_current_user_info(authorization)
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
@@ -5182,6 +5259,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             print(f"STREAM ERROR: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
+    background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 STATIC_PROVIDER_MODELS = {
