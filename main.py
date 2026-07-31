@@ -44,6 +44,7 @@ from collections import deque
 from google import genai
 from google.genai import types
 from difflib import SequenceMatcher
+import hashlib
 
 from dotenv import load_dotenv
 
@@ -88,7 +89,24 @@ try:
 except Exception as fb_err:
     print(f"[Firebase] Firebase note: {fb_err} — running in local mode.")
 
-def get_current_user_id(authorization: str = Header(None)) -> str:
+
+def _get_client_ip(request) -> str:
+    """Extract real client IP, checking X-Forwarded-For for proxied deployments (Render, etc.)."""
+    forwarded = None
+    if hasattr(request, 'headers'):
+        forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if hasattr(request, 'client') and request.client:
+        return request.client.host
+    return "unknown"
+
+def _ip_to_guest_uid(ip: str) -> str:
+    """Convert an IP address to a deterministic guest UID."""
+    ip_hash = hashlib.md5(ip.encode()).hexdigest()[:12]
+    return f"guest_{ip_hash}"
+
+def get_current_user_id(request: Request = None, authorization: str = Header(None)) -> str:
     """Extract user UID from Firebase ID token in Authorization header."""
     if not authorization or not authorization.startswith("Bearer "):
         return "default_user"
@@ -113,17 +131,22 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
                 return uid
     except Exception as err:
         print(f"[Auth Note] Token decode note: {err}")
+    # IP-based guest isolation
+    if request:
+        ip = _get_client_ip(request)
+        return _ip_to_guest_uid(ip)
     return "default_user"
 
 
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
 
-def get_current_user_info(authorization: str = Header(None)) -> dict:
+def get_current_user_info(request: Request = None, authorization: str = Header(None)) -> dict:
     """Extract user UID, email, and Super Admin status from Bearer token with strict email verification."""
     user_info = {
         "uid": "default_user",
         "email": "",
-        "is_super_admin": False
+        "is_super_admin": False,
+        "is_guest": True
     }
     
     if authorization and authorization.startswith("Bearer "):
@@ -136,6 +159,7 @@ def get_current_user_info(authorization: str = Header(None)) -> dict:
                 if decoded.get("uid"):
                     user_info["uid"] = decoded["uid"]
                     user_info["email"] = (decoded.get("email") or "").strip().lower()
+                    user_info["is_guest"] = False
             except Exception as e:
                 pass
                 
@@ -148,6 +172,8 @@ def get_current_user_info(authorization: str = Header(None)) -> dict:
                     payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
                     user_info["uid"] = payload_data.get("user_id") or payload_data.get("sub") or user_info["uid"]
                     user_info["email"] = (payload_data.get("email") or payload_data.get("user_email") or "").strip().lower()
+                    if user_info["uid"] != "default_user":
+                        user_info["is_guest"] = False
             except Exception as err:
                 pass
 
@@ -160,6 +186,11 @@ def get_current_user_info(authorization: str = Header(None)) -> dict:
         user_info["email"] = SUPER_ADMIN_EMAIL
     else:
         user_info["is_super_admin"] = False
+
+    # IP-based guest isolation: give each guest a unique UID based on their IP
+    if user_info["is_guest"] and request:
+        ip = _get_client_ip(request)
+        user_info["uid"] = _ip_to_guest_uid(ip)
 
     return user_info
 
@@ -4300,6 +4331,9 @@ import base64
 @app.post("/generate-audio")
 async def generate_with_audio(
     user_input: str = Form(...),
+    # Guest mode restriction: audio upload not available
+    if user_info.get("is_guest", False):
+        raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
     story_id: str = Form(...),
     skip_rules_check: bool = Form(False),
     audio: UploadFile = File(...),
@@ -5400,6 +5434,7 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         "uid": uid,
         "email": user_info["email"],
         "is_super_admin": user_info["is_super_admin"],
+        "is_guest": user_info.get("is_guest", False),
         "has_custom_keys": any(bool(v) for k, v in keys.items() if k.endswith("_api_key")),
         "masked_keys": masked_keys,
         "super_admin_email": SUPER_ADMIN_EMAIL
