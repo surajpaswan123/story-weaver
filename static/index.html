@@ -14,6 +14,9 @@
         
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
+let isGuestMode = false;
+let guestGenerationCount = 0;
+const GUEST_NAG_INTERVAL = 2; // Show nag dialog every N generations
 
 
 
@@ -75,6 +78,12 @@ async function fetchUserSettings() {
         const res = await authFetch('/api/user/settings');
         if (!res.ok) return;
         currentUserSettings = await res.json();
+        // Check if backend reports guest mode
+        if (currentUserSettings.is_guest && !isGuestMode) {
+            isGuestMode = true;
+            showGuestBanner();
+            applyGuestRestrictions();
+        }
         renderUserSettingsUI();
         await populatePipelineModelDropdowns();
     } catch (e) {
@@ -1502,6 +1511,13 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             input.value = '';
             input.disabled = true;
             sendBtn.disabled = true;
+            // Guest nag dialog every few generations
+            if (isGuestMode) {
+                guestGenerationCount++;
+                if (guestGenerationCount % GUEST_NAG_INTERVAL === 0) {
+                    showGuestNagDialog();
+                }
+            }
             announceStatus('Generating response...');
 
             // Show user prompt block
@@ -1981,6 +1997,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         if (userAvatar) userAvatar.src = user.photoURL || '';
                         if (userName) userName.textContent = user.displayName || user.email;
                         console.log('[Auth] Signed in as:', user.email);
+                        isGuestMode = false;
+                        hideGuestBanner();
+                        removeGuestRestrictions();
                         loadStoryList();
                         loadStory();
                         loadProvidersAndModels();
@@ -2049,6 +2068,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (userProfile) userProfile.classList.remove('hidden');
             if (userName) userName.textContent = 'Guest User';
             currentUser = { email: 'guest@storyweaver.local', displayName: 'Guest User' };
+            isGuestMode = true;
+            guestGenerationCount = 0;
+            showGuestBanner();
+            applyGuestRestrictions();
             loadStoryList();
             loadStory();
             loadProvidersAndModels();
@@ -2155,6 +2178,107 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     modelSelect.appendChild(opt);
                 }
             }
+        }
+
+        // ===== GUEST MODE: Banner, Nag Dialog, Feature Restrictions =====
+        function showGuestBanner() {
+            if (document.getElementById('guest-banner')) return;
+            const banner = document.createElement('div');
+            banner.id = 'guest-banner';
+            banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(135deg,#f59e0b,#d97706);color:#1c1917;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+            banner.innerHTML = `
+                <span>⚡ You're in Guest Mode — Sign in with Google for unlimited access, audio upload, rules editor & more!</span>
+                <button onclick="handleGoogleLogin()" style="background:#1c1917;color:#fbbf24;border:none;padding:6px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;white-space:nowrap;">Sign In Now →</button>
+            `;
+            document.body.prepend(banner);
+            const appContainer = document.getElementById('app-container');
+            if (appContainer) appContainer.style.paddingTop = '48px';
+        }
+
+        function hideGuestBanner() {
+            const banner = document.getElementById('guest-banner');
+            if (banner) banner.remove();
+            const appContainer = document.getElementById('app-container');
+            if (appContainer) appContainer.style.paddingTop = '';
+        }
+
+        function showGuestNagDialog() {
+            if (document.getElementById('guest-nag-overlay')) return;
+            const overlay = document.createElement('div');
+            overlay.id = 'guest-nag-overlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+            overlay.innerHTML = `
+                <div style="background:#1c1917;border:1px solid #44403c;border-radius:16px;padding:32px;max-width:420px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+                    <div style="font-size:48px;margin-bottom:12px;">🔐</div>
+                    <h3 style="color:#fbbf24;font-size:20px;font-weight:700;margin-bottom:8px;">Unlock Full Access</h3>
+                    <p style="color:#a8a29e;font-size:13px;line-height:1.6;margin-bottom:20px;">
+                        You're using <strong style="color:#fbbf24;">Guest Mode</strong> with limited features.<br>
+                        Sign in with Google to unlock:
+                    </p>
+                    <ul style="color:#d6d3d1;font-size:12px;text-align:left;margin:0 auto 20px;max-width:280px;line-height:2;">
+                        <li>✅ Unlimited story generations</li>
+                        <li>✅ Audio file upload & analysis</li>
+                        <li>✅ Rules & Style editor</li>
+                        <li>✅ Custom API keys & model selection</li>
+                        <li>✅ Permanent story saving</li>
+                    </ul>
+                    <div style="display:flex;gap:10px;justify-content:center;">
+                        <button onclick="handleGoogleLogin();document.getElementById('guest-nag-overlay')?.remove();" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#1c1917;border:none;padding:10px 24px;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px;">Sign In with Google</button>
+                        <button onclick="document.getElementById('guest-nag-overlay')?.remove();" style="background:#292524;color:#a8a29e;border:1px solid #44403c;padding:10px 20px;border-radius:10px;font-weight:600;cursor:pointer;font-size:13px;">Continue as Guest</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+        }
+
+        function applyGuestRestrictions() {
+            // Disable audio button
+            const audioBtn = document.getElementById('audio-btn');
+            if (audioBtn) {
+                audioBtn.disabled = true;
+                audioBtn.style.opacity = '0.3';
+                audioBtn.style.cursor = 'not-allowed';
+                audioBtn.title = 'Sign in to use audio upload';
+                audioBtn.onclick = (e) => { e.preventDefault(); showGuestNagDialog(); };
+            }
+            // Disable settings button
+            const settingsBtn = document.getElementById('settings-btn');
+            if (settingsBtn) settingsBtn.title = 'Sign in to access settings';
+            // Make rules tab show locked state
+            const rulesTab = document.querySelector('[data-tab="tab-rules"]');
+            if (rulesTab) {
+                rulesTab.addEventListener('click', () => {
+                    if (isGuestMode) {
+                        setTimeout(() => {
+                            const rulesArea = document.getElementById('rules-textarea');
+                            if (rulesArea) { rulesArea.disabled = true; rulesArea.placeholder = '🔒 Sign in with Google to edit world rules.'; }
+                            document.querySelectorAll('#tab-rules button').forEach(b => { if (b.textContent.includes('Save')) { b.disabled = true; b.style.opacity = '0.4'; } });
+                        }, 100);
+                    }
+                });
+            }
+            // Make style tab show locked state
+            const styleTab = document.querySelector('[data-tab="tab-style"]');
+            if (styleTab) {
+                styleTab.addEventListener('click', () => {
+                    if (isGuestMode) {
+                        setTimeout(() => {
+                            const styleArea = document.getElementById('style-textarea');
+                            if (styleArea) { styleArea.disabled = true; styleArea.placeholder = '🔒 Sign in with Google to edit writing style.'; }
+                            document.querySelectorAll('#tab-style button').forEach(b => { if (b.textContent.includes('Save')) { b.disabled = true; b.style.opacity = '0.4'; } });
+                        }, 100);
+                    }
+                });
+            }
+        }
+
+        function removeGuestRestrictions() {
+            const audioBtn = document.getElementById('audio-btn');
+            if (audioBtn) { audioBtn.disabled = false; audioBtn.style.opacity = ''; audioBtn.style.cursor = ''; audioBtn.title = 'Attach audio'; audioBtn.onclick = null; }
+            const rulesArea = document.getElementById('rules-textarea');
+            if (rulesArea) { rulesArea.disabled = false; rulesArea.placeholder = ''; }
+            const styleArea = document.getElementById('style-textarea');
+            if (styleArea) { styleArea.disabled = false; styleArea.placeholder = ''; }
         }
 
         // ===== INIT =====
