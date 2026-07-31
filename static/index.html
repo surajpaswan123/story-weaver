@@ -169,6 +169,8 @@ async function saveUserSettings(e) {
         document.getElementById('input-groq-key').value = '';
 
         await fetchUserSettings();
+        // Refresh provider/model dropdowns to reflect newly saved API keys
+        await loadProvidersAndModels();
     } catch (err) {
         if (msg) {
             msg.className = 'text-xs text-red-400 font-medium py-1';
