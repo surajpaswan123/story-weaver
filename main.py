@@ -4331,9 +4331,6 @@ import base64
 @app.post("/generate-audio")
 async def generate_with_audio(
     user_input: str = Form(...),
-    # Guest mode restriction: audio upload not available
-    if user_info.get("is_guest", False):
-        raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
     story_id: str = Form(...),
     skip_rules_check: bool = Form(False),
     audio: UploadFile = File(...),
@@ -4341,6 +4338,9 @@ async def generate_with_audio(
     authorization: str = Header(None)
 ):
     user_info = get_current_user_info(authorization)
+    # Guest mode restriction: audio upload not available
+    if user_info.get("is_guest", False):
+        raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
