@@ -5744,9 +5744,13 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None):
     return None
 
 
-def fetch_openrouter_live_models():
+def fetch_openrouter_live_models(api_key: str = None):
+    key = api_key or os.getenv("OPENROUTER_API_KEY")
+    headers = {"User-Agent": "StoryWeaver/1.0"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
-        req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers={"User-Agent": "StoryWeaver/1.0"})
+        req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [m.get("id") for m in data.get("data", []) if m.get("id")]
@@ -5756,13 +5760,13 @@ def fetch_openrouter_live_models():
         print(f"[Live Fetch Note] OpenRouter models fetch: {e}")
     return None
 
-def fetch_nvidia_live_models():
-    api_key = os.getenv("NVIDIA_API_KEY")
-    if not api_key:
+def fetch_nvidia_live_models(api_key: str = None):
+    key = api_key or os.getenv("NVIDIA_API_KEY")
+    if not key:
         return None
     try:
         req = urllib.request.Request("https://integrate.api.nvidia.com/v1/models", headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {key}",
             "User-Agent": "StoryWeaver/1.0"
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -5774,13 +5778,13 @@ def fetch_nvidia_live_models():
         print(f"[Live Fetch Note] NVIDIA models fetch: {e}")
     return None
 
-def fetch_groq_live_models():
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+def fetch_groq_live_models(api_key: str = None):
+    key = api_key or os.getenv("GROQ_API_KEY")
+    if not key:
         return None
     try:
         req = urllib.request.Request("https://api.groq.com/openai/v1/models", headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {key}",
             "User-Agent": "StoryWeaver/1.0"
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -5849,11 +5853,23 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
         models_list = live_openai[1] if live_openai else OPENAI_MODELS
         allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": models_list}
     if user_keys.get("openrouter_api_key"):
-        allowed_providers["openrouter"] = DYNAMIC_PROVIDER_MODELS.get("openrouter", STATIC_PROVIDER_MODELS["openrouter"])
+        live_or = fetch_openrouter_live_models(user_keys["openrouter_api_key"])
+        models_list = live_or[1] if live_or else DYNAMIC_PROVIDER_MODELS.get("openrouter", {}).get("models", STATIC_PROVIDER_MODELS["openrouter"]["models"])
+        existing = STATIC_PROVIDER_MODELS["openrouter"]["models"]
+        merged = list(existing) + [m for m in models_list if m not in existing]
+        allowed_providers["openrouter"] = {"name": "OpenRouter", "models": merged}
     if user_keys.get("groq_api_key"):
-        allowed_providers["groq"] = DYNAMIC_PROVIDER_MODELS.get("groq", STATIC_PROVIDER_MODELS["groq"])
+        live_groq = fetch_groq_live_models(user_keys["groq_api_key"])
+        models_list = live_groq[1] if live_groq else DYNAMIC_PROVIDER_MODELS.get("groq", {}).get("models", STATIC_PROVIDER_MODELS["groq"]["models"])
+        existing = STATIC_PROVIDER_MODELS["groq"]["models"]
+        merged = list(existing) + [m for m in models_list if m not in existing]
+        allowed_providers["groq"] = {"name": "Groq", "models": merged}
     if user_keys.get("nvidia_api_key"):
-        allowed_providers["nvidia"] = DYNAMIC_PROVIDER_MODELS.get("nvidia", STATIC_PROVIDER_MODELS["nvidia"])
+        live_nv = fetch_nvidia_live_models(user_keys["nvidia_api_key"])
+        models_list = live_nv[1] if live_nv else DYNAMIC_PROVIDER_MODELS.get("nvidia", {}).get("models", STATIC_PROVIDER_MODELS["nvidia"]["models"])
+        existing = STATIC_PROVIDER_MODELS["nvidia"]["models"]
+        merged = list(existing) + [m for m in models_list if m not in existing]
+        allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": merged}
 
     if not allowed_providers:
         allowed_providers = {
