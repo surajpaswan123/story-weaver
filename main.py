@@ -89,6 +89,42 @@ try:
 except Exception as fb_err:
     print(f"[Firebase] Firebase note: {fb_err} — running in local mode.")
 
+# Postgres Admin Initialization (Neon)
+db_conn_str = os.getenv("DATABASE_URL")
+postgres_active = False
+
+if db_conn_str:
+    try:
+        import psycopg2
+        # Connect to verify and create tables
+        conn = psycopg2.connect(db_conn_str)
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_keys (
+                    uid VARCHAR(255) PRIMARY KEY,
+                    keys JSONB NOT NULL,
+                    updated_at DOUBLE PRECISION DEFAULT 0
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_stories (
+                    uid VARCHAR(255) NOT NULL,
+                    story_id VARCHAR(255) NOT NULL,
+                    file_name VARCHAR(255) NOT NULL,
+                    content TEXT NOT NULL,
+                    updated_at DOUBLE PRECISION NOT NULL,
+                    title VARCHAR(255),
+                    PRIMARY KEY (uid, story_id, file_name)
+                );
+            """)
+            conn.commit()
+        conn.close()
+        postgres_active = True
+        print("[Postgres] Connected to Neon Postgres database and verified tables successfully!")
+    except Exception as e:
+        print(f"[Postgres Connection Error] {e}")
+
+
 
 def _get_client_ip(request) -> str:
     """Extract real client IP, checking X-Forwarded-For for proxied deployments (Render, etc.)."""
@@ -308,6 +344,23 @@ def load_user_keys(uid: str) -> dict:
         except Exception as e:
             print(f"[UserKeys Firestore Load Error] {e}")
 
+    # Read from Postgres if available
+    if postgres_active and uid and uid != "default_user":
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_conn_str)
+            with conn.cursor() as cur:
+                cur.execute("SELECT keys FROM user_keys WHERE uid = %s", (uid,))
+                row = cur.fetchone()
+                if row:
+                    db_keys = row[0]
+                    if isinstance(db_keys, str):
+                        db_keys = json.loads(db_keys)
+                    keys.update({k: v for k, v in db_keys.items() if k in keys})
+            conn.close()
+        except Exception as e:
+            print(f"[UserKeys Postgres Load Error] {e}")
+
     return keys
 
 def save_user_keys(uid: str, new_keys: dict):
@@ -339,6 +392,22 @@ def save_user_keys(uid: str, new_keys: dict):
             doc_ref.set(keys, merge=True)
         except Exception as e:
             print(f"[UserKeys Firestore Save Error] {e}")
+
+    if postgres_active and uid and uid != "default_user":
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_conn_str)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO user_keys (uid, keys, updated_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (uid)
+                    DO UPDATE SET keys = EXCLUDED.keys, updated_at = EXCLUDED.updated_at
+                """, (uid, json.dumps(keys), time.time()))
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[UserKeys Postgres Save Error] {e}")
 
     return keys
 
@@ -412,6 +481,41 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
             print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
     except Exception as e:
         print(f"[Firestore Sync Error] {e}")
+
+    if postgres_active and uid and uid != "default_user":
+        try:
+            import psycopg2
+            story_dir = get_story_dir(story_id, uid=uid)
+            if os.path.exists(story_dir):
+                conn = psycopg2.connect(db_conn_str)
+                with conn.cursor() as cur:
+                    for name in os.listdir(story_dir):
+                         if name.endswith(".md") or name.endswith(".json"):
+                             if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                                 continue
+                             file_path = os.path.join(story_dir, name)
+                             if os.path.isfile(file_path):
+                                 with open(file_path, "r", encoding="utf-8") as f:
+                                     file_content = f.read()
+                                 
+                                 title = None
+                                 if name == "story.md":
+                                     for line in file_content.split("\n"):
+                                         if line.startswith("# "):
+                                             title = line[2:].strip()
+                                             break
+                                 
+                                 cur.execute("""
+                                     INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
+                                     VALUES (%s, %s, %s, %s, %s, %s)
+                                     ON CONFLICT (uid, story_id, file_name)
+                                     DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at, title = COALESCE(EXCLUDED.title, user_stories.title)
+                                 """, (uid, story_id, name, file_content, time.time(), title))
+                    conn.commit()
+                conn.close()
+                print(f"[Postgres Sync] Saved files for story {story_id}")
+        except Exception as e:
+            print(f"[Postgres Sync Error] {e}")
 
 
 def get_story_from_firestore(uid: str, story_id: str, file_name: str) -> str:
@@ -1705,6 +1809,32 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                     "modified": s.get("updated_at", 0)
                 })
                 seen_ids.add(s["id"])
+
+    # 2.5. Merge Postgres stories if active
+    if postgres_active and user_id != "default_user":
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_conn_str)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT story_id, MAX(title) as title, MAX(updated_at) as updated_at
+                    FROM user_stories
+                    WHERE uid = %s
+                    GROUP BY story_id
+                """, (user_id,))
+                rows = cur.fetchall()
+                for story_id, title, updated_at in rows:
+                    if story_id not in seen_ids:
+                        stories.append({
+                            "id": story_id,
+                            "name": title if title else story_id.replace("-", " ").title(),
+                            "size": 2048,
+                            "modified": updated_at
+                        })
+                        seen_ids.add(story_id)
+            conn.close()
+        except Exception as e:
+            print(f"[Postgres List Error] {e}")
 
     # Only show root unassigned stories if user is NOT logged in (default_user)
     if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
