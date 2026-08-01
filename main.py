@@ -1879,10 +1879,12 @@ async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_
 
 @app.delete("/story/{story_id}")
 async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id)):
-    """Delete a story and all its files."""
+    """Delete a story and all its files from local disk and cloud databases."""
     import shutil
     import stat
     safe_id = sanitize_id(story_id)
+    
+    # 1. Delete from local disk
     story_dir = get_story_dir(safe_id, uid=user_id, create=False)
     if os.path.exists(story_dir):
         # Windows fix: handle read-only files
@@ -1890,6 +1892,28 @@ async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id
             os.chmod(path, stat.S_IWRITE)
             func(path)
         shutil.rmtree(story_dir, onerror=on_rm_error)
+        
+    # 2. Delete from Firestore if active
+    if db_firestore and user_id != "default_user":
+        try:
+            db_firestore.collection("users").document(user_id).collection("stories").document(safe_id).delete()
+            print(f"[Firestore Delete] Deleted story {safe_id}")
+        except Exception as e:
+            print(f"[Firestore Delete Error] {e}")
+            
+    # 3. Delete from Postgres if active
+    if postgres_active and user_id != "default_user":
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_conn_str)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_stories WHERE uid = %s AND story_id = %s", (user_id, safe_id))
+                conn.commit()
+            conn.close()
+            print(f"[Postgres Delete] Deleted story {safe_id}")
+        except Exception as e:
+            print(f"[Postgres Delete Error] {e}")
+            
     return {"success": True}
 
 @app.get("/story/{story_id}/chat")
