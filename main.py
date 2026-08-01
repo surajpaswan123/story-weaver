@@ -1305,10 +1305,10 @@ ELEMENT_CATEGORIES = ["characters", "positions", "villains", "locations", "incid
 # Keep this empty by default so reference files preserve earlier entries and only append new facts/events.
 FULL_REWRITE_CATEGORIES = {"positions", "villains"}  # both are current-state snapshots, never append-only
 
-def parse_current_time_state(story_id: str) -> str:
+def parse_current_time_state(story_id: str, uid: str = "default_user") -> str:
     """Parse time.md to extract the current day/time position for injection into the story generator.
     Returns a string like 'Current story position: Day 15, Afternoon' or empty if no time.md."""
-    time_path = get_element_path(story_id, "time")
+    time_path = get_element_path(story_id, "time", uid=uid)
     if not os.path.exists(time_path):
         return ""
     try:
@@ -2012,7 +2012,7 @@ async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id
     """Get all extracted story elements."""
     elements = {}
     for cat in ELEMENT_CATEGORIES:
-        path = get_element_path(story_id, cat, create=False)
+        path = get_element_path(story_id, cat, uid=user_id, create=False)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 elements[cat] = f.read()
@@ -4357,7 +4357,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                 new_content = new_content.replace(f"## {cat}", "").strip()
                 if not new_content or new_content.lower() == "no new updates.":  # Skip if AI returned empty section
                     continue
-                path = get_element_path(story_id, cat)
+                path = get_element_path(story_id, cat, uid=user_id)
                 # Read existing content
                 existing = ""
                 if os.path.exists(path):
@@ -4728,7 +4728,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
         rules_reminder = f"\n\n[WARNING] MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
 
     # Inject current time state so the story generator knows what day/time it is
-    time_state = parse_current_time_state(story_id)
+    time_state = parse_current_time_state(story_id, uid=user_id)
     time_anchor = f"\n\n⏰ {time_state}" if time_state else ""
     system_msg = f"{system_instruction}\n\n{story_context}{time_anchor}{rules_reminder}"
     user_msg = f"<user_input>\n{user_input}\n</user_input>\n\nThe user has attached an audio file. Listen to it and follow the instructions in <user_input>."
@@ -5070,7 +5070,7 @@ async def generate_story(request: Request, input_data: StoryInput, background_ta
     story_context = "\n\n".join(story_context_parts)
 
     # Inject current time state so the story generator knows what day/time it is
-    time_state = parse_current_time_state(input_data.story_id)
+    time_state = parse_current_time_state(input_data.story_id, uid=user_id)
     if time_state:
         story_context += f"\n\n\u23f0 {time_state}"
 
