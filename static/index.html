@@ -1526,9 +1526,39 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
 
 
-        async function submitStory(overrideText) {
+        async function submitStory(overrideText, bypassCheck = false) {
             const text = (typeof overrideText === 'string' ? overrideText : input.value.trim());
             if (!text) return;
+
+            // API key & Override Check for Standard Users
+            if (!bypassCheck && currentUserSettings && !currentUserSettings.is_super_admin) {
+                const hasKeys = currentUserSettings.has_custom_keys;
+                const hasStoryOverride = currentUserSettings.masked_keys && 
+                                         currentUserSettings.masked_keys.story_model && 
+                                         currentUserSettings.masked_keys.story_model.trim() !== '';
+                const providerVal = document.getElementById('provider-select')?.value || 'auto';
+                const modelVal = document.getElementById('model-select')?.value || 'auto';
+
+                if (hasKeys && !hasStoryOverride && (providerVal === 'auto' || modelVal === 'auto')) {
+                    const confirmModal = document.getElementById('confirm-override-modal');
+                    if (confirmModal) {
+                        confirmModal.classList.remove('hidden');
+                        
+                        const yesBtn = document.getElementById('confirm-override-yes');
+                        const noBtn = document.getElementById('confirm-override-no');
+                        
+                        yesBtn.onclick = () => {
+                            confirmModal.classList.add('hidden');
+                            submitStory(text, true);
+                        };
+                        noBtn.onclick = () => {
+                            confirmModal.classList.add('hidden');
+                            toggleSettingsModal();
+                        };
+                        return;
+                    }
+                }
+            }
 
             lastUserPrompt = text;
             input.value = '';
@@ -2466,6 +2496,31 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 <button type="submit" id="save-settings-btn" class="px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold transition">Save API Keys</button>
             </div>
         </form>
+</div>
+</div>
+
+<!-- CONFIRM OVERRIDE MODAL -->
+<div id="confirm-override-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-stone-900 border border-stone-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-stone-200">
+        <div class="flex items-center gap-3 text-amber-500 border-b border-stone-800 pb-3">
+            <span class="text-2xl">⚠️</span>
+            <h3 class="text-lg font-bold">API Key & Override Check</h3>
+        </div>
+        <p class="text-sm text-stone-300 leading-relaxed">
+            You have not selected a <strong>Story Model override</strong> in Settings (⚙️). 
+            Standard stream fallback may not be compatible with your configured API keys.
+        </p>
+        <p class="text-xs text-stone-400">
+            Do you want to proceed anyway?
+        </p>
+        <div class="flex items-center justify-end gap-3 pt-2">
+            <button id="confirm-override-no" class="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 font-medium transition cursor-pointer">
+                No. Take me to settings.
+            </button>
+            <button id="confirm-override-yes" class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold transition cursor-pointer">
+                Yes. Still proceed.
+            </button>
+        </div>
     </div>
 </div>
 
