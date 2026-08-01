@@ -703,7 +703,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
         if active_clients.get("openai_client"):
             try:
                 print(f"  [{label}] Trying user configured target OpenAI/{target_model}...")
-                kwargs = {"model": target_model, "messages": messages}
+                kwargs = {"model": target_model, "messages": messages, "timeout": 40.0}
                 if not target_model.startswith("o"):
                     kwargs["temperature"] = temperature
                 resp = active_clients["openai_client"].chat.completions.create(**kwargs)
@@ -734,7 +734,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
             try:
                 print(f"  [{label}] Trying user configured target NVIDIA/{target_model}...")
                 resp = active_clients["nvidia_client"].chat.completions.create(
-                    model=target_model, messages=messages, temperature=temperature
+                    model=target_model, messages=messages, temperature=temperature, timeout=40.0
                 )
                 res = resp.choices[0].message.content or ""
                 if res.strip():
@@ -764,7 +764,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
         c = active_clients["openai_client"]
         for m in ["gpt-4o-mini", "gpt-4o", "o3-mini"]:
             try:
-                kwargs = {"model": m, "messages": messages}
+                kwargs = {"model": m, "messages": messages, "timeout": 40.0}
                 if not m.startswith("o"): kwargs["temperature"] = temperature
                 resp = c.chat.completions.create(**kwargs)
                 res = resp.choices[0].message.content or ""
@@ -808,6 +808,7 @@ def _call_with_full_fallback(
                     lambda model=model: nvidia_client.chat.completions.create(
                         messages=messages,
                         **build_nvidia_request_kwargs(model, temperature, use_thinking=nvidia_use_thinking),
+                        timeout=40.0,
                     ),
                     label=f"{label}/NVIDIA/{model}",
                 )
@@ -835,6 +836,7 @@ def _call_with_full_fallback(
                     resp = nokey_client.chat.completions.create(
                         model=model, messages=messages,
                         temperature=temperature, extra_body=extra,
+                        timeout=40.0,
                     )
                     result = resp.choices[0].message.content or ""
                     if result.strip():
@@ -856,7 +858,7 @@ def _call_with_full_fallback(
                 try:
                     print(f"  [{label}] Trying Groq/{model}...")
                     resp = groq_client.chat.completions.create(
-                        model=model, messages=messages, temperature=temperature,
+                        model=model, messages=messages, temperature=temperature, timeout=40.0,
                     )
                     result = resp.choices[0].message.content or ""
                     if result.strip():
@@ -870,7 +872,7 @@ def _call_with_full_fallback(
             try:
                 print(f"  [{label}] Trying OpenRouter/{model}...")
                 resp = openrouter_client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature,
+                    model=model, messages=messages, temperature=temperature, timeout=40.0,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
@@ -885,7 +887,7 @@ def _call_with_full_fallback(
                 print(f"  [{label}] Trying HF/{model}...")
                 resp = hf_client.chat.completions.create(
                     model=model, messages=messages, temperature=temperature,
-                    max_tokens=4096,
+                    max_tokens=4096, timeout=40.0,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
@@ -899,7 +901,7 @@ def _call_with_full_fallback(
             try:
                 print(f"  [{label}] Trying Cerebras/{model}...")
                 resp = cerebras_client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature,
+                    model=model, messages=messages, temperature=temperature, timeout=40.0,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
@@ -2219,6 +2221,7 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
         return
 
     # Resolve user-specific AI clients
+    rules_model_override = ""
     if user_info:
         eff = get_effective_ai_clients(user_info)
         is_admin = eff.get("is_super_admin", False)
@@ -2234,6 +2237,11 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
         active_nokey_client = eff.get("nokey_client")
         if not active_nokey_client and is_admin:
             active_nokey_client = nokey_client
+            
+        uid = user_info.get("uid")
+        if uid:
+            user_keys = load_user_keys(uid)
+            rules_model_override = user_keys.get("rules_model", "").strip()
     else:
         active_genai_clients = clients
         active_nvidia_client = nvidia_client
@@ -2260,6 +2268,61 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
     if style_text:
         check_prompt += f"=== STYLE GUIDE ===\n{style_text}\n\n"
     check_prompt += f"=== GENERATED TEXT ===\n{generated_text}"
+
+    # Try configured Rules Model override first if set
+    if rules_model_override:
+        # 1. Try with active_nvidia_client
+        if active_nvidia_client:
+            try:
+                print(f"  [RulesEditor] Trying configured Rules Model NVIDIA/{rules_model_override}...")
+                request_kwargs = build_nvidia_request_kwargs(rules_model_override, 0.1, stream=True, use_thinking=False)
+                stream = _retry_on_429(
+                    lambda m=rules_model_override: active_nvidia_client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": check_prompt},
+                        ],
+                        **request_kwargs,
+                    ),
+                    label=f"RulesEditor/Configured/NVIDIA/{rules_model_override}",
+                )
+                got_any = False
+                for chunk in stream:
+                    text = _safe_chunk_text(chunk)
+                    if text:
+                        got_any = True
+                        yield text
+                if got_any:
+                    print(f"  [RulesEditor] Streamed successfully via configured NVIDIA/{rules_model_override}")
+                    return
+            except Exception as e:
+                print(f"  [RulesEditor] Configured NVIDIA/{rules_model_override} failed: {e}")
+
+        # 2. Try with active_genai_clients
+        if active_genai_clients:
+            for c in active_genai_clients:
+                try:
+                    base_m = rules_model_override.replace("models/", "")
+                    print(f"  [RulesEditor] Trying configured Rules Model GenAI/{base_m}...")
+                    stream = c.models.generate_content_stream(
+                        model=base_m,
+                        contents=f"{system_prompt}\n\n{check_prompt}",
+                        config=types.GenerateContentConfig(
+                            temperature=0.1,
+                            safety_settings=SAFETY_SETTINGS,
+                        ),
+                    )
+                    got_any = False
+                    for chunk in stream:
+                        text = _safe_chunk_text(chunk)
+                        if text:
+                            got_any = True
+                            yield text
+                    if got_any:
+                        print(f"  [RulesEditor] Streamed successfully via configured GenAI/{base_m}")
+                        return
+                except Exception as e:
+                    print(f"  [RulesEditor] Configured GenAI/{base_m} failed: {e}")
 
     # 0. PRIMARY: Google GenAI gemini-3.5-flash-lite (fastest ~300 TPS)
     for c in active_genai_clients:
