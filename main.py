@@ -2218,12 +2218,26 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
         yield generated_text
         return
 
-    # Get user-specific clients if available, otherwise use global
-    active_genai_clients = clients  # default global
+    # Resolve user-specific AI clients
     if user_info:
         eff = get_effective_ai_clients(user_info)
-        if eff.get("genai_clients"):
-            active_genai_clients = eff["genai_clients"]
+        is_admin = eff.get("is_super_admin", False)
+        
+        active_genai_clients = eff.get("genai_clients")
+        if (active_genai_clients is None or len(active_genai_clients) == 0) and is_admin:
+            active_genai_clients = clients
+            
+        active_nvidia_client = eff.get("nvidia_client")
+        if not active_nvidia_client and is_admin:
+            active_nvidia_client = nvidia_client
+            
+        active_nokey_client = eff.get("nokey_client")
+        if not active_nokey_client and is_admin:
+            active_nokey_client = nokey_client
+    else:
+        active_genai_clients = clients
+        active_nvidia_client = nvidia_client
+        active_nokey_client = nokey_client
 
     system_prompt = """You are an invisible copy-editor embedded in a story pipeline.
 Your output is streamed DIRECTLY to the reader — they must never know you exist.
@@ -2273,13 +2287,13 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
             print(f"  [RulesEditor] GenAI/{primary_model} failed: {e}")
 
     # 1. Fallback: NVIDIA (deepseek-v4-pro etc.), streamed live
-    if nvidia_client:
+    if active_nvidia_client:
         for model in NVIDIA_RULES_MODELS:
             try:
                 print(f"  [RulesEditor] Streaming with NVIDIA/{model}...")
                 request_kwargs = build_nvidia_request_kwargs(model, 0.1, stream=True, use_thinking=False)
                 stream = _retry_on_429(
-                    lambda m=model: nvidia_client.chat.completions.create(
+                    lambda m=model: active_nvidia_client.chat.completions.create(
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": check_prompt},
@@ -2301,7 +2315,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
                 print(f"  [RulesEditor] NVIDIA/{model} streaming failed: {e}")
 
     # 2. Fallback to Nokey, streamed live
-    if nokey_client:
+    if active_nokey_client:
         for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview"]:
             try:
                 extra = NOKEY_SAFETY_OFF.copy()
@@ -2309,7 +2323,7 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
                     extra["google"] = {**extra["google"], "thinking_config": {"thinkingBudget": HIGH_THINKING_BUDGET}}
                 print(f"  [RulesEditor] Streaming with Nokey/{model_name}...")
                 stream = _retry_on_429(
-                    lambda m=model_name, e=extra: nokey_client.chat.completions.create(
+                    lambda m=model_name, e=extra: active_nokey_client.chat.completions.create(
                         model=m,
                         messages=[
                             {"role": "system", "content": system_prompt},
@@ -2361,15 +2375,24 @@ Never rewrite for style improvement. Never add or remove paragraphs. Never chang
 
     # 4. Last resort: full fallback chain (non-streaming) — yielded as one piece
     try:
-        result, model_used = _call_with_full_fallback(
-            system_prompt=system_prompt,
-            user_prompt=check_prompt,
-            temperature=0.1,
-            label="RulesEditor",
-            nvidia_models=NVIDIA_RULES_MODELS,
-            nvidia_use_thinking=False,
-            nokey_models=NOKEY_TASK_MODELS,
-        )
+        if user_info:
+            result, model_used = run_user_task_completion(
+                system_prompt=system_prompt,
+                user_prompt=check_prompt,
+                user_info=user_info,
+                label="RulesEditor",
+                temperature=0.1,
+            )
+        else:
+            result, model_used = _call_with_full_fallback(
+                system_prompt=system_prompt,
+                user_prompt=check_prompt,
+                temperature=0.1,
+                label="RulesEditor",
+                nvidia_models=NVIDIA_RULES_MODELS,
+                nvidia_use_thinking=False,
+                nokey_models=NOKEY_TASK_MODELS,
+            )
         result = (result or "").strip()
         if result:
             print(f"  [RulesEditor] Got {len(result)} chars from {model_used} (non-streamed fallback)")
@@ -3407,15 +3430,43 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
     # Resolve user-specific AI clients (ALL providers: Gemini, OpenAI, NVIDIA, Groq, OpenRouter)
     if user_info:
         _eff = get_effective_ai_clients(user_info)
-        active_genai_clients = _eff.get("genai_clients") or clients
-        active_nvidia_client = _eff.get("nvidia_client") or nvidia_client
-        active_nokey_client = _eff.get("nokey_client") or nokey_client
-        active_groq_client = _eff.get("groq_client") or groq_client
-        active_openrouter_client = _eff.get("openrouter_client") or openrouter_client
-        active_openai_client = _eff.get("openai_client") or official_openai_client
-        active_mistral_client = _eff.get("mistral_client") or mistral_client
-        active_hf_client = _eff.get("hf_client") or hf_client
-        active_cerebras_client = _eff.get("cerebras_client") or cerebras_client
+        is_admin = _eff.get("is_super_admin", False)
+        
+        active_genai_clients = _eff.get("genai_clients")
+        if (active_genai_clients is None or len(active_genai_clients) == 0) and is_admin:
+            active_genai_clients = clients
+            
+        active_nvidia_client = _eff.get("nvidia_client")
+        if not active_nvidia_client and is_admin:
+            active_nvidia_client = nvidia_client
+            
+        active_nokey_client = _eff.get("nokey_client")
+        if not active_nokey_client and is_admin:
+            active_nokey_client = nokey_client
+            
+        active_groq_client = _eff.get("groq_client")
+        if not active_groq_client and is_admin:
+            active_groq_client = groq_client
+            
+        active_openrouter_client = _eff.get("openrouter_client")
+        if not active_openrouter_client and is_admin:
+            active_openrouter_client = openrouter_client
+            
+        active_openai_client = _eff.get("openai_client")
+        if not active_openai_client and is_admin:
+            active_openai_client = official_openai_client
+            
+        active_mistral_client = _eff.get("mistral_client")
+        if not active_mistral_client and is_admin:
+            active_mistral_client = mistral_client
+            
+        active_hf_client = _eff.get("hf_client")
+        if not active_hf_client and is_admin:
+            active_hf_client = hf_client
+            
+        active_cerebras_client = _eff.get("cerebras_client")
+        if not active_cerebras_client and is_admin:
+            active_cerebras_client = cerebras_client
     else:
         active_genai_clients = clients
         active_nvidia_client = nvidia_client
