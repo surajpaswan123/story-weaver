@@ -3434,9 +3434,15 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         {"role": "user", "content": user_msg}
     ]
 
+    uid = user_info.get("uid", "default_user") if user_info else "default_user"
+    user_keys = load_user_keys(uid)
+    story_model_override = user_keys.get("story_model", "").strip()
+
     # USER SELECTED SPECIFIC PROVIDER ATTEMPT
     if selected_provider and selected_provider != "auto":
         target_model = selected_model if (selected_model and selected_model != "auto") else None
+        if not target_model and story_model_override:
+            target_model = story_model_override
         
         # 1. User selected Google GenAI
         if selected_provider == "google" and active_genai_clients:
@@ -3525,6 +3531,104 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 except Exception as err:
                     print(f"  OpenRouter {m_name} failed: {err}")
     
+    # Try user-configured Story Model override FIRST across providers if provider is auto/None
+    if story_model_override and (not selected_provider or selected_provider == "auto"):
+        # 1. Try NVIDIA client
+        if active_nvidia_client:
+            try:
+                print(f"=== Streaming Configured Story Model NVIDIA ({story_model_override}) ===")
+                _thinks = nvidia_model_thinks(story_model_override)
+                request_kwargs = build_nvidia_request_kwargs(story_model_override, 1.0, stream=True)
+                stream = active_nvidia_client.chat.completions.create(
+                    messages=chat_messages,
+                    **request_kwargs,
+                )
+                def nv_adapter():
+                    for chunk in stream:
+                        content = _safe_delta_content(chunk)
+                        if content:
+                            yield GenericChunk(content)
+                gen = nv_adapter()
+                if _thinks:
+                    return gen, f"NVIDIA/{story_model_override}", True
+                first_chunk = next(gen)
+                return StreamWithFirstChunk(gen, first_chunk), f"NVIDIA/{story_model_override}", False
+            except Exception as err:
+                print(f"  Configured NVIDIA {story_model_override} failed: {err}")
+
+        # 2. Try Google GenAI clients
+        if active_genai_clients:
+            for key_idx, c in enumerate(active_genai_clients):
+                try:
+                    base_m = story_model_override.replace("models/", "")
+                    _thinks = is_thinking_model(base_m)
+                    print(f"=== Streaming Configured Story Model Google GenAI ({base_m}) ===", flush=True)
+                    stream = c.models.generate_content_stream(
+                        model=base_m,
+                        contents=user_msg,
+                        config=types.GenerateContentConfig(
+                            safety_settings=SAFETY_SETTINGS,
+                            system_instruction=system_msg,
+                            temperature=1.0,
+                            **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
+                        )
+                    )
+                    first_chunk = next(iter(stream))
+                    return StreamWithFirstChunk(stream, first_chunk), f"Google/{base_m}", _thinks
+                except Exception as err:
+                    print(f"  Configured Google {story_model_override} failed: {err}")
+
+        # 3. Try OpenAI client
+        if active_openai_client:
+            try:
+                print(f"=== Streaming Configured Story Model OpenAI ({story_model_override}) ===")
+                stream = active_openai_client.chat.completions.create(
+                    model=story_model_override, messages=chat_messages, temperature=1.0, stream=True
+                )
+                def oa_adapter():
+                    for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            yield GenericChunk(chunk.choices[0].delta.content)
+                gen = oa_adapter()
+                first_chunk = next(gen)
+                return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{story_model_override}", False
+            except Exception as err:
+                print(f"  Configured OpenAI {story_model_override} failed: {err}")
+
+        # 4. Try Groq
+        if active_groq_client:
+            try:
+                print(f"=== Streaming Configured Story Model Groq ({story_model_override}) ===")
+                stream = active_groq_client.chat.completions.create(
+                    model=story_model_override, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
+                )
+                def gq_adapter():
+                    for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            yield GenericChunk(chunk.choices[0].delta.content)
+                gen = gq_adapter()
+                first_chunk = next(gen)
+                return StreamWithFirstChunk(gen, first_chunk), f"Groq/{story_model_override}", False
+            except Exception as err:
+                print(f"  Configured Groq {story_model_override} failed: {err}")
+
+        # 5. Try OpenRouter
+        if active_openrouter_client:
+            try:
+                print(f"=== Streaming Configured Story Model OpenRouter ({story_model_override}) ===")
+                stream = active_openrouter_client.chat.completions.create(
+                    model=story_model_override, messages=chat_messages, temperature=1.0, max_tokens=8192, stream=True
+                )
+                def or_adapter():
+                    for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            yield GenericChunk(chunk.choices[0].delta.content)
+                gen = or_adapter()
+                first_chunk = next(gen)
+                return StreamWithFirstChunk(gen, first_chunk), f"OpenRouter/{story_model_override}", False
+            except Exception as err:
+                print(f"  Configured OpenRouter {story_model_override} failed: {err}")
+
     # 0. Try NVIDIA FIRST for story generation (deepseek-v4-pro primary)
     if active_nvidia_client:
         for model in nvidia_models:
@@ -3968,6 +4072,7 @@ def retry_empty_stream_with_fallback(system_msg: str, user_msg: str, failed_mode
             user_msg,
             skip_nokey_models={failed_model},
             nvidia_models=nvidia_models,
+            user_info=user_info,
         )
     except Exception as e:
         print(f"DEBUG: Empty-stream retry failed after {failed_model_name}: {e}")
@@ -4600,8 +4705,9 @@ async def generate_with_audio(
         raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
-        if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
-            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Super Admin keys are reserved for surajssd1000@gmail.com. Please open Settings (⚙️) and enter your Gemini or OpenAI API Key.")
+        api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
+        if not any(bool(user_keys.get(k)) for k in api_keys):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
     """Generate story with audio context. Prioritizes gemini-nokey proxy, falls back to native API."""
     print(f"DEBUG: Audio generation request for {story_id}, audio: {audio.filename}", flush=True)
 
@@ -4993,8 +5099,9 @@ async def generate_story(request: Request, input_data: StoryInput, background_ta
     user_info = get_current_user_info(request, authorization)
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
-        if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
-            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Super Admin keys are reserved for surajssd1000@gmail.com. Please open Settings (⚙️) and enter your Gemini or OpenAI API Key.")
+        api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
+        if not any(bool(user_keys.get(k)) for k in api_keys):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
 
     if not has_any_generation_provider():
         raise HTTPException(status_code=500, detail="No AI providers are configured or reachable.")
