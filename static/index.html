@@ -1769,11 +1769,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                     while (true) {
                                         if (!isInThinking) {
                                             const thoughtStart = textBuffer.indexOf('<thought>');
-                                            if (thoughtStart === -1) {
-                                                fullResponseText += textBuffer;
-                                                textBuffer = '';
-                                                break;
-                                            } else {
+                                            if (thoughtStart !== -1) {
                                                 const storyPart = textBuffer.substring(0, thoughtStart);
                                                 if (storyPart) fullResponseText += storyPart;
                                                 textBuffer = textBuffer.substring(thoughtStart + 9);
@@ -1783,25 +1779,63 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                                     announceStatus('AI is thinking. This may take a while for complex requests.');
                                                     thinkingAnnounced = true;
                                                 }
+                                            } else {
+                                                // Prevent leaking partial '<thought>' tags at the end of the buffer
+                                                let partialIndex = -1;
+                                                const tag = '<thought>';
+                                                for (let i = 1; i < tag.length; i++) {
+                                                    if (textBuffer.endsWith(tag.substring(0, i))) {
+                                                        partialIndex = textBuffer.length - i;
+                                                        break;
+                                                    }
+                                                }
+                                                if (partialIndex !== -1) {
+                                                    fullResponseText += textBuffer.substring(0, partialIndex);
+                                                    textBuffer = textBuffer.substring(partialIndex);
+                                                    break;
+                                                } else {
+                                                    fullResponseText += textBuffer;
+                                                    textBuffer = '';
+                                                    break;
+                                                }
                                             }
                                         } else {
                                             const thoughtEnd = textBuffer.indexOf('</thought>');
-                                            if (thoughtEnd === -1) {
-                                                thinkingText += textBuffer;
-                                                textBuffer = '';
-                                                break;
-                                            } else {
+                                            if (thoughtEnd !== -1) {
                                                 thinkingText += textBuffer.substring(0, thoughtEnd);
                                                 textBuffer = textBuffer.substring(thoughtEnd + 10);
                                                 isInThinking = false;
                                                 statusDiv.textContent = 'generating...';
                                                 announceStatus('Generating story text...');
+                                            } else {
+                                                // Prevent leaking partial '</thought>' tags at the end of the buffer
+                                                let partialIndex = -1;
+                                                const tag = '</thought>';
+                                                for (let i = 1; i < tag.length; i++) {
+                                                    if (textBuffer.endsWith(tag.substring(0, i))) {
+                                                        partialIndex = textBuffer.length - i;
+                                                        break;
+                                                    }
+                                                }
+                                                if (partialIndex !== -1) {
+                                                    thinkingText += textBuffer.substring(0, partialIndex);
+                                                    textBuffer = textBuffer.substring(partialIndex);
+                                                    break;
+                                                } else {
+                                                    thinkingText += textBuffer;
+                                                    textBuffer = '';
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
 
                                     // Paint what we have so far - this is what makes streaming actually visible
                                     body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
+                                    if (thinkingText.trim()) {
+                                        thinkingPanel.querySelector('.thinking-panel').textContent = thinkingText.trim();
+                                        thinkingToggleBtn.style.display = '';
+                                    }
                                     storyDisplay.scrollTop = storyDisplay.scrollHeight;
                                 } else if (payload.type === 'finalizing') {
                                     // Story text is done, but the server is still updating its background
