@@ -703,7 +703,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
         if active_clients.get("openai_client"):
             try:
                 print(f"  [{label}] Trying user configured target OpenAI/{target_model}...")
-                kwargs = {"model": target_model, "messages": messages, "timeout": 40.0}
+                kwargs = {"model": target_model, "messages": messages}
                 if not target_model.startswith("o"):
                     kwargs["temperature"] = temperature
                 resp = active_clients["openai_client"].chat.completions.create(**kwargs)
@@ -734,7 +734,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
             try:
                 print(f"  [{label}] Trying user configured target NVIDIA/{target_model}...")
                 resp = active_clients["nvidia_client"].chat.completions.create(
-                    model=target_model, messages=messages, temperature=temperature, timeout=40.0
+                    model=target_model, messages=messages, temperature=temperature
                 )
                 res = resp.choices[0].message.content or ""
                 if res.strip():
@@ -764,7 +764,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
         c = active_clients["openai_client"]
         for m in ["gpt-4o-mini", "gpt-4o", "o3-mini"]:
             try:
-                kwargs = {"model": m, "messages": messages, "timeout": 40.0}
+                kwargs = {"model": m, "messages": messages}
                 if not m.startswith("o"): kwargs["temperature"] = temperature
                 resp = c.chat.completions.create(**kwargs)
                 res = resp.choices[0].message.content or ""
@@ -808,7 +808,6 @@ def _call_with_full_fallback(
                     lambda model=model: nvidia_client.chat.completions.create(
                         messages=messages,
                         **build_nvidia_request_kwargs(model, temperature, use_thinking=nvidia_use_thinking),
-                        timeout=40.0,
                     ),
                     label=f"{label}/NVIDIA/{model}",
                 )
@@ -836,7 +835,6 @@ def _call_with_full_fallback(
                     resp = nokey_client.chat.completions.create(
                         model=model, messages=messages,
                         temperature=temperature, extra_body=extra,
-                        timeout=40.0,
                     )
                     result = resp.choices[0].message.content or ""
                     if result.strip():
@@ -858,7 +856,7 @@ def _call_with_full_fallback(
                 try:
                     print(f"  [{label}] Trying Groq/{model}...")
                     resp = groq_client.chat.completions.create(
-                        model=model, messages=messages, temperature=temperature, timeout=40.0,
+                        model=model, messages=messages, temperature=temperature,
                     )
                     result = resp.choices[0].message.content or ""
                     if result.strip():
@@ -872,7 +870,7 @@ def _call_with_full_fallback(
             try:
                 print(f"  [{label}] Trying OpenRouter/{model}...")
                 resp = openrouter_client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature, timeout=40.0,
+                    model=model, messages=messages, temperature=temperature,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
@@ -887,7 +885,7 @@ def _call_with_full_fallback(
                 print(f"  [{label}] Trying HF/{model}...")
                 resp = hf_client.chat.completions.create(
                     model=model, messages=messages, temperature=temperature,
-                    max_tokens=4096, timeout=40.0,
+                    max_tokens=4096,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
@@ -901,7 +899,7 @@ def _call_with_full_fallback(
             try:
                 print(f"  [{label}] Trying Cerebras/{model}...")
                 resp = cerebras_client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature, timeout=40.0,
+                    model=model, messages=messages, temperature=temperature,
                 )
                 result = resp.choices[0].message.content or ""
                 if result.strip():
