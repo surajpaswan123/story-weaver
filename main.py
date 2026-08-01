@@ -5110,7 +5110,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                         continue
                     last_display_chunk = piece
                     yield f"data: {json.dumps({'type': 'chunk', 'text': piece})}\n\n"
-                full_response = refined_text
+                full_response = strip_thought_tags(refined_text)
 
                 if not full_response.strip():
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
@@ -5552,7 +5552,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                         continue
                     last_display_chunk = piece
                     yield f"data: {json.dumps({'type': 'chunk', 'text': piece})}\n\n"
-                full_response = refined_text
+                full_response = strip_thought_tags(refined_text)
 
                 # Cleanup runs after streaming, on the persisted copy only — the
                 # live-streamed text is exactly what the editor model produced.
