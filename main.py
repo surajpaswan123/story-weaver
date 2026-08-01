@@ -1425,10 +1425,10 @@ def strip_thought_tags(text: str) -> str:
 # === SNAPSHOT SYSTEM — backup .md files before generation, restore on undo ===
 SNAPSHOT_FILES = {"summary.md", "incidents.md", "items.md", "time.md", "characters.md", "positions.md", "villains.md", "locations.md"}
 
-def save_snapshot(story_id: str):
+def save_snapshot(story_id: str, uid: str = "default_user"):
     """Save a snapshot of all tracked .md files before a generation.
     Only keeps the latest snapshot (for single undo)."""
-    story_dir = get_story_dir(story_id, uid=user_id)
+    story_dir = get_story_dir(story_id, uid=uid)
     snap_dir = os.path.join(story_dir, "_snapshots")
     os.makedirs(snap_dir, exist_ok=True)
     
@@ -1445,9 +1445,9 @@ def save_snapshot(story_id: str):
                 print(f"  [Snapshot] Failed to save {filename}: {e}")
     print(f"  [Snapshot] Saved {len(SNAPSHOT_FILES)} files for {story_id}")
 
-def restore_snapshot(story_id: str):
+def restore_snapshot(story_id: str, uid: str = "default_user"):
     """Restore .md files from the latest snapshot (called on undo)."""
-    story_dir = get_story_dir(story_id, uid=user_id)
+    story_dir = get_story_dir(story_id, uid=uid)
     snap_dir = os.path.join(story_dir, "_snapshots")
     
     if not os.path.exists(snap_dir):
@@ -4570,7 +4570,7 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     print(f"Undo: removed {len(ai_text_clean)} chars from story, restored prompt: '{restored_prompt[:50]}...'")
     
     # Restore .md files from snapshot (summary, incidents, items, time, etc.)
-    restore_snapshot(story_id)
+    restore_snapshot(story_id, uid=user_id)
 
     # Turn count is derived from chat_log.json each time (get_turn_count), which we just
     # trimmed above - no manual counter to decrement anymore.
@@ -4736,7 +4736,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     print(f"DEBUG: Audio generate system len: {len(system_msg)}, user len: {len(user_msg)}")
 
     # Save snapshot of .md files before generation (for undo)
-    save_snapshot(story_id)
+    save_snapshot(story_id, uid=user_id)
 
     # Log the user's input to chat log
     append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}")
@@ -5161,7 +5161,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     print(f"DEBUG: Story text empty? {not full_story_text}")
 
     # Save snapshot of .md files before generation (for undo)
-    save_snapshot(input_data.story_id)
+    save_snapshot(input_data.story_id, uid=user_id)
 
     # Log the user's input to chat log
     append_chat_entry(input_data.story_id, "user", input_data.user_input)
