@@ -4845,7 +4845,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     save_snapshot(story_id, uid=user_id)
 
     # Log the user's input to chat log
-    append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}")
+    append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}", uid=user_id)
 
     def event_stream():
         full_response = ""
@@ -5029,7 +5029,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 print(f"FILE WRITE ERROR: {write_err}")
 
             # Log AI response
-            append_chat_entry(story_id, "ai", full_response, model_used_ref)
+            append_chat_entry(story_id, "ai", full_response, model_used_ref, uid=user_id)
 
             # Save to audio_log.md — use Model 1's OBJECTIVE analysis, not story text
             try:
@@ -5271,7 +5271,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     save_snapshot(input_data.story_id, uid=user_id)
 
     # Log the user's input to chat log
-    append_chat_entry(input_data.story_id, "user", input_data.user_input)
+    append_chat_entry(input_data.story_id, "user", input_data.user_input, uid=user_id)
 
     def event_stream():
         full_response = ""
