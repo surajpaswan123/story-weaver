@@ -429,60 +429,89 @@ def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: st
             print(f"[Firestore Write Error] {e}")
 
 def restore_story_directory_from_firestore(uid: str, story_id: str):
-    """Restore all files for a story from Firestore if they are missing locally."""
-    if not db_firestore or not uid or uid == "default_user":
+    """Restore all files for a story from Firestore or Postgres if they are missing locally."""
+    if not uid or uid == "default_user":
         return
-    try:
-        doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            data = doc.to_dict() or {}
-            files = data.get("files", {})
-            if files:
-                story_dir = get_story_dir(story_id, uid=uid)
-                os.makedirs(story_dir, exist_ok=True)
-                for file_key, file_content in files.items():
-                    file_name = file_key.replace("_json", ".json").replace("_md", ".md")
-                    local_path = os.path.join(story_dir, file_name)
-                    if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
-                        with open(local_path, "w", encoding="utf-8") as f:
-                            f.write(file_content)
-                        print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
-    except Exception as e:
-        print(f"[Firestore Restore Error] {e}")
+        
+    # 1. Restore from Firestore
+    if db_firestore:
+        try:
+            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict() or {}
+                files = data.get("files", {})
+                if files:
+                    story_dir = get_story_dir(story_id, uid=uid)
+                    os.makedirs(story_dir, exist_ok=True)
+                    for file_key, file_content in files.items():
+                        file_name = file_key.replace("_json", ".json").replace("_md", ".md")
+                        local_path = os.path.join(story_dir, file_name)
+                        if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+                            with open(local_path, "w", encoding="utf-8") as f:
+                                f.write(file_content)
+                            print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
+        except Exception as e:
+            print(f"[Firestore Restore Error] {e}")
+            
+    # 2. Restore from Postgres
+    if postgres_active and db_conn_str:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_conn_str)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT file_name, content FROM user_stories
+                    WHERE uid = %s AND story_id = %s
+                """, (uid, story_id))
+                rows = cur.fetchall()
+                if rows:
+                    story_dir = get_story_dir(story_id, uid=uid)
+                    os.makedirs(story_dir, exist_ok=True)
+                    for file_name, file_content in rows:
+                        local_path = os.path.join(story_dir, file_name)
+                        if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+                            with open(local_path, "w", encoding="utf-8") as f:
+                                f.write(file_content)
+                            print(f"[Postgres Sync] Restored {file_name} for story {story_id}")
+            conn.close()
+        except Exception as e:
+            print(f"[Postgres Restore Error] {e}")
 
 def sync_story_directory_to_firestore(uid: str, story_id: str):
-    """Sync all local files for a story to Firestore."""
-    if not db_firestore or not uid or uid == "default_user":
+    """Sync all local files for a story to Firestore or Postgres."""
+    if not uid or uid == "default_user":
         return
-    try:
-        story_dir = get_story_dir(story_id, uid=uid)
-        if not os.path.exists(story_dir):
-            return
         
-        files_payload = {}
-        for name in os.listdir(story_dir):
-            if name.endswith(".md") or name.endswith(".json"):
-                if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
-                    continue
-                file_path = os.path.join(story_dir, name)
-                if os.path.isfile(file_path):
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        file_content = f.read()
-                    file_key = name.replace(".json", "_json").replace(".md", "_md")
-                    files_payload[file_key] = file_content
-                    
-        if files_payload:
-            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-            doc_ref.set({
-                "updated_at": time.time(),
-                "files": files_payload
-            }, merge=True)
-            print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
-    except Exception as e:
-        print(f"[Firestore Sync Error] {e}")
-
-    if postgres_active and uid and uid != "default_user":
+    # 1. Sync to Firestore
+    if db_firestore:
+        try:
+            story_dir = get_story_dir(story_id, uid=uid)
+            if os.path.exists(story_dir):
+                files_payload = {}
+                for name in os.listdir(story_dir):
+                    if name.endswith(".md") or name.endswith(".json"):
+                        if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                            continue
+                        file_path = os.path.join(story_dir, name)
+                        if os.path.isfile(file_path):
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                file_content = f.read()
+                            file_key = name.replace(".json", "_json").replace(".md", "_md")
+                            files_payload[file_key] = file_content
+                            
+                if files_payload:
+                    doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+                    doc_ref.set({
+                        "updated_at": time.time(),
+                        "files": files_payload
+                    }, merge=True)
+                    print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
+        except Exception as e:
+            print(f"[Firestore Sync Error] {e}")
+            
+    # 2. Sync to Postgres
+    if postgres_active and db_conn_str:
         try:
             import psycopg2
             story_dir = get_story_dir(story_id, uid=uid)
@@ -1732,7 +1761,7 @@ def get_turn_count(story_id: str, uid: str = "default_user") -> int:
     """Count completed AI turns for THIS story, derived from chat_log.json instead of a
     shared global counter. Self-correcting on undo (which already removes the AI+user
     pair from chat_log.json) - no manual increment/decrement bookkeeping needed."""
-    path = get_chat_log_path(story_id, uid=user_id, create=False)
+    path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return 0
     try:
@@ -1751,7 +1780,7 @@ def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "defaul
     chat_log's ai text and story.md's saved text are the same value, written
     at the same point, so this is a clean turn-boundary tail of story.md
     rather than an arbitrary line-count slice."""
-    path = get_chat_log_path(story_id, uid=user_id, create=False)
+    path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return ""
     try:
@@ -4555,6 +4584,7 @@ import base64
 
 @app.post("/generate-audio")
 async def generate_with_audio(
+    request: Request,
     user_input: str = Form(...),
     story_id: str = Form(...),
     skip_rules_check: bool = Form(False),
@@ -4564,7 +4594,7 @@ async def generate_with_audio(
     authorization: str = Header(None)
 ):
     restore_story_directory_from_firestore(user_id, story_id)
-    user_info = get_current_user_info(authorization)
+    user_info = get_current_user_info(request, authorization)
     # Guest mode restriction: audio upload not available
     if user_info.get("is_guest", False):
         raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
@@ -4952,16 +4982,15 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-    background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
     if background_tasks:
         background_tasks.add_task(sync_story_directory_to_firestore, user_id, story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/generate")
-async def generate_story(input_data: StoryInput, background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
+async def generate_story(request: Request, input_data: StoryInput, background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
     restore_story_directory_from_firestore(user_id, input_data.story_id)
-    user_info = get_current_user_info(authorization)
+    user_info = get_current_user_info(request, authorization)
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         if not any(bool(v) for k, v in user_keys.items() if k != "openai_base_url"):
