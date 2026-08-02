@@ -1904,28 +1904,69 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     msg.includes('Failed to fetch') || msg.includes('aborted') ||
                     msg.includes('BodyStreamBuffer');
 
+                if (statusDiv) statusDiv.remove();
+
                 if (isDisconnect && fullResponseText) {
-                    statusDiv.remove();
                     body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
                     console.log('Server disconnected, showing partial response.');
-                } else if (isDisconnect) {
-                    statusDiv.remove();
-                    announceStatus('Server disconnected. Refresh the page.');
-                } else {
-                    console.error('Error:', err);
-                    statusDiv.remove();
-                    const errorDiv = document.createElement('div');
-                    errorDiv.className = 'bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded mb-4 text-sm';
-                    errorDiv.setAttribute('role', 'alert');
-                    errorDiv.innerText = 'Error: ' + msg;
-                    storyDisplay.appendChild(errorDiv);
-                    storyDisplay.scrollTop = storyDisplay.scrollHeight;
-                    announceToScreenReader('Error generating story: ' + msg);
-                    input.value = text;
                 }
+
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'bg-red-50/90 backdrop-blur border border-red-200 text-red-800 p-4 rounded-xl my-4 text-sm flex flex-col gap-3 shadow-sm mx-6';
+                errorDiv.setAttribute('role', 'alert');
+                
+                let errorTitle = 'Generation Interrupted';
+                let errorDesc = msg || 'The connection was lost or the server did not respond.';
+                if (isDisconnect) {
+                    errorTitle = 'Connection Lost';
+                    errorDesc = 'Internet disconnect or power cut detected. Generation was interrupted.';
+                }
+                
+                // Escape text for single quotes in inline JS attribute
+                const escapedText = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+
+                errorDiv.innerHTML = `
+                    <div>
+                        <strong class="block font-semibold text-red-900">${errorTitle}</strong>
+                        <span class="text-red-700 text-xs mt-1 block">${errorDesc}</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="button" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5" onclick="retryLastPrompt('${escapedText}')">
+                            🔄 Retry Generation
+                        </button>
+                        <button type="button" class="px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors" onclick="this.parentElement.parentElement.remove()">
+                            Dismiss
+                        </button>
+                    </div>
+                `;
+                
+                storyDisplay.appendChild(errorDiv);
+                storyDisplay.scrollTop = storyDisplay.scrollHeight;
+                announceToScreenReader('Error generating story: ' + errorTitle + '. ' + errorDesc);
+                input.value = text;
             } finally {
                 input.disabled = false;
                 updateSendButtonState();
+                announceStatus('Ready');
+            }
+        }
+
+        async function retryLastPrompt(promptText) {
+            try {
+                announceStatus('Undoing failed turn...');
+                const res = await authFetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    console.warn("Undo during retry noted:", err.detail || 'Undo failed');
+                }
+            } catch (e) {
+                console.warn("Undo during retry failed or not needed:", e);
+            }
+            try {
+                await loadStory();
+                await submitStory(promptText);
+            } catch (err) {
+                console.error('Retry failed:', err);
                 announceStatus('Ready');
             }
         }
