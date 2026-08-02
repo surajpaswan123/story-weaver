@@ -1015,6 +1015,8 @@ def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = F
             extra_body["chat_template_kwargs"] = {"enable_thinking": True}
         elif model in {"qwen/qwen3.5-397b-a17b", "qwen/qwen3-5-122b-a10b"}:
             extra_body["chat_template_kwargs"] = {"enable_thinking": True}
+        elif model == "minimaxai/minimax-m3":
+            extra_body["chat_template_kwargs"] = {"thinking_mode": "enabled"}
         elif model == "qwen/qwen3-next-80b-a3b-thinking":
             pass
         elif model in {"qwen/qwen3-next-80b-a3b-instruct", "qwen/qwen3-coder-480b-a35b-instruct"}:
@@ -1029,6 +1031,8 @@ def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = F
             extra_body["chat_template_kwargs"] = {"enable_thinking": False}
         elif model in {"qwen/qwen3.5-397b-a17b", "qwen/qwen3-5-122b-a10b"}:
             extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+        elif model == "minimaxai/minimax-m3":
+            extra_body["chat_template_kwargs"] = {"thinking_mode": "disabled"}
 
     if extra_body:
         kwargs["extra_body"] = extra_body
@@ -1043,6 +1047,7 @@ def nvidia_model_thinks(model: str) -> bool:
         "qwen/qwen3.5-397b-a17b",
         "qwen/qwen3-5-122b-a10b",
         "qwen/qwen3-next-80b-a3b-thinking",
+        "minimaxai/minimax-m3",
     }
 
 # OpenRouter Configuration
