@@ -981,16 +981,19 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     div.className = `sidebar-item px-3 py-2.5 cursor-pointer flex items-center justify-between group ${story.id === currentStoryId ? 'active' : ''}`;
                     div.setAttribute('role', 'listitem');
                     div.setAttribute('tabindex', '0');
-                    div.setAttribute('aria-label', `${story.name}, ${(story.size / 1024).toFixed(1)} kilobytes${story.id === currentStoryId ? ', currently selected' : ''}`);
+                    // story.name can come from Firestore/Postgres titles (raw user/AI input) —
+                    // escape it before it touches innerHTML or an attribute to prevent stored XSS.
+                    const safeStoryName = escapeHtml(story.name);
+                    div.setAttribute('aria-label', `${safeStoryName}, ${(story.size / 1024).toFixed(1)} kilobytes${story.id === currentStoryId ? ', currently selected' : ''}`);
                     div.setAttribute('aria-current', story.id === currentStoryId ? 'true' : 'false');
 
                     const sizeKB = (story.size / 1024).toFixed(1);
                     div.innerHTML = `
                         <div class="min-w-0 flex-1">
-                            <div class="text-sm truncate">${story.name}</div>
+                            <div class="text-sm truncate">${safeStoryName}</div>
                             <div class="text-xs text-stone-400">${sizeKB} KB</div>
                         </div>
-                        <button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-red-500 p-1 transition-opacity" title="Delete" aria-label="Delete story ${story.name}">
+                        <button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-red-500 p-1 transition-opacity" title="Delete" aria-label="Delete story ${safeStoryName}">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
                             </svg>

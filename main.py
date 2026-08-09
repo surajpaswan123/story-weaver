@@ -126,13 +126,16 @@ if db_conn_str:
 
 
 
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
+
 def _get_client_ip(request) -> str:
-    """Extract real client IP, checking X-Forwarded-For for proxied deployments (Render, etc.)."""
-    forwarded = None
-    if hasattr(request, 'headers'):
+    """Extract real client IP. Proxy headers (X-Forwarded-For / X-Real-IP) are only
+    honored when TRUST_PROXY_HEADERS=true. Otherwise anyone could spoof them to
+    impersonate another guest's IP-derived UID."""
+    if TRUST_PROXY_HEADERS and hasattr(request, 'headers'):
         forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     if hasattr(request, 'client') and request.client:
         return request.client.host
     return "unknown"
@@ -156,17 +159,18 @@ def get_current_user_id(request: Request = None, authorization: str = Header(Non
                 return uid
         except Exception:
             pass
-    try:
-        parts = token.split(".")
-        if len(parts) >= 2:
-            payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-            payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
-            uid = payload_data.get("user_id") or payload_data.get("sub") or payload_data.get("email")
-            if uid:
-                print(f"[Auth Log] JWT Decoded UID: {uid[:12]}...")
-                return uid
-    except Exception as err:
-        print(f"[Auth Note] Token decode note: {err}")
+    if ALLOW_UNVERIFIED_JWT:
+        try:
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload_data = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+                uid = payload_data.get("user_id") or payload_data.get("sub") or payload_data.get("email")
+                if uid:
+                    print(f"[Auth Log] JWT Decoded UID: {uid[:12]}...")
+                    return uid
+        except Exception as err:
+            print(f"[Auth Note] Token decode note: {err}")
     # IP-based guest isolation
     if request:
         ip = _get_client_ip(request)
@@ -175,6 +179,17 @@ def get_current_user_id(request: Request = None, authorization: str = Header(Non
 
 
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
+
+# Unverified JWT payload decoding (no signature check) is ONLY permitted in local mode
+# (no Firebase Admin credentials). On any deployment where Firebase is initialized,
+# only admin-SDK-verified ID tokens are trusted; forged tokens fall back to guest mode.
+ALLOW_UNVERIFIED_JWT = os.getenv("ALLOW_UNVERIFIED_JWT", "auto").strip().lower()
+if ALLOW_UNVERIFIED_JWT == "auto":
+    ALLOW_UNVERIFIED_JWT = "true" if not firebase_initialized else "false"
+ALLOW_UNVERIFIED_JWT = ALLOW_UNVERIFIED_JWT == "true"
+if ALLOW_UNVERIFIED_JWT:
+    print("[SECURITY WARNING] Unverified JWT tokens are accepted (local mode, no Firebase Admin). "
+          "Set Firebase credentials or ALLOW_UNVERIFIED_JWT=false before exposing this server publicly.")
 
 def get_current_user_info(request: Request = None, authorization: str = Header(None)) -> dict:
     """Extract user UID, email, and Super Admin status from Bearer token with strict email verification."""
@@ -199,8 +214,10 @@ def get_current_user_info(request: Request = None, authorization: str = Header(N
             except Exception as e:
                 pass
                 
-        # 2. JWT Decode fallback (extract email & user_id)
-        if not user_info["email"] or user_info["uid"] == "default_user":
+        # 2. JWT Decode fallback (extract email & user_id) — LOCAL MODE ONLY.
+        # On deployments with Firebase initialized this is disabled: tokens are only
+        # trusted when the Firebase Admin SDK verifies their signature.
+        if ALLOW_UNVERIFIED_JWT and (not user_info["email"] or user_info["uid"] == "default_user"):
             try:
                 parts = token.split(".")
                 if len(parts) >= 2:
@@ -445,7 +462,8 @@ def restore_story_directory_from_firestore(uid: str, story_id: str):
                     story_dir = get_story_dir(story_id, uid=uid)
                     os.makedirs(story_dir, exist_ok=True)
                     for file_key, file_content in files.items():
-                        file_name = file_key.replace("_json", ".json").replace("_md", ".md")
+                        # basename guard: never let a stored key escape the story folder
+                        file_name = os.path.basename(file_key.replace("_json", ".json").replace("_md", ".md"))
                         local_path = os.path.join(story_dir, file_name)
                         if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
                             with open(local_path, "w", encoding="utf-8") as f:
@@ -469,6 +487,7 @@ def restore_story_directory_from_firestore(uid: str, story_id: str):
                     story_dir = get_story_dir(story_id, uid=uid)
                     os.makedirs(story_dir, exist_ok=True)
                     for file_name, file_content in rows:
+                        file_name = os.path.basename(file_name)  # never escape the story folder
                         local_path = os.path.join(story_dir, file_name)
                         if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
                             with open(local_path, "w", encoding="utf-8") as f:
@@ -1368,13 +1387,18 @@ def clean_text(text: str) -> str:
     text = ''.join(c for c in text if c in '\n\r\t' or (ord(c) >= 32))
     return text
 
-def strip_thought_tags(text: str) -> str:
-    """Remove provider thought blocks AND untagged model reasoning from text before saving to files."""
+def strip_thought_tags(text: str, filter_reasoning_lines: bool = True) -> str:
+    """Remove provider thought blocks AND (optionally) untagged model reasoning lines.
+    Pass filter_reasoning_lines=False for STORY PROSE, where lines like 'I think...' or
+    'Let me...' are legitimate first-person narrative and must never be dropped."""
     import re as _re
     # 1. Remove XML-tagged thinking blocks
     cleaned = _re.sub(r'<thought>.*?</thought>', '', text, flags=_re.DOTALL)
     cleaned = _re.sub(r'<think>.*?</think>', '', cleaned, flags=_re.DOTALL)
     
+    if not filter_reasoning_lines:
+        return cleaned.strip()
+
     # 2. Filter out untagged model reasoning lines (not in quotes or italics = not story dialogue)
     _REASONING_PATTERNS = _re.compile(
         r'^(?:'
@@ -1890,8 +1914,10 @@ async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_
             with open(cat_path, "w", encoding="utf-8") as f:
                 f.write(f"## {cat.title()}\n")
 
-    # Sync to Firestore if active
-    save_story_to_firestore(user_id, safe_id, "story.md", "", input_data.name)
+    # Sync to Firestore if active. Title is user input — strip HTML so a crafted name
+    # can't become stored XSS in the story list.
+    safe_title = re.sub(r"<[^>]*>", "", input_data.name or "").strip() or safe_id
+    save_story_to_firestore(user_id, safe_id, "story.md", "", safe_title)
 
     return {"id": safe_id, "name": input_data.name}
 
@@ -2645,20 +2671,23 @@ What inventory changes occurred? Return JSON array only."""
                 
             elif change_type == "QUANTITY":
                 qty_label = change.get("new_qty_label", "")
-                # Find the item and update/add quantity tag
                 lines = updated_items.split("\n")
                 for i, line in enumerate(lines):
                     if item_name.lower() in line.lower() and line.strip().startswith("-"):
-                        # Remove old qty tag if present
+                        # Preserve the existing status tag (CONSUMED/DESTROYED/LOST...) instead
+                        # of forcing [ACTIVE] back on — a quantity update must not resurrect
+                        # an item that was already consumed or destroyed.
+                        status_match = _re.search(r'\[(ACTIVE|CONSUMED|DESTROYED|LOST|GIVEN|USED)\]', line)
+                        status_tag = status_match.group(0) if status_match else "[ACTIVE]"
+                        # Remove old qty tag, then strip the status we're about to re-add once
                         cleaned = _re.sub(r'\[qty:[^\]]*\]', '', line).strip()
-                        # Remove old status tags
                         cleaned = _re.sub(r'\[(ACTIVE|CONSUMED|DESTROYED|LOST|GIVEN|USED)\]', '', cleaned).strip()
                         if ":" in cleaned:
                             parts = cleaned.split(":", 1)
                             suffix = f" ({reason})" if reason else ""
-                            lines[i] = f"{parts[0].rstrip()} {qty_label} [ACTIVE]:{parts[1]}{suffix}"
+                            lines[i] = f"{parts[0].rstrip()} {qty_label} {status_tag}:{parts[1]}{suffix}"
                         else:
-                            lines[i] = f"{cleaned} {qty_label} [ACTIVE]"
+                            lines[i] = f"{cleaned} {qty_label} {status_tag}"
                         lines[i] = _apply_location_tag(lines[i], new_location)
                         print(f"    ~ QTY: {item_name} → {qty_label}" + (f" (Last: {new_location})" if new_location else ""))
                         break
@@ -4652,7 +4681,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
 
         # Append consistency check
         if "consistency" in sections:
-            consistency_path = get_consistency_path(story_id)
+            consistency_path = get_consistency_path(story_id, uid=user_id)
             timestamp = time.strftime("%Y-%m-%d %H:%M")
             entry = f"\n---\n**Check at {timestamp}** (model: {model_used})\n{sections['consistency']}\n"
             with open(consistency_path, "a", encoding="utf-8") as f:
@@ -4812,15 +4841,20 @@ async def generate_with_audio(
     """Generate story with audio context. Prioritizes gemini-nokey proxy, falls back to native API."""
     print(f"DEBUG: Audio generation request for {story_id}, audio: {audio.filename}", flush=True)
 
-    # Read the audio file
-    audio_bytes = await audio.read()
+    # Read the audio file with a size cap (avoids memory/disk exhaustion)
+    MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
+    audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file too large (max 25 MB).")
     audio_mime = audio.content_type or "audio/mpeg"
+    if not audio_mime.startswith("audio/"):
+        raise HTTPException(status_code=415, detail="Only audio files are supported.")
     # Extract format from mime (e.g. "audio/mpeg" -> "mpeg", "audio/wav" -> "wav")
     audio_format = audio_mime.split("/")[-1] if "/" in audio_mime else "mp3"
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
     print(f"DEBUG: Audio size: {len(audio_bytes)} bytes, mime: {audio_mime}, format: {audio_format}")
 
-    story_path = get_story_path(story_id)
+    story_path = get_story_path(story_id, uid=user_id)
     story_dir = get_story_dir(story_id, uid=user_id)
 
     # Read the full story text
@@ -4902,7 +4936,7 @@ async def generate_with_audio(
     # Recent narrative window - last N AI-generated turns, in place of the full story.md dump.
     # Placed last so it sits closest to the generation point (strongest attention, and it's
     # literally where continuation needs to happen).
-    recent_story_text = get_recent_story_text(story_id, RECENT_STORY_TURNS)
+    recent_story_text = get_recent_story_text(story_id, RECENT_STORY_TURNS, uid=user_id)
     if recent_story_text:
         story_context_parts.append(f"=== RECENT STORY (continue from the end of this) ===\n{recent_story_text}")
 
@@ -5051,7 +5085,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 return
 
             # Strip thinking tags before saving (frontend already parsed them)
-            full_response = strip_thought_tags(full_response)
+            full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
             full_response, cleanup_notes = _clean_generated_story_text(full_response)
             for note in cleanup_notes:
                 print(f"DEBUG: Audio cleanup applied: {note}")
@@ -5079,7 +5113,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
-                    full_response = strip_thought_tags(full_response)
+                    full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
                     for note in cleanup_notes:
                         print(f"DEBUG: Audio cleanup applied after retry: {note}")
@@ -5099,7 +5133,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                         continue
                     last_display_chunk = piece
                     yield f"data: {json.dumps({'type': 'chunk', 'text': piece})}\n\n"
-                full_response = strip_thought_tags(refined_text)
+                full_response = strip_thought_tags(refined_text, filter_reasoning_lines=False)
 
                 if not full_response.strip():
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
@@ -5161,14 +5195,14 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             # closes the race condition: the next turn can't start reading characters.md/
             # items.md/time.md/etc. until this turn's updates have actually been written.
             updated_story = full_story_text + ("\n\n" if full_story_text else "") + full_response
-            turn_counter = get_turn_count(story_id)
+            turn_counter = get_turn_count(story_id, uid=user_id)
             print(f"Turn {turn_counter} completed (audio, 3-model pipeline). (Batch size: {BATCH_SIZE})")
             if turn_counter % BATCH_SIZE == 0:
                 print(f"Triggering background analysis (Turn {turn_counter})...")
                 # Analyze everything since the last run (last BATCH_SIZE turns), not just this
                 # single turn - if BATCH_SIZE > 1, skipped turns would otherwise never get
                 # extracted into characters.md/locations.md/etc.
-                new_text_for_analysis = get_recent_story_text(story_id, BATCH_SIZE) or full_response
+                new_text_for_analysis = get_recent_story_text(story_id, BATCH_SIZE, uid=user_id) or full_response
                 analysis_thread = threading.Thread(
                     target=background_analysis,
                     args=(story_id, updated_story, new_text_for_analysis, user_id, user_info)
@@ -5460,7 +5494,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 return
 
             # Strip thinking tags before saving (frontend already parsed them)
-            full_response = strip_thought_tags(full_response)
+            full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
             full_response, cleanup_notes = _clean_generated_story_text(full_response)
             for note in cleanup_notes:
                 print(f"DEBUG: Story cleanup applied: {note}")
@@ -5497,7 +5531,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                                  finish_reason = str(candidates[0].finish_reason)
                             last_finish_reason = finish_reason
                             print(f"DEBUG: Empty non-visible retry chunk. Reason: {finish_reason}")
-                    full_response = strip_thought_tags(full_response)
+                    full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
                     for note in cleanup_notes:
                         print(f"DEBUG: Story cleanup applied after retry: {note}")
@@ -5541,7 +5575,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                         continue
                     last_display_chunk = piece
                     yield f"data: {json.dumps({'type': 'chunk', 'text': piece})}\n\n"
-                full_response = strip_thought_tags(refined_text)
+                full_response = strip_thought_tags(refined_text, filter_reasoning_lines=False)
 
                 # Cleanup runs after streaming, on the persisted copy only — the
                 # live-streamed text is exactly what the editor model produced.
@@ -5874,12 +5908,15 @@ if __name__ == "__main__":
     import uvicorn
     project_dir = os.path.dirname(os.path.abspath(__file__))
     port = int(os.getenv("PORT", 8000))
-    print(f"Auto-reload watching: {project_dir} on port {port}")
+    # Bind to localhost by default locally; Render (which sets PORT) gets 0.0.0.0.
+    host = os.getenv("HOST") or ("0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
+    reload_enabled = os.getenv("RELOAD", "false").lower() == "true"
+    print(f"Auto-reload watching: {project_dir} on {host}:{port} (reload={reload_enabled})")
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host=host,
         port=port,
-        reload=True,
+        reload=reload_enabled,
         reload_dirs=[project_dir],
     )
 
@@ -5943,5 +5980,9 @@ async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depen
 
 
 @app.get("/api/logs")
-async def get_server_logs():
+async def get_server_logs(user_info: dict = Depends(get_current_user_info)):
+    """Server logs are sensitive internals: only Super Admin (or local mode, where the
+    server is bound to the owner's machine) may read them."""
+    if not user_info.get("is_super_admin") and firebase_initialized:
+        raise HTTPException(status_code=403, detail="Access denied.")
     return {"logs": list(SERVER_LOGS)}
