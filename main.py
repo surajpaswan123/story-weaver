@@ -1030,33 +1030,51 @@ _NVIDIA_UTILITY_MODEL_MARKERS = (
 
 def _nvidia_thinking_body(model: str) -> dict:
     """Return the NVIDIA-specific thinking/reasoning body for a model id, or {} if none.
-    Pattern-based so new models in the live list are classified automatically."""
+    Pattern-based so new models in the live list are classified automatically.
+
+    Per NVIDIA docs/model cards and the maintained pi-nvidia-nim provider mapping,
+    ALL thinking controls on NIM go inside chat_template_kwargs - the top-level
+    OpenAI reasoning_effort is silently ignored (e.g. DeepSeek V4 on the hosted
+    API), so it is never used here.
+    """
     name = (model or "").lower()
     if not name or any(marker in name for marker in _NVIDIA_UTILITY_MODEL_MARKERS):
         return {}
 
-    # DeepSeek family: OpenAI-style reasoning_effort only on reasoning-capable
-    # generations (v3/v4/r1/reasoner/pro/ultra); older deepseek-coder etc. skip it
+    # thinkingmachines/inkling: native reasoning_effort presets
+    if "thinkingmachines" in name:
+        return {"chat_template_kwargs": {"reasoning_effort": "high"}}
+
+    # DeepSeek V4: thinking + reasoning_effort (max for pro/ultra, high for flash)
+    # DeepSeek V3.x / R1 distills: thinking only
     if "deepseek" in name:
-        if any(m in name for m in ("v3", "v4", "r1", "reasoner", "pro", "ultra")):
-            return {"reasoning_effort": "max" if ("pro" in name or "ultra" in name) else "high"}
+        if any(m in name for m in ("v4", "pro", "ultra", "reasoner")):
+            return {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "max" if ("pro" in name or "ultra" in name) else "high"}}
+        if any(m in name for m in ("v3", "r1")):
+            return {"chat_template_kwargs": {"thinking": True}}
         return {}
 
-    # NVIDIA Nemotron family: super/ultra support reasoning_effort; others use chat-template thinking
+    # Moonshot Kimi: thinking toggle
+    if "kimi" in name:
+        return {"chat_template_kwargs": {"thinking": True}}
+
+    # Z-AI GLM: enable_thinking + clear_thinking
+    if "glm" in name:
+        return {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
+
+    # NVIDIA Nemotron family: reasoning mode is a chat-template flag
     if "nemotron" in name:
-        if "super" in name or "ultra" in name:
-            return {"reasoning_effort": "high"}
         return {"chat_template_kwargs": {"enable_thinking": True}}
 
-    # Qwen3 family: chat-template enable_thinking
-    if "qwen3" in name:
+    # Qwen3 / QwQ family: chat-template enable_thinking
+    if "qwen3" in name or "qwq" in name:
         return {"chat_template_kwargs": {"enable_thinking": True}}
 
     # MiniMax: chat-template thinking_mode
     if "minimax" in name:
         return {"chat_template_kwargs": {"thinking_mode": "enabled"}}
 
-    # Explicit reasoning markers (e.g. *-reasoning, *-thinking, thinkingmachines/*)
+    # Explicit reasoning markers (e.g. *-reasoning, *-thinking, cosmos-reason*)
     if "reason" in name or "thinking" in name:
         return {"chat_template_kwargs": {"enable_thinking": True}}
 
