@@ -3317,6 +3317,13 @@ def _safe_chunk_text(chunk):
     return ""
 
 
+def _thought_blocks(text: str):
+    """Extract complete <thought>...</thought> blocks from streamed text.
+    Safe to run per chunk: stream adapters wrap each delta's reasoning in its
+    own complete tags, so a block is never split across chunks."""
+    return re.findall(r"<thought>.*?</thought>", text or "", re.S)
+
+
 def _find_stream_overlap(existing_text: str, incoming_text: str) -> int:
     """Return the longest suffix/prefix overlap between emitted text and a new chunk."""
     max_overlap = min(len(existing_text), len(incoming_text))
@@ -5101,12 +5108,16 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
             for chunk in stream:
                 text_content = _safe_chunk_text(chunk)
-                
+
                 if text_content:
                     fresh_text = chunk_normalizer.take(text_content)
                     if not fresh_text:
                         continue
                     full_response += fresh_text
+                    # Forward the main model's thinking blocks live so the
+                    # thinking panel populates (audio pipeline streams text later)
+                    for _tb in _thought_blocks(fresh_text):
+                        yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
 
             if not full_response:
                 retry_result = retry_empty_stream_with_fallback(
@@ -5131,6 +5142,8 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
+                            for _tb in _thought_blocks(fresh_text):
+                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
 
             if not full_response:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. Safety filters may have blocked the response.'})}\n\n"
@@ -5165,6 +5178,8 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
+                            for _tb in _thought_blocks(fresh_text):
+                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
                     full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
                     for note in cleanup_notes:
@@ -5494,9 +5509,15 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     if not fresh_text:
                         continue
                     full_response += fresh_text
-                    # Stream live to client when rules check is skipped
                     if input_data.skip_rules_check:
+                        # Stream everything live when no rules editor will follow
                         yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
+                    else:
+                        # Rules editor re-renders the story text afterward, so only
+                        # forward the MAIN model's thinking blocks live - they were
+                        # previously stripped before display, hiding the thinking panel.
+                        for _tb in _thought_blocks(fresh_text):
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
                 else:
                     finish_reason = "Unknown"
                     candidates = getattr(chunk, 'candidates', None)
@@ -5532,6 +5553,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
+                            for _tb in _thought_blocks(fresh_text):
+                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
                         else:
                             finish_reason = "Unknown"
                             candidates = getattr(chunk, 'candidates', None)
@@ -5576,6 +5599,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
+                            for _tb in _thought_blocks(fresh_text):
+                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
                         else:
                             finish_reason = "Unknown"
                             candidates = getattr(chunk, 'candidates', None)
