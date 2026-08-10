@@ -1262,7 +1262,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         storyDisplay.addEventListener('scroll', onStoryScroll);
 
+        let storyLoadSeq = 0;  // guards against out-of-order renders when switching stories quickly
+
         async function loadStory() {
+            const seq = ++storyLoadSeq;  // any newer loadStory() call invalidates this one
             try {
                 storyDisplay.innerHTML = '';
                 truncationBanner.classList.add('hidden');
@@ -1273,12 +1276,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
 
                 const chatRes = await authFetch(`/story/${currentStoryId}/chat?last=9999`);
+                if (seq !== storyLoadSeq) return;  // a newer story was selected while we waited
                 const chatData = await chatRes.json();
                 allChatEntries = chatData.messages || [];
 
                 if (allChatEntries.length === 0) {
                     // Fallback to loading story.md content directly
                     const storyRes = await authFetch(`/story/${currentStoryId}?tail=3000`);
+                    if (seq !== storyLoadSeq) return;
                     if (storyRes.ok) {
                         const storyData = await storyRes.json();
                         if (storyData.content && storyData.content.trim()) {
@@ -1304,6 +1309,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.scrollTop = storyDisplay.scrollHeight;
             } catch (err) {
                 console.error('Failed to load story:', err);
+                if (seq !== storyLoadSeq) return;
                 storyDisplay.innerHTML = '<div class="h-full flex flex-col items-center justify-center text-stone-500 italic p-6 text-center"><span class="text-4xl mb-3">📖</span><p class="text-lg font-medium text-stone-400">No stories yet</p><p class="text-xs text-stone-500 mt-1">Create a new story using the + button above to start weaving!</p></div>';
             }
         }
@@ -1924,25 +1930,37 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     errorTitle = 'Connection Lost';
                     errorDesc = 'Internet disconnect or power cut detected. Generation was interrupted.';
                 }
-                
-                // Escape text for single quotes in inline JS attribute
-                const escapedText = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 
-                errorDiv.innerHTML = `
-                    <div>
-                        <strong class="block font-semibold text-red-900">${errorTitle}</strong>
-                        <span class="text-red-700 text-xs mt-1 block">${errorDesc}</span>
-                    </div>
-                    <div class="flex gap-2">
-                        <button type="button" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5" onclick="retryLastPrompt('${escapedText}')">
-                            🔄 Retry Generation
-                        </button>
-                        <button type="button" class="px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors" onclick="this.parentElement.parentElement.remove()">
-                            Dismiss
-                        </button>
-                    </div>
-                `;
-                
+                // Build the dialog with textContent (not innerHTML) so neither the server
+                // error text nor the user prompt can inject markup into the page.
+                const errorMsgBlock = document.createElement('div');
+                const errorTitleEl = document.createElement('strong');
+                errorTitleEl.className = 'block font-semibold text-red-900';
+                errorTitleEl.textContent = errorTitle;
+                const errorDescEl = document.createElement('span');
+                errorDescEl.className = 'text-red-700 text-xs mt-1 block';
+                errorDescEl.textContent = errorDesc;
+                errorMsgBlock.appendChild(errorTitleEl);
+                errorMsgBlock.appendChild(errorDescEl);
+
+                const errorBtnWrap = document.createElement('div');
+                errorBtnWrap.className = 'flex gap-2';
+                const retryBtn = document.createElement('button');
+                retryBtn.type = 'button';
+                retryBtn.className = 'px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5';
+                retryBtn.textContent = '🔄 Retry Generation';
+                retryBtn.addEventListener('click', () => retryLastPrompt(text));
+                const dismissBtn = document.createElement('button');
+                dismissBtn.type = 'button';
+                dismissBtn.className = 'px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors';
+                dismissBtn.textContent = 'Dismiss';
+                dismissBtn.addEventListener('click', () => errorDiv.remove());
+                errorBtnWrap.appendChild(retryBtn);
+                errorBtnWrap.appendChild(dismissBtn);
+
+                errorDiv.appendChild(errorMsgBlock);
+                errorDiv.appendChild(errorBtnWrap);
+
                 storyDisplay.appendChild(errorDiv);
                 storyDisplay.scrollTop = storyDisplay.scrollHeight;
                 announceToScreenReader('Error generating story: ' + errorTitle + '. ' + errorDesc);
@@ -2028,14 +2046,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const actionBar = btn.closest('.action-bar');
             const editContainer = document.createElement('div');
             editContainer.style.marginTop = '8px';
+            // Build the textarea empty and set .value afterward so prompt text can never
+            // break out of the tag (a '</textarea>' in the prompt used to inject HTML).
             editContainer.innerHTML = `
                 <label for="edit-prompt-textarea" style="font-size:11px;color:#78716c;margin-bottom:4px;display:block;">Edit your prompt:</label>
-                <textarea id="edit-prompt-textarea" class="edit-inline" rows="2" aria-label="Edit your prompt before regenerating">${lastUserPrompt.replace(/</g, '&lt;')}</textarea>
+                <textarea id="edit-prompt-textarea" class="edit-inline" rows="2" aria-label="Edit your prompt before regenerating"></textarea>
                 <div style="display:flex;gap:6px;margin-top:6px;" role="group" aria-label="Edit actions">
                     <button class="action-btn" style="background:#44403c;color:white;border-color:#44403c;" onclick="confirmEdit(this)" aria-label="Confirm edit and regenerate">✅ Regenerate</button>
                     <button class="action-btn" onclick="cancelEdit(this)" aria-label="Cancel editing">Cancel</button>
                 </div>
             `;
+            editContainer.querySelector('textarea').value = lastUserPrompt;
             actionBar.replaceWith(editContainer);
             editContainer.querySelector('textarea').focus();
         }

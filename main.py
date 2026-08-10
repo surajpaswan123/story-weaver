@@ -5829,18 +5829,52 @@ def fetch_groq_live_models(api_key: str = None):
         print(f"[Live Fetch Note] Groq models fetch: {e}")
     return None
 
+def fetch_google_live_models(api_key: str = None):
+    """Fetch the live Gemini model list via the google-genai SDK.
+
+    Google was the one provider never refreshed live - its dropdown stayed
+    pinned to the hardcoded static list forever. Uses the same SDK call the
+    app already uses for generation, so it always matches the installed version.
+    """
+    key = api_key or os.getenv("GEMINI_API_KEY")
+    if not key:
+        return None
+    try:
+        gclient = genai.Client(api_key=key)
+        models = []
+        for m in gclient.models.list(config={"page_size": 100}):
+            name = (m.name or "")
+            if name.startswith("models/"):
+                name = name[len("models/"):]
+            if not name:
+                continue
+            try:
+                actions = list(getattr(m, "supported_actions", None) or [])
+                if actions and "generateContent" not in actions:
+                    continue
+            except Exception:
+                pass
+            models.append(name)
+        if models:
+            return "google", models
+    except Exception as e:
+        print(f"[Live Fetch Note] Google models fetch: {e}")
+    return None
+
+
 def refresh_live_provider_models():
     global DYNAMIC_PROVIDER_MODELS, LAST_DYNAMIC_FETCH
     try:
         print("[Live Fetch] Fetching real-time online AI model lists...")
         updated = dict(STATIC_PROVIDER_MODELS)
         
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [
                 executor.submit(fetch_openai_live_models),
                 executor.submit(fetch_openrouter_live_models),
                 executor.submit(fetch_nvidia_live_models),
-                executor.submit(fetch_groq_live_models)
+                executor.submit(fetch_groq_live_models),
+                executor.submit(fetch_google_live_models)
             ]
             for f in futures:
                 res = f.result()
@@ -5879,7 +5913,11 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
 
     allowed_providers = {}
     if user_keys.get("gemini_api_key"):
-        allowed_providers["google"] = DYNAMIC_PROVIDER_MODELS.get("google", STATIC_PROVIDER_MODELS["google"])
+        live_google = fetch_google_live_models(user_keys["gemini_api_key"])
+        models_list = live_google[1] if live_google else DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", STATIC_PROVIDER_MODELS["google"]["models"])
+        existing = STATIC_PROVIDER_MODELS["google"]["models"]
+        merged = list(existing) + [m for m in models_list if m not in existing]
+        allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": merged}
     if user_keys.get("openai_api_key"):
         # Fetch or default OpenAI models
         live_openai = fetch_openai_live_models(user_keys["openai_api_key"], user_keys.get("openai_base_url"))
