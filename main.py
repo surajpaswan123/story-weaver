@@ -5697,50 +5697,15 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-STATIC_PROVIDER_MODELS = {
-    "google": {
-        "name": "Google GenAI (Gemini)",
-        "models": [
-            "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
-            "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite",
-            "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro",
-            "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest",
-            "gemini-pro-latest", "gemini-omni-flash-preview", "gemini-3.1-flash-live-preview"
-        ]
-    },
-    "nvidia": {
-        "name": "NVIDIA NIM",
-        "models": [
-            "deepseek-ai/deepseek-v4-pro", "deepseek-ai/deepseek-v4-flash",
-            "nvidia/nemotron-3-super-120b-a12b", "nvidia/nemotron-3-nano-30b-a3b",
-            "nvidia/nemotron-3-ultra-550b-a55b", "qwen/qwen3.5-397b-a17b",
-            "qwen/qwen3-next-80b-a3b-instruct", "meta/llama-3.3-70b-instruct",
-            "meta/llama-3.1-70b-instruct", "meta/llama-3.1-8b-instruct",
-            "google/gemma-4-31b-it", "google/gemma-3-12b-it", "google/gemma-2-2b-it",
-            "mistralai/mistral-large-3-675b-instruct-2512", "mistralai/mistral-medium-3.5-128b",
-            "mistralai/mixtral-8x22b-v0.1", "minimaxai/minimax-m3", "moonshotai/kimi-k2.6",
-            "stepfun-ai/step-3.7-flash", "01-ai/yi-large", "z-ai/glm-5.2"
-        ]
-    },
-    "groq": {
-        "name": "Groq",
-        "models": [
-            "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b",
-            "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b", "groq/compound"
-        ]
-    },
-    "openrouter": {
-        "name": "OpenRouter",
-        "models": [
-            "openrouter/free", "google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free",
-            "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-nano-30b-a3b:free",
-            "openai/gpt-oss-20b:free"
-        ]
-    },
-    "cerebras": {
-        "name": "Cerebras",
-        "models": ["gemma-4-31b", "gpt-oss-120b", "zai-glm-4.7"]
-    }
+# Model lists come ONLY from live provider API fetches - no hardcoded model lists.
+# Provider display names are labels, not model lists.
+PROVIDER_DISPLAY_NAMES = {
+    "google": "Google GenAI (Gemini)",
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+    "groq": "Groq",
+    "nvidia": "NVIDIA NIM",
+    "cerebras": "Cerebras",
 }
 
 from fastapi import Response
@@ -5753,7 +5718,7 @@ async def favicon():
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-DYNAMIC_PROVIDER_MODELS = dict(STATIC_PROVIDER_MODELS)
+DYNAMIC_PROVIDER_MODELS = {}
 LAST_DYNAMIC_FETCH = 0
 
 
@@ -5829,6 +5794,25 @@ def fetch_groq_live_models(api_key: str = None):
         print(f"[Live Fetch Note] Groq models fetch: {e}")
     return None
 
+
+def fetch_cerebras_live_models(api_key: str = None):
+    key = api_key or os.getenv("CEREBRAS_API_KEY")
+    if not key:
+        return None
+    try:
+        req = urllib.request.Request("https://api.cerebras.ai/v1/models", headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "cerebras", models
+    except Exception as e:
+        print(f"[Live Fetch Note] Cerebras models fetch: {e}")
+    return None
+
 def fetch_google_live_models(api_key: str = None):
     """Fetch the live Gemini model list via the google-genai SDK.
 
@@ -5866,29 +5850,31 @@ def refresh_live_provider_models():
     global DYNAMIC_PROVIDER_MODELS, LAST_DYNAMIC_FETCH
     try:
         print("[Live Fetch] Fetching real-time online AI model lists...")
-        updated = dict(STATIC_PROVIDER_MODELS)
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        updated = {}
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = [
                 executor.submit(fetch_openai_live_models),
                 executor.submit(fetch_openrouter_live_models),
                 executor.submit(fetch_nvidia_live_models),
                 executor.submit(fetch_groq_live_models),
-                executor.submit(fetch_google_live_models)
+                executor.submit(fetch_google_live_models),
+                executor.submit(fetch_cerebras_live_models),
             ]
             for f in futures:
                 res = f.result()
                 if res:
                     provider_key, live_models = res
-                    if provider_key in updated:
-                        existing = updated[provider_key]["models"]
-                        # Prepend static defaults so recommended models stay top, followed by all live online models
-                        merged = list(existing) + [m for m in live_models if m not in existing]
-                        updated[provider_key]["models"] = merged
+                    deduped = list(dict.fromkeys(live_models))
+                    if deduped:
+                        updated[provider_key] = {
+                            "name": PROVIDER_DISPLAY_NAMES.get(provider_key, provider_key.title()),
+                            "models": deduped,
+                        }
 
         DYNAMIC_PROVIDER_MODELS = updated
         LAST_DYNAMIC_FETCH = time.time()
-        print(f"[Live Fetch OK] Successfully loaded online model lists! (OpenRouter: {len(DYNAMIC_PROVIDER_MODELS.get('openrouter', {}).get('models', []))} models)")
+        print(f"[Live Fetch OK] Loaded live model lists: { {k: len(v.get('models', [])) for k, v in updated.items()} }")
     except Exception as e:
         print(f"[Live Fetch Note] Background fetch error: {e}")
 
@@ -5914,33 +5900,29 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     allowed_providers = {}
     if user_keys.get("gemini_api_key"):
         live_google = fetch_google_live_models(user_keys["gemini_api_key"])
-        models_list = live_google[1] if live_google else DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", STATIC_PROVIDER_MODELS["google"]["models"])
-        existing = STATIC_PROVIDER_MODELS["google"]["models"]
-        merged = list(existing) + [m for m in models_list if m not in existing]
-        allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": merged}
+        models_list = live_google[1] if live_google else DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", [])
+        if models_list:
+            allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": list(dict.fromkeys(models_list))}
     if user_keys.get("openai_api_key"):
-        # Fetch or default OpenAI models
         live_openai = fetch_openai_live_models(user_keys["openai_api_key"], user_keys.get("openai_base_url"))
-        models_list = live_openai[1] if live_openai else OPENAI_MODELS
-        allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": models_list}
+        models_list = live_openai[1] if live_openai else DYNAMIC_PROVIDER_MODELS.get("openai", {}).get("models", [])
+        if models_list:
+            allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": list(dict.fromkeys(models_list))}
     if user_keys.get("openrouter_api_key"):
         live_or = fetch_openrouter_live_models(user_keys["openrouter_api_key"])
-        models_list = live_or[1] if live_or else DYNAMIC_PROVIDER_MODELS.get("openrouter", {}).get("models", STATIC_PROVIDER_MODELS["openrouter"]["models"])
-        existing = STATIC_PROVIDER_MODELS["openrouter"]["models"]
-        merged = list(existing) + [m for m in models_list if m not in existing]
-        allowed_providers["openrouter"] = {"name": "OpenRouter", "models": merged}
+        models_list = live_or[1] if live_or else DYNAMIC_PROVIDER_MODELS.get("openrouter", {}).get("models", [])
+        if models_list:
+            allowed_providers["openrouter"] = {"name": "OpenRouter", "models": list(dict.fromkeys(models_list))}
     if user_keys.get("groq_api_key"):
         live_groq = fetch_groq_live_models(user_keys["groq_api_key"])
-        models_list = live_groq[1] if live_groq else DYNAMIC_PROVIDER_MODELS.get("groq", {}).get("models", STATIC_PROVIDER_MODELS["groq"]["models"])
-        existing = STATIC_PROVIDER_MODELS["groq"]["models"]
-        merged = list(existing) + [m for m in models_list if m not in existing]
-        allowed_providers["groq"] = {"name": "Groq", "models": merged}
+        models_list = live_groq[1] if live_groq else DYNAMIC_PROVIDER_MODELS.get("groq", {}).get("models", [])
+        if models_list:
+            allowed_providers["groq"] = {"name": "Groq", "models": list(dict.fromkeys(models_list))}
     if user_keys.get("nvidia_api_key"):
         live_nv = fetch_nvidia_live_models(user_keys["nvidia_api_key"])
-        models_list = live_nv[1] if live_nv else DYNAMIC_PROVIDER_MODELS.get("nvidia", {}).get("models", STATIC_PROVIDER_MODELS["nvidia"]["models"])
-        existing = STATIC_PROVIDER_MODELS["nvidia"]["models"]
-        merged = list(existing) + [m for m in models_list if m not in existing]
-        allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": merged}
+        models_list = live_nv[1] if live_nv else DYNAMIC_PROVIDER_MODELS.get("nvidia", {}).get("models", [])
+        if models_list:
+            allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": list(dict.fromkeys(models_list))}
 
     if not allowed_providers:
         allowed_providers = {
