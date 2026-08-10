@@ -6051,10 +6051,26 @@ async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depen
     }
 
 
+# Secret-shaped values redacted from logs shown to non-super-admins on deployments
+_LOG_SECRET_PATTERNS = [
+    (re.compile(r"AIza[A-Za-z0-9_\-]{20,}"), "[REDACTED]"),
+    (re.compile(r"(?:sk-or-|sk-proj-|gsk_|nvapi-|hf_|csk-)[A-Za-z0-9_\-]{6,}"), "[REDACTED]"),
+    (re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{10,}"), "Bearer [REDACTED]"),
+]
+
+
+def _sanitize_log_line(line: str) -> str:
+    for pattern, repl in _LOG_SECRET_PATTERNS:
+        line = pattern.sub(repl, line)
+    return line
+
+
 @app.get("/api/logs")
 async def get_server_logs(user_info: dict = Depends(get_current_user_info)):
-    """Server logs are sensitive internals: only Super Admin (or local mode, where the
-    server is bound to the owner's machine) may read them."""
-    if not user_info.get("is_super_admin") and firebase_initialized:
-        raise HTTPException(status_code=403, detail="Access denied.")
-    return {"logs": list(SERVER_LOGS)}
+    """Server logs stay usable for everyone: on deployments (Firebase active),
+    secret-shaped values (API keys, bearer tokens) are redacted for non-super-admins;
+    local mode returns full logs."""
+    logs = list(SERVER_LOGS)
+    if firebase_initialized and not user_info.get("is_super_admin"):
+        logs = [_sanitize_log_line(line) for line in logs]
+    return {"logs": logs}

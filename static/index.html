@@ -226,12 +226,18 @@ let logsPollingInterval = null;
 
         async function fetchLogs() {
             try {
-                const res = await authFetch('/api/logs');
-                if (!res.ok) return;
-                const data = await res.json();
-                const logs = data.logs || [];
                 const logsContent = document.getElementById('logs-content');
                 const logCountBadge = document.getElementById('log-count-badge');
+                const res = await authFetch('/api/logs');
+                if (!res.ok) {
+                    // Don't fail silently - tell the user why the drawer is empty.
+                    if (logsContent && res.status === 403) {
+                        logsContent.innerHTML = '<div class="text-stone-400 italic text-center py-4">🔒 Live logs require Super Admin sign-in.</div>';
+                    }
+                    return;
+                }
+                const data = await res.json();
+                const logs = data.logs || [];
                 const autoscroll = document.getElementById('autoscroll-logs')?.checked;
 
                 if (!logsContent) return;
