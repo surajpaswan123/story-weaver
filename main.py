@@ -964,13 +964,8 @@ def _call_with_full_fallback(
 
 
 
-# Models that support high thinking
-HIGH_THINKING_MODELS = {
-    "gemini-3.1-pro-preview", "gemini-2.5-pro",
-    "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
-    "gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite",
-}
-HIGH_THINKING_BUDGET = -1  # -1 = dynamic thinking: let the model decide how long to think, no fixed cap
+# -1 = dynamic thinking: let the model decide how long to think, no fixed cap
+HIGH_THINKING_BUDGET = -1
 
 
 def is_audio_capable_model(model_name: str, model_info: dict = None) -> bool:
@@ -1000,9 +995,11 @@ def is_audio_capable_model(model_name: str, model_info: dict = None) -> bool:
 
 
 def is_thinking_model(model: str) -> bool:
-    """Check if a model supports thinking - :search variants of pro models can think too."""
-    base_model = model.replace(":search", "")
-    return base_model in HIGH_THINKING_MODELS
+    """Check if a Gemini model supports thinking - dynamic name-pattern check
+    (thinking_config is a 2.5+/3.x feature), so newly-listed models work too."""
+    base_model = model.replace(":search", "").lower()
+    return ("gemini-2.5" in base_model or "gemini-3" in base_model
+            or "thinking" in base_model)
 
 def nvidia_model_context_mode(model: str) -> str:
     """Classify whether NVIDIA hosts the model with native 1M context or documents it as extendable to ~1M."""
@@ -1021,8 +1018,53 @@ def nvidia_model_context_mode(model: str) -> str:
         return "extendable_1m"
     return "unknown"
 
+# NVIDIA's /v1/models API exposes no reasoning metadata, and the live model list
+# changes often, so thinking capability is inferred dynamically from the model id.
+# Non-chat utility models (embed/parse/guard/vision/...) never get thinking params.
+_NVIDIA_UTILITY_MODEL_MARKERS = (
+    "embed", "parse", "retriev", "guard", "safety", "reward", "translate",
+    "detect", "clip", "deplot", "kosmos", "neva", "vila", "bge", "cosmos",
+    "arctic-embed", "nvclip",
+)
+
+
+def _nvidia_thinking_body(model: str) -> dict:
+    """Return the NVIDIA-specific thinking/reasoning body for a model id, or {} if none.
+    Pattern-based so new models in the live list are classified automatically."""
+    name = (model or "").lower()
+    if not name or any(marker in name for marker in _NVIDIA_UTILITY_MODEL_MARKERS):
+        return {}
+
+    # DeepSeek family: OpenAI-style reasoning_effort only on reasoning-capable
+    # generations (v3/v4/r1/reasoner/pro/ultra); older deepseek-coder etc. skip it
+    if "deepseek" in name:
+        if any(m in name for m in ("v3", "v4", "r1", "reasoner", "pro", "ultra")):
+            return {"reasoning_effort": "max" if ("pro" in name or "ultra" in name) else "high"}
+        return {}
+
+    # NVIDIA Nemotron family: super/ultra support reasoning_effort; others use chat-template thinking
+    if "nemotron" in name:
+        if "super" in name or "ultra" in name:
+            return {"reasoning_effort": "high"}
+        return {"chat_template_kwargs": {"enable_thinking": True}}
+
+    # Qwen3 family: chat-template enable_thinking
+    if "qwen3" in name:
+        return {"chat_template_kwargs": {"enable_thinking": True}}
+
+    # MiniMax: chat-template thinking_mode
+    if "minimax" in name:
+        return {"chat_template_kwargs": {"thinking_mode": "enabled"}}
+
+    # Explicit reasoning markers (e.g. *-reasoning, *-thinking, thinkingmachines/*)
+    if "reason" in name or "thinking" in name:
+        return {"chat_template_kwargs": {"enable_thinking": True}}
+
+    return {}
+
+
 def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = False, use_thinking: bool = True) -> dict:
-    """Attach model-specific reasoning controls for NVIDIA-hosted models.
+    """Attach dynamic, model-specific reasoning controls for NVIDIA-hosted models.
     Set use_thinking=False for lightweight tasks (rules checking, inventory, etc.)."""
     kwargs = {
         "model": model,
@@ -1032,36 +1074,18 @@ def build_nvidia_request_kwargs(model: str, temperature: float, stream: bool = F
     if stream:
         kwargs["stream"] = True
 
-    extra_body = {}
-
-    # Always enable thinking/reasoning for models that support it
-    if model == "deepseek-ai/deepseek-v4-pro":
-        # MAX reasoning for best story quality
-        extra_body["reasoning_effort"] = "max"
-    elif model == "nvidia/nemotron-3-super-120b-a12b":
-        extra_body["reasoning_effort"] = "high"
-    elif model == "nvidia/nemotron-3-nano-30b-a3b":
-        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
-    elif model in {"qwen/qwen3.5-397b-a17b", "qwen/qwen3-5-122b-a10b"}:
-        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
-    elif model == "minimaxai/minimax-m3":
-        extra_body["chat_template_kwargs"] = {"thinking_mode": "enabled"}
-
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    if use_thinking:
+        extra_body = _nvidia_thinking_body(model)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
     return kwargs
 
+
 def nvidia_model_thinks(model: str) -> bool:
-    """Whether the NVIDIA model path is expected to spend noticeable time reasoning before first visible output."""
-    return model in {
-        "deepseek-ai/deepseek-v4-pro",
-        "nvidia/nemotron-3-super-120b-a12b",
-        "nvidia/nemotron-3-nano-30b-a3b",
-        "qwen/qwen3.5-397b-a17b",
-        "qwen/qwen3-5-122b-a10b",
-        "qwen/qwen3-next-80b-a3b-thinking",
-        "minimaxai/minimax-m3",
-    }
+    """Whether the NVIDIA model path is expected to spend noticeable time reasoning
+    before first visible output - mirrors the dynamic thinking-body classifier so
+    UI/status stays consistent with the actual API params sent."""
+    return bool(_nvidia_thinking_body(model))
 
 # OpenRouter Configuration
 from openai import OpenAI
