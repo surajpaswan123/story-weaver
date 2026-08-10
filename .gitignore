@@ -2,6 +2,10 @@
 API keys.txt
 .env
 
+# User story data (private — never commit; a story was once committed here publicly)
+stories/
+test_stories_autospawn/
+
 # Firebase Admin service account (secret!)
 firebase-credentials.json
 

@@ -146,8 +146,16 @@ def _ip_to_guest_uid(ip: str) -> str:
     return f"guest_{ip_hash}"
 
 def get_current_user_id(request: Request = None, authorization: str = Header(None)) -> str:
-    """Extract user UID from Firebase ID token in Authorization header."""
+    """Extract user UID from Firebase ID token in Authorization header.
+
+    Anonymous requests on deployments (Firebase initialized) are isolated per-IP
+    (guest_<hash>) so they can never reach the shared 'default_user' workspace
+    that holds local/legacy stories. In local mode (no Firebase) anonymous
+    requests keep the legacy 'default_user' workspace for backward compatibility.
+    """
     if not authorization or not authorization.startswith("Bearer "):
+        if firebase_initialized and request:
+            return _ip_to_guest_uid(_get_client_ip(request))
         return "default_user"
     token = authorization.split("Bearer ")[1].strip()
     if firebase_initialized:
@@ -240,8 +248,10 @@ def get_current_user_info(request: Request = None, authorization: str = Header(N
     else:
         user_info["is_super_admin"] = False
 
-    # IP-based guest isolation: give each guest a unique UID based on their IP
-    if user_info["is_guest"] and request:
+    # IP-based guest isolation: give each guest a unique UID based on their IP.
+    # Deployments only — local mode (no Firebase) keeps the legacy 'default_user'
+    # workspace so existing local stories stay visible.
+    if user_info["is_guest"] and request and firebase_initialized:
         ip = _get_client_ip(request)
         user_info["uid"] = _ip_to_guest_uid(ip)
 
