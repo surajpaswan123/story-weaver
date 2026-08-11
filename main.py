@@ -332,7 +332,8 @@ def get_effective_ai_clients(user_info: dict) -> dict:
             "openrouter_api_key", "groq_api_key"))
         if has_custom:
             return _clients_from_keys(admin_keys)
-        # No Settings keys configured -> system .env keys (server defaults)
+        # No Settings keys configured -> nothing from .env is available; only
+        # the keyless local nokey proxy (if running) remains.
         return {
             "genai_clients": clients,
             "nvidia_client": nvidia_client,
@@ -640,36 +641,12 @@ BATCH_SIZE: int = 1 # Real-time updates (every turn)
 # turn_counter was previously a single global shared across all stories - removed.
 # Turn count is now derived per-story from chat_log.json via get_turn_count().
 
-# Configure Gemini Clients — supports multiple API keys for fallback
-# Load API keys - PRIORITIZE API keys.txt to avoid .env conflicts
+# AI clients are built from each user's Settings keys only (see
+# get_effective_ai_clients / _clients_from_keys). Nothing is loaded from
+# server .env or key files at startup - only Settings-configured providers
+# are ever used.
 api_keys = []
-
-# 1. Try loading from API keys.txt (The "Fresh" Source)
-api_keys_file = os.path.join(BASE_DIR, "API keys.txt")
-if os.path.exists(api_keys_file):
-    try:
-        with open(api_keys_file, "r", encoding="utf-8") as f:
-            for line in f:
-                k = line.strip()
-                if k and not k.startswith("#"):
-                    api_keys.append(k)
-        print(f"Loaded {len(api_keys)} keys from {api_keys_file}")
-    except Exception as e:
-        print(f"Error reading {api_keys_file}: {e}")
-
-# 2. Only if NO keys found in file, check .env (The "Old" Source)
-if not api_keys:
-    print("No keys in file, checking .env...")
-    for key_name in ['GEMINI_API_KEY', 'GEMINI_API_KEY_2', 'GEMINI_API_KEY_3', 'GEMINI_API_KEY_4', 'GEMINI_API_KEY_5']:
-        key = os.getenv(key_name)
-        if key:
-            api_keys.append(key)
-
 clients = []
-for key in api_keys:
-    clients.append(genai.Client(api_key=key))
-
-print(f"Loaded {len(clients)} API key(s)")
 
 # ---------------------------------------------------------------------------
 # DYNAMIC PROVIDER MODEL LISTS
@@ -1275,74 +1252,14 @@ def nvidia_model_thinks(model: str) -> bool:
     UI/status stays consistent with the actual API params sent."""
     return bool(_nvidia_thinking_body(model))
 
-# OpenRouter Configuration
+# Provider clients come from each user's Settings keys via
+# get_effective_ai_clients - no provider is initialized from server .env.
 from openai import OpenAI
 nvidia_client = None
-nvidia_key = (
-    os.getenv("NVIDIA_API_KEY")
-    or os.getenv("NVAPI_KEY")
-    or os.getenv("NIM_API_KEY")
-)
-if nvidia_key:
-    try:
-        nvidia_client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=nvidia_key,
-        )
-        print("NVIDIA client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize NVIDIA client: {e}")
-
 openrouter_client = None
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
-if openrouter_key:
-    try:
-        openrouter_client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=openrouter_key,
-        )
-        print("OpenRouter client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize OpenRouter: {e}")
-
-# Groq Configuration (Fastest)
 groq_client = None
-groq_key = os.getenv("GROQ_API_KEY")
-if groq_key:
-    try:
-        groq_client = OpenAI(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=groq_key,
-        )
-        print("Groq client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize Groq: {e}")
-
-# Mistral Configuration (La Plateforme - Free Experiment)
 mistral_client = None
-mistral_key = os.getenv("MISTRAL_API_KEY")
-if mistral_key:
-    try:
-        mistral_client = OpenAI(
-            base_url="https://api.mistral.ai/v1",
-            api_key=mistral_key,
-        )
-        print("Mistral client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize Mistral: {e}")
-
-# Hugging Face Configuration (Free Inference API)
 hf_client = None
-hf_key = os.getenv("HUGGINGFACE_API_KEY")
-if hf_key:
-    try:
-        hf_client = OpenAI(
-            base_url="https://router.huggingface.co/hf-inference/v1/", # Updated 2026 URL
-            api_key=hf_key,
-        )
-        print("Hugging Face client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize Hugging Face: {e}")
 
 # Gemini-Nokey Local Configuration
 nokey_client = None
@@ -1369,15 +1286,8 @@ NOKEY_SAFETY_OFF = {
 
 
 
-# Official OpenAI Client
+# Official OpenAI Client - built per-user from Settings keys only
 official_openai_client = None
-official_openai_key = os.getenv("OPENAI_API_KEY")
-if official_openai_key:
-    try:
-        official_openai_client = OpenAI(api_key=official_openai_key)
-        print("Official OpenAI client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize Official OpenAI client: {e}")
 
 OPENAI_MODELS = LiveModelList("openai", [
     "gpt-4o",
@@ -1389,18 +1299,8 @@ OPENAI_MODELS = LiveModelList("openai", [
 ])
 
 
-# Cerebras Configuration (Llama 3.3 Speed King - Layer 5)
+# Cerebras - built per-user from Settings keys only
 cerebras_client = None
-cerebras_key = os.getenv("CEREBRAS_API_KEY")
-if cerebras_key:
-    try:
-        cerebras_client = OpenAI(
-            base_url="https://api.cerebras.ai/v1",
-            api_key=cerebras_key,
-        )
-        print("Cerebras client initialized.")
-    except Exception as e:
-        print(f"Failed to initialize Cerebras: {e}")
 
 GROQ_MODELS = LiveModelList("groq", [
     # Tier 1: High Quality & Context (70B)
