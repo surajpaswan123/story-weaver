@@ -266,29 +266,8 @@ def get_user_keys_file(uid: str) -> str:
     return os.path.join(user_dir, "user_keys.json")
 
 
-def get_effective_ai_clients(user_info: dict) -> dict:
-    """Return dictionary of available AI client instances for the requesting user.
-    Super Admin (surajssd1000@gmail.com) gets full access to system .env keys.
-    Standard users get dynamic clients instantiated from their custom API keys."""
-    uid = user_info.get("uid", "default_user")
-    is_super_admin = user_info.get("is_super_admin", False)
-
-    if is_super_admin:
-        return {
-            "genai_clients": clients,
-            "nvidia_client": nvidia_client,
-            "openrouter_client": openrouter_client,
-            "groq_client": groq_client,
-            "mistral_client": mistral_client,
-            "hf_client": hf_client,
-            "nokey_client": nokey_client,
-            "cerebras_client": cerebras_client,
-            "openai_client": official_openai_client,
-            "is_super_admin": True
-        }
-
-    # Load custom keys for standard user
-    user_keys = load_user_keys(uid)
+def _clients_from_keys(user_keys: dict) -> dict:
+    """Build AI client instances from a user's configured Settings keys."""
     user_clients = {
         "genai_clients": [],
         "nvidia_client": None,
@@ -306,34 +285,70 @@ def get_effective_ai_clients(user_info: dict) -> dict:
         try:
             user_clients["genai_clients"].append(genai.Client(api_key=user_keys["gemini_api_key"]))
         except Exception as e:
-            print(f"[UserClient] Failed to create Gemini client for {uid[:8]}: {e}")
+            print(f"[UserClient] Failed to create Gemini client: {e}")
 
     if user_keys.get("openai_api_key"):
         try:
             base_url = (user_keys.get("openai_base_url") or "https://api.openai.com/v1").strip()
             user_clients["openai_client"] = OpenAI(base_url=base_url, api_key=user_keys["openai_api_key"])
         except Exception as e:
-            print(f"[UserClient] Failed to create OpenAI client for {uid[:8]}: {e}")
+            print(f"[UserClient] Failed to create OpenAI client: {e}")
 
     if user_keys.get("openrouter_api_key"):
         try:
             user_clients["openrouter_client"] = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=user_keys["openrouter_api_key"])
         except Exception as e:
-            print(f"[UserClient] Failed to create OpenRouter client for {uid[:8]}: {e}")
+            print(f"[UserClient] Failed to create OpenRouter client: {e}")
 
     if user_keys.get("groq_api_key"):
         try:
             user_clients["groq_client"] = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=user_keys["groq_api_key"])
         except Exception as e:
-            print(f"[UserClient] Failed to create Groq client for {uid[:8]}: {e}")
+            print(f"[UserClient] Failed to create Groq client: {e}")
 
     if user_keys.get("nvidia_api_key"):
         try:
             user_clients["nvidia_client"] = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=user_keys["nvidia_api_key"])
         except Exception as e:
-            print(f"[UserClient] Failed to create NVIDIA client for {uid[:8]}: {e}")
+            print(f"[UserClient] Failed to create NVIDIA client: {e}")
 
     return user_clients
+
+
+def get_effective_ai_clients(user_info: dict) -> dict:
+    """Return dictionary of available AI client instances for the requesting user.
+
+    Providers come from the user's Settings keys (gemini, nvidia, openai,
+    openrouter, groq). The Super Admin gets the SAME Settings-driven providers;
+    system .env keys are only used as a fallback when the admin has configured
+    no keys in Settings (so a fresh deployment still works out of the box)."""
+    uid = user_info.get("uid", "default_user")
+    is_super_admin = user_info.get("is_super_admin", False)
+
+    if is_super_admin:
+        admin_keys = load_user_keys(uid)
+        has_custom = any(admin_keys.get(k) for k in (
+            "gemini_api_key", "nvidia_api_key", "openai_api_key",
+            "openrouter_api_key", "groq_api_key"))
+        if has_custom:
+            return _clients_from_keys(admin_keys)
+        # No Settings keys configured -> system .env keys (server defaults)
+        return {
+            "genai_clients": clients,
+            "nvidia_client": nvidia_client,
+            "openrouter_client": openrouter_client,
+            "groq_client": groq_client,
+            "mistral_client": mistral_client,
+            "hf_client": hf_client,
+            "nokey_client": nokey_client,
+            "cerebras_client": cerebras_client,
+            "openai_client": official_openai_client,
+            "is_super_admin": True
+        }
+
+    # Standard users get dynamic clients instantiated from their custom API keys
+    user_keys = load_user_keys(uid)
+    return _clients_from_keys(user_keys)
 
 
 def load_user_keys(uid: str) -> dict:
@@ -704,12 +719,9 @@ def _live_models(provider_key: str, static_fallback: list, prefer_suffix: str = 
     deduped, and sorted newest-first by registration date (with the version
     heuristic as a fallback when a provider doesn't report one). If
     prefer_suffix is set, only models ending with that suffix are kept
-    (e.g. ":free" for OpenRouter)."""
-    try:
-        if time.time() - LAST_DYNAMIC_FETCH > 1800:
-            threading.Thread(target=refresh_live_provider_models, daemon=True).start()
-    except Exception:
-        pass
+    (e.g. ":free" for OpenRouter). The cache is populated only from user
+    Settings-configured providers (see /api/providers-models) - never from
+    random server .env keys."""
     live = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}).get("models", []) or []
     if not live:
         return list(static_fallback)
@@ -803,13 +815,8 @@ def get_dynamic_gemini_story_models():
     (DYNAMIC_PROVIDER_MODELS), so new GA models like gemini-3.6-flash appear
     automatically without a code change. Sorted newest-first by registration
     date (createTime), with the version heuristic as fallback. Falls back to
-    the static list only if the live fetch hasn't populated yet."""
-    try:
-        if time.time() - LAST_DYNAMIC_FETCH > 1800:
-            threading.Thread(target=refresh_live_provider_models, daemon=True).start()
-    except Exception:
-        pass
-
+    the static list only if the cache (populated from user Settings keys)
+    hasn't been filled yet."""
     live = DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", []) or []
     if not live:
         return list(GEMINI_STORY_MODELS)
@@ -6365,6 +6372,31 @@ def _dropdown_models(provider_key, live_result=None):
     return _sorted_registered_ids(cached.get("models", []) or [], cached.get("created", {}) or {})
 
 
+def _cache_provider_models(provider_key, display, live_result):
+    """Store a user's Settings-configured provider fetch into the shared cache.
+    This is the ONLY way DYNAMIC_PROVIDER_MODELS gets populated now, so the
+    generation model lists and dropdown fallback only ever contain providers
+    that are actually configured in Settings - never random server .env keys."""
+    if not live_result or not live_result[1]:
+        return
+    items = live_result[1]
+    ids = [it["id"] for it in items if it.get("id")]
+    deduped = list(dict.fromkeys(ids))
+    if not deduped:
+        return
+    created = {}
+    for it in items:
+        mid = it.get("id")
+        ts = it.get("created")
+        if mid and ts:
+            created.setdefault(mid, ts)
+    DYNAMIC_PROVIDER_MODELS[provider_key] = {
+        "name": display,
+        "models": deduped,
+        "created": created,
+    }
+
+
 def fetch_openai_live_models(api_key: str = None, base_url: str = None):
     key = api_key or os.getenv("OPENAI_API_KEY")
     url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/models"
@@ -6530,6 +6562,26 @@ def fetch_nokey_live_models():
     return None
 
 
+def _google_fetch_keys(api_key=None):
+    """Candidate Gemini API keys for the live fetch, in the same priority order
+    generation uses: explicit key (per-user), then the app's loaded key list
+    (API keys.txt, falling back to .env), then the env vars directly. Filters
+    to AIza-prefixed keys only, deduped - so a stale env var can't shadow the
+    key that actually works for generation."""
+    candidates = []
+    if api_key and str(api_key).strip():
+        candidates.append(str(api_key).strip())
+    for k in api_keys:
+        s = str(k).strip()
+        if s and s not in candidates:
+            candidates.append(s)
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        s = (os.getenv(name) or "").strip()
+        if s and s not in candidates:
+            candidates.append(s)
+    return [k for k in candidates if k.startswith("AIza")]
+
+
 def fetch_google_live_models(api_key: str = None):
     """Fetch the live Gemini model list via the raw HTTP API.
 
@@ -6539,47 +6591,50 @@ def fetch_google_live_models(api_key: str = None):
     it either, so Google models may fall back to version-heuristic sorting).
     Filters to models that support generateContent (image-gen/TTS/audio models
     don't accept system_instruction or plain text prompts - selecting them
-    causes 400 errors)."""
-    key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-    if not key:
+    causes 400 errors). Tries each candidate key in turn, so a stale env key
+    doesn't block the fetch when a valid key is loaded for generation."""
+    keys = _google_fetch_keys(api_key)
+    if not keys:
+        print("[Live Fetch Note] Skipping Google models fetch: no Gemini (AIza...) key configured")
         return None
-    if not key.startswith("AIza"):
-        # Not a Gemini API key (e.g. a Cloud key / OAuth token / placeholder) -
-        # calling the API with it would just 400 "API key not valid".
-        print("[Live Fetch Note] Skipping Google models fetch: configured key is not a Gemini (AIza...) key")
-        return None
-    try:
-        models = []
-        page_token = None
-        while True:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={urllib.parse.quote(key)}&pageSize=500"
-            if page_token:
-                url += f"&pageToken={urllib.parse.quote(page_token)}"
-            req = urllib.request.Request(url, headers={"User-Agent": "StoryWeaver/1.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            for m in data.get("models", []) or []:
-                name = (m.get("name") or "")
-                if name.startswith("models/"):
-                    name = name[len("models/"):]
-                if not name:
-                    continue
-                lower_name = name.lower()
-                if any(hint in lower_name for hint in NON_CHAT_GOOGLE_MODEL_HINTS):
-                    continue
-                methods = m.get("supportedGenerationMethods") or []
-                if methods and "generateContent" not in methods:
-                    continue
-                models.append({"id": name, "created": _created_ts(m.get("createTime"))})
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-        if models:
-            return "google", models
-    except urllib.error.HTTPError as e:
-        print(f"[Live Fetch Note] Google models fetch: {_http_error_detail(e)}")
-    except Exception as e:
-        print(f"[Live Fetch Note] Google models fetch: {e}")
+    for key in keys:
+        try:
+            models = []
+            page_token = None
+            while True:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models?key={urllib.parse.quote(key)}&pageSize=500"
+                if page_token:
+                    url += f"&pageToken={urllib.parse.quote(page_token)}"
+                req = urllib.request.Request(url, headers={"User-Agent": "StoryWeaver/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                for m in data.get("models", []) or []:
+                    name = (m.get("name") or "")
+                    if name.startswith("models/"):
+                        name = name[len("models/"):]
+                    if not name:
+                        continue
+                    lower_name = name.lower()
+                    if any(hint in lower_name for hint in NON_CHAT_GOOGLE_MODEL_HINTS):
+                        continue
+                    methods = m.get("supportedGenerationMethods") or []
+                    if methods and "generateContent" not in methods:
+                        continue
+                    models.append({"id": name, "created": _created_ts(m.get("createTime"))})
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+            if models:
+                return "google", models
+        except urllib.error.HTTPError as e:
+            detail = _http_error_detail(e)
+            print(f"[Live Fetch Note] Google models fetch (key ...{key[-4:]}): {detail}")
+            if "API key not valid" in detail or "API_KEY_INVALID" in detail:
+                continue  # bad key - try the next candidate
+            break  # other errors - don't spam every key
+        except Exception as e:
+            print(f"[Live Fetch Note] Google models fetch (key ...{key[-4:]}): {e}")
+            break
     return None
 
 
@@ -6626,19 +6681,36 @@ def refresh_live_provider_models():
     except Exception as e:
         print(f"[Live Fetch Note] Background fetch error: {e}")
 
-# Trigger background live fetch on module load
-threading.Thread(target=refresh_live_provider_models, daemon=True).start()
+# NOTE: No background model fetch runs at module load. DYNAMIC_PROVIDER_MODELS
+# is populated only from user Settings-configured providers, on demand, when
+# /api/providers-models is called - so random server .env keys are never
+# fetched or logged at startup.
 
 
 @app.get("/api/providers-models")
 async def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
-    """Returns available AI providers and models based on user role and saved API keys."""
-    # Trigger background refresh if cache is older than 30 minutes
-    if time.time() - LAST_DYNAMIC_FETCH > 1800:
-        threading.Thread(target=refresh_live_provider_models, daemon=True).start()
-
+    """Returns available AI providers and models based on the user's Settings keys."""
+    uid = user_info.get("uid", "default_user")
+    user_keys = load_user_keys(uid)
     is_super_admin = user_info.get("is_super_admin", False)
-    if is_super_admin:
+
+    # Providers are driven by the user's Settings keys only (gemini, nvidia,
+    # openai, openrouter, groq). If the Super Admin has configured NO Settings
+    # keys, fall back to the server .env providers so a fresh deployment works.
+    provider_defs = (
+        ("google", "gemini_api_key", "Google GenAI (Gemini)", fetch_google_live_models),
+        ("nvidia", "nvidia_api_key", "NVIDIA NIM", fetch_nvidia_live_models),
+        ("openai", "openai_api_key", "OpenAI (User Key)", fetch_openai_live_models),
+        ("openrouter", "openrouter_api_key", "OpenRouter", fetch_openrouter_live_models),
+        ("groq", "groq_api_key", "Groq", fetch_groq_live_models),
+    )
+    configured = [(p, k, d, f) for p, k, d, f in provider_defs if user_keys.get(k)]
+
+    if not configured and is_super_admin:
+        # Admin configured nothing in Settings -> lazily fetch server .env
+        # providers (cached 30 min) so a fresh deployment still works.
+        if time.time() - LAST_DYNAMIC_FETCH > 1800:
+            threading.Thread(target=refresh_live_provider_models, daemon=True).start()
         providers = {}
         for pkey, pinfo in (DYNAMIC_PROVIDER_MODELS or {}).items():
             providers[pkey] = {
@@ -6647,36 +6719,18 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
             }
         return {"providers": providers}
 
-    # Standard User: Only return providers for which the user has configured an API key
-    uid = user_info.get("uid", "default_user")
-    user_keys = load_user_keys(uid)
-
+    # Only fetch/list models for providers the user actually configured in
+    # Settings, and seed the shared cache with those same providers.
     allowed_providers = {}
-    if user_keys.get("gemini_api_key"):
-        live_google = fetch_google_live_models(user_keys["gemini_api_key"])
-        models_list = _dropdown_models("google", live_google)
-        if models_list:
-            allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": models_list}
-    if user_keys.get("openai_api_key"):
-        live_openai = fetch_openai_live_models(user_keys["openai_api_key"], user_keys.get("openai_base_url"))
-        models_list = _dropdown_models("openai", live_openai)
-        if models_list:
-            allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": models_list}
-    if user_keys.get("openrouter_api_key"):
-        live_or = fetch_openrouter_live_models(user_keys["openrouter_api_key"])
-        models_list = _dropdown_models("openrouter", live_or)
-        if models_list:
-            allowed_providers["openrouter"] = {"name": "OpenRouter", "models": models_list}
-    if user_keys.get("groq_api_key"):
-        live_groq = fetch_groq_live_models(user_keys["groq_api_key"])
-        models_list = _dropdown_models("groq", live_groq)
-        if models_list:
-            allowed_providers["groq"] = {"name": "Groq", "models": models_list}
-    if user_keys.get("nvidia_api_key"):
-        live_nv = fetch_nvidia_live_models(user_keys["nvidia_api_key"])
-        models_list = _dropdown_models("nvidia", live_nv)
-        if models_list:
-            allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": models_list}
+    for pkey, keyname, display, fetcher in configured:
+        if pkey == "openai":
+            live = fetcher(user_keys[keyname], user_keys.get("openai_base_url"))
+        else:
+            live = fetcher(user_keys[keyname])
+        models = _dropdown_models(pkey, live)
+        if models:
+            allowed_providers[pkey] = {"name": display, "models": models}
+        _cache_provider_models(pkey, display, live)
 
     if not allowed_providers:
         allowed_providers = {
