@@ -656,8 +656,113 @@ for key in api_keys:
 
 print(f"Loaded {len(clients)} API key(s)")
 
+# ---------------------------------------------------------------------------
+# DYNAMIC PROVIDER MODEL LISTS
+# Every *_MODELS list below is wrapped in LiveModelList, which resolves its
+# contents from the live provider fetch (DYNAMIC_PROVIDER_MODELS) each time it
+# is iterated/indexed - so new models (e.g. gemini-3.6-flash) are picked up
+# automatically without a code change. The static entries are used ONLY as a
+# cold-start fallback until the live fetch populates; once live data exists it
+# fully replaces them (filtered to chat-capable models, sorted newest-first by
+# each provider's model registration date).
+# ---------------------------------------------------------------------------
+
+# Generic hints for models that can't do text-chat generation (audio/image/
+# embedding/guard/etc.) - excluded from the live lists of non-Google providers.
+NON_CHAT_MODEL_HINTS = (
+    "embed", "rerank", "guard", "parakeet", "whisper", "speech", "tts",
+    "audio", "image", "imagen", "dall-e", "moderation", "realtime",
+    "vision", "segmentation", "video", "robotics", "ocr", "vila",
+    "cosmos", "playground", "sdxl", "diffusion",
+)
+
+
+def _model_version_tuple(name: str) -> tuple:
+    """Best-effort (major, minor) version extraction for newest-first sorting.
+    Handles gemini-3.6-flash, deepseek-v4-pro, llama-3.3-70b, qwen3.5-397b,
+    qwen3-5-122b, nemotron-3-super-120b, gpt-4o, o3-mini, etc. Size tokens
+    (70b, 397b, a17b) are ignored; models without a recognizable version
+    sort to the end."""
+    n = re.sub(r"^models/", "", name.lower())
+    n = n.split("/")[-1]                        # drop org prefix (deepseek-ai/, meta-llama/)
+    n = re.sub(r"\b\d+\.?\d*b\b", "", n)      # drop size tokens: 70b, 397b, 480b
+    n = re.sub(r"\ba\d+b\b", "", n)             # drop a<digits>b tokens: a17b, a12b, a3b
+    m = re.search(r"(\d+)(?:\.(\d+)|-(\d+))?", n)
+    if not m:
+        return (0, -1, 0)
+    major = int(m.group(1))
+    minor = int(m.group(2) or m.group(3) or -1)
+    return (major, minor, 0)
+
+
+def _live_models(provider_key: str, static_fallback: list, prefer_suffix: str = None) -> list:
+    """Resolve the live model list for a provider.
+
+    The static list is used ONLY as a cold-start fallback until the live fetch
+    populates (or if the provider API is down). Once live data exists, nothing
+    hardcoded drives selection: the list is filtered to chat-capable models,
+    deduped, and sorted newest-first by registration date (with the version
+    heuristic as a fallback when a provider doesn't report one). If
+    prefer_suffix is set, only models ending with that suffix are kept
+    (e.g. ":free" for OpenRouter)."""
+    try:
+        if time.time() - LAST_DYNAMIC_FETCH > 1800:
+            threading.Thread(target=refresh_live_provider_models, daemon=True).start()
+    except Exception:
+        pass
+    live = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}).get("models", []) or []
+    if not live:
+        return list(static_fallback)
+    usable = [m for m in live if not any(h in m.lower() for h in NON_CHAT_MODEL_HINTS)]
+    if not usable:
+        return list(static_fallback)
+    if prefer_suffix:
+        usable = [m for m in usable if m.endswith(prefer_suffix)]
+        if not usable:
+            return list(static_fallback)
+    usable = list(dict.fromkeys(usable))  # dedupe, keep first occurrence
+    created = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}).get("created", {}) or {}
+
+    def _sort_key(m):
+        v = _model_version_tuple(m)
+        ts = created.get(m)
+        if ts:
+            return (float(ts), v[0], v[1])
+        return (0.0, v[0], v[1])  # undated models sort after dated ones
+
+    return sorted(usable, key=_sort_key, reverse=True)
+
+
+class LiveModelList(list):
+    """A list that resolves its contents from the live provider model fetch at
+    iteration/index time, so new models appear automatically without code
+    changes. Falls back to the static list until the live fetch populates.
+    Behaves like a plain list everywhere else (truthiness, len, indexing)."""
+
+    def __init__(self, provider_key: str, static: list, prefer_suffix: str = None):
+        super().__init__(static)
+        self._provider_key = provider_key
+        self._static = list(static)
+        self._prefer_suffix = prefer_suffix
+
+    def _resolved(self) -> list:
+        return _live_models(self._provider_key, self._static, prefer_suffix=self._prefer_suffix)
+
+    def __iter__(self):
+        return iter(self._resolved())
+
+    def __len__(self):
+        return len(self._resolved())
+
+    def __getitem__(self, idx):
+        return self._resolved()[idx]
+
+    def __contains__(self, item):
+        return item in self._resolved()
+
+
 # Fallback models - Gemini + Gemma
-FALLBACK_MODELS = [
+FALLBACK_MODELS = LiveModelList("google", [
     "gemini-3.1-pro-preview",
     "gemini-3.1-pro-preview:search",
     "gemini-2.5-pro",
@@ -670,16 +775,73 @@ FALLBACK_MODELS = [
     "gemini-3.1-flash-lite-preview:search",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash-lite:search",
-]
+])
 
-# Primary models for story generation via native API keys (high thinking)
-# Flash: 5 RPM, 250K TPM, 20 RPD per key  |  Flash Lite: 15 RPM, 250K TPM, 500 RPD per key
+# Static fallback for story generation via native API keys (high thinking).
+# Only used when the live Google model list hasn't been fetched yet - see
+# get_dynamic_gemini_story_models() which drives the real list.
 GEMINI_STORY_MODELS = [
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-3.1-flash-lite-preview",  # 500 RPD fallback when Flash quota exhausted
 ]
+
+# Google model IDs that can't be used for text-chat story generation (image-gen,
+# TTS, audio, embeddings, etc.) - filtered out of both the live dropdown and the
+# dynamic story-model list.
+NON_CHAT_GOOGLE_MODEL_HINTS = (
+    "image", "imagen", "tts", "audio", "embedding", "rerank",
+    "robotics", "computer-use", "-live", "live-preview", "bidi",
+)
+
+
+def get_dynamic_gemini_story_models():
+    """Live Google story model list instead of the hardcoded GEMINI_STORY_MODELS.
+
+    Picks chat-capable Gemini models from the freshly-fetched provider list
+    (DYNAMIC_PROVIDER_MODELS), so new GA models like gemini-3.6-flash appear
+    automatically without a code change. Sorted newest-first by registration
+    date (createTime), with the version heuristic as fallback. Falls back to
+    the static list only if the live fetch hasn't populated yet."""
+    try:
+        if time.time() - LAST_DYNAMIC_FETCH > 1800:
+            threading.Thread(target=refresh_live_provider_models, daemon=True).start()
+    except Exception:
+        pass
+
+    live = DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", []) or []
+    if not live:
+        return list(GEMINI_STORY_MODELS)
+
+    def _usable(name):
+        n = name.lower()
+        if any(h in n for h in NON_CHAT_GOOGLE_MODEL_HINTS):
+            return False
+        if ":search" in n or ":customtools" in n:
+            return False
+        return True
+
+    seen = set()
+    models = []
+    for name in live:
+        base = name.replace("models/", "")
+        if base in seen or not _usable(base):
+            continue
+        seen.add(base)
+        models.append(base)
+    if not models:
+        return list(GEMINI_STORY_MODELS)
+    created = DYNAMIC_PROVIDER_MODELS.get("google", {}).get("created", {}) or {}
+
+    def _sort_key(name):
+        v = _model_version_tuple(name)
+        ts = created.get(name)
+        if ts:
+            return (float(ts), v[0], v[1])
+        return (0.0, v[0], v[1])
+
+    return sorted(models, key=_sort_key, reverse=True)
 
 # 429 retry config — wait and retry the same model instead of falling back
 MAX_429_RETRIES = 3
@@ -1210,14 +1372,14 @@ if official_openai_key:
     except Exception as e:
         print(f"Failed to initialize Official OpenAI client: {e}")
 
-OPENAI_MODELS = [
+OPENAI_MODELS = LiveModelList("openai", [
     "gpt-4o",
     "gpt-4o-mini",
     "o3-mini",
     "o1",
     "o1-mini",
     "gpt-4-turbo",
-]
+])
 
 
 # Cerebras Configuration (Llama 3.3 Speed King - Layer 5)
@@ -1233,31 +1395,31 @@ if cerebras_key:
     except Exception as e:
         print(f"Failed to initialize Cerebras: {e}")
 
-GROQ_MODELS = [
+GROQ_MODELS = LiveModelList("groq", [
     # Tier 1: High Quality & Context (70B)
     "llama-3.3-70b-versatile",    # 6k TPM / 100k TPD
     # Tier 2: Speed (8B) - "instant" models often have lower limits
     "llama-3.1-8b-instant",       # 20k TPM (Very Fast)
     "deepseek-r1-distill-llama-70b", # New 2026 Reasoning Model
-]
+])
 
-MISTRAL_MODELS = [
+MISTRAL_MODELS = LiveModelList("mistral", [
     "open-mistral-nemo",      # Standard Free
     "ministral-8b-latest",    # New 2026 Edge Model
     "mistral-small-latest",   # Reliable
-]
+])
 
-HF_MODELS = [
+HF_MODELS = LiveModelList("hf", [
     "meta-llama/Meta-Llama-3-8B-Instruct", 
     "mistralai/Mistral-7B-Instruct-v0.3",
     "microsoft/Phi-3-mini-4k-instruct"
-]
+])
 
-CEREBRAS_MODELS = [
+CEREBRAS_MODELS = LiveModelList("cerebras", [
     "llama3.1-8b",   # 1M Tokens/Day Free
-]
+])
 
-NVIDIA_MODELS = [
+NVIDIA_MODELS = LiveModelList("nvidia", [
     "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-nano-30b-a3b",
     "qwen/qwen3-coder-480b-a35b-instruct",
@@ -1265,11 +1427,10 @@ NVIDIA_MODELS = [
     "qwen/qwen3-5-122b-a10b",
     "qwen/qwen3-next-80b-a3b-thinking",
     "qwen/qwen3-next-80b-a3b-instruct",
-]
+])
 
-# Rules/background tasks: DeepSeek V4 Pro primary, then 1M-context NVIDIA fallbacks
-NVIDIA_RULES_MODELS = [
-    "deepseek-ai/deepseek-v4-pro",          # Primary
+# Rules/background tasks: 1M-context NVIDIA models (cold-start fallback only)
+NVIDIA_RULES_MODELS = LiveModelList("nvidia", [
     "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-nano-30b-a3b",
     "qwen/qwen3-coder-480b-a35b-instruct",
@@ -1277,11 +1438,10 @@ NVIDIA_RULES_MODELS = [
     "qwen/qwen3-5-122b-a10b",
     "qwen/qwen3-next-80b-a3b-thinking",
     "qwen/qwen3-next-80b-a3b-instruct",
-]
+])
 
-# Story generation: DeepSeek V4 Pro FIRST (primary), then 1M-context fallbacks
-NVIDIA_STORY_STREAM_MODELS = [
-    "deepseek-ai/deepseek-v4-pro",          # Primary story generator (high reasoning)
+# Story generation: 1M-context NVIDIA models (cold-start fallback only)
+NVIDIA_STORY_STREAM_MODELS = LiveModelList("nvidia", [
     "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-nano-30b-a3b",
     "qwen/qwen3-coder-480b-a35b-instruct",
@@ -1289,17 +1449,16 @@ NVIDIA_STORY_STREAM_MODELS = [
     "qwen/qwen3-5-122b-a10b",
     "qwen/qwen3-next-80b-a3b-thinking",
     "qwen/qwen3-next-80b-a3b-instruct",
-]
+])
 
-# Background tasks: DeepSeek V4 Pro primary, then Flash and fallbacks
-NVIDIA_BACKGROUND_MODELS = [
-    "deepseek-ai/deepseek-v4-pro",          # Primary for all background tasks
-    "deepseek-ai/deepseek-v4-flash",        # Fast fallback
+# Background tasks: Flash then 1M-context NVIDIA models (cold-start fallback only)
+NVIDIA_BACKGROUND_MODELS = LiveModelList("nvidia", [
+    "deepseek-ai/deepseek-v4-flash",        # Fast
     "nvidia/nemotron-3-super-120b-a12b",    # Fallback
     "nvidia/nemotron-3-nano-30b-a3b",       # Fallback
-]
+])
 
-NOKEY_MODELS = [
+NOKEY_MODELS = LiveModelList("nokey", [
     "gemini-3.1-pro-preview",
     "gemini-3.1-pro-preview:search",
     "gemini-2.5-pro",
@@ -1313,36 +1472,36 @@ NOKEY_MODELS = [
     "gemini-3.1-flash-lite-preview:search",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash-lite:search",
-]
+])
 
 # Dedicated nokey model lists per component
-NOKEY_STORY_MODELS = [
+NOKEY_STORY_MODELS = LiveModelList("nokey", [
     "gemini-3.1-pro-preview",             # Primary story generator
     "gemini-3.5-flash",       # Fallback
     "gemini-2.5-pro",               # Fallback
     "gemini-2.5-flash",
-]
+])
 
-NOKEY_BACKGROUND_MODELS = [
+NOKEY_BACKGROUND_MODELS = LiveModelList("nokey", [
     "gemini-3.5-flash",             # Primary background analyzer + auto .md files
     "gemini-3.1-pro-preview",
     "gemini-2.5-flash",
-]
+])
 
-NOKEY_TASK_MODELS = [
+NOKEY_TASK_MODELS = LiveModelList("nokey", [
     "gemini-3.5-flash",             # Primary for rules, inventory, media, misc tasks
     "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-]
+])
 
 # Free models to rotate through (20 RPM, 50-1000 RPD)
-OPENROUTER_FREE_MODELS = [
+OPENROUTER_FREE_MODELS = LiveModelList("openrouter", [
     "google/gemini-2.0-flash-exp:free", # Revert to known working exp
     "meta-llama/llama-3.3-70b-instruct:free",
     "mistralai/mistral-nemo:free",
     "microsoft/phi-3-medium-128k-instruct:free",
-]
+], prefer_suffix=":free")
 
 # ...
 
@@ -2903,14 +3062,14 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
     print(f"[VERIFY] Starting Phase 2 verification for {len(files_to_verify)} files: {', '.join(files_to_verify)}")
 
     # Assign a DIFFERENT model to each file so they run in parallel without competing
-    VERIFY_MODELS = [
+    VERIFY_MODELS = LiveModelList("google", [
         "gemini-2.5-flash",
         "gemini-3-flash-preview",
         "gemini-2.5-flash-lite",
         "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro",
         "gemini-3.1-pro-preview",
-    ]
+    ])
 
     def _strip_markdown_fences(text):
         """Remove ```markdown ... ``` wrappers that models often add."""
@@ -3844,7 +4003,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         
         # 1. User selected Google GenAI
         if selected_provider == "google" and active_genai_clients:
-            g_models = [target_model] if target_model else GEMINI_STORY_MODELS
+            g_models = [target_model] if target_model else get_dynamic_gemini_story_models()
             for key_idx, c in enumerate(active_genai_clients):
                 for m_name in g_models:
                     try:
@@ -4139,7 +4298,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
     # 2. Fallback to Google GenAI keys
     if active_genai_clients:
         for key_idx, c in enumerate(active_genai_clients):
-            for model_name in GEMINI_STORY_MODELS:
+            for model_name in get_dynamic_gemini_story_models():
                 try:
                     _thinks = is_thinking_model(model_name)
                     print(f"=== Streaming with GenAI key {key_idx + 1} / {model_name} (thinking={'HIGH' if _thinks else 'OFF'}) ===", flush=True)
@@ -6103,6 +6262,9 @@ PROVIDER_DISPLAY_NAMES = {
     "groq": "Groq",
     "nvidia": "NVIDIA NIM",
     "cerebras": "Cerebras",
+    "mistral": "Mistral",
+    "hf": "HuggingFace",
+    "nokey": "Gemini-Nokey (Local)",
 }
 
 from fastapi import Response
@@ -6113,10 +6275,37 @@ async def favicon():
 
 
 import urllib.request
+import urllib.parse
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 DYNAMIC_PROVIDER_MODELS = {}
 LAST_DYNAMIC_FETCH = 0
+
+
+def _created_ts(value):
+    """Convert a provider registration timestamp (epoch int/float, or ISO-8601
+    string like HF's createdAt / Google's createTime) to epoch seconds, or None
+    if unavailable/invalid. Registration time is what "sort by newest" really
+    means - newer than any name-based heuristic."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v if v > 0 else None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return float(s)
+        try:
+            return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+    return None
 
 
 def fetch_openai_live_models(api_key: str = None, base_url: str = None):
@@ -6131,7 +6320,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None):
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
             if models:
                 return "openai", models
     except Exception as e:
@@ -6148,7 +6338,8 @@ def fetch_openrouter_live_models(api_key: str = None):
         req = urllib.request.Request("https://openrouter.ai/api/v1/models", headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
             if models:
                 return "openrouter", models
     except Exception as e:
@@ -6166,7 +6357,8 @@ def fetch_nvidia_live_models(api_key: str = None):
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
             if models:
                 return "nvidia", models
     except Exception as e:
@@ -6184,7 +6376,8 @@ def fetch_groq_live_models(api_key: str = None):
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
             if models:
                 return "groq", models
     except Exception as e:
@@ -6203,50 +6396,107 @@ def fetch_cerebras_live_models(api_key: str = None):
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
             if models:
                 return "cerebras", models
     except Exception as e:
         print(f"[Live Fetch Note] Cerebras models fetch: {e}")
     return None
 
-def fetch_google_live_models(api_key: str = None):
-    """Fetch the live Gemini model list via the google-genai SDK.
+def fetch_mistral_live_models(api_key: str = None):
+    key = api_key or os.getenv("MISTRAL_API_KEY")
+    if not key:
+        return None
+    try:
+        req = urllib.request.Request("https://api.mistral.ai/v1/models", headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
+                      for m in data.get("data", []) if m.get("id")]
+            if models:
+                return "mistral", models
+    except Exception as e:
+        print(f"[Live Fetch Note] Mistral models fetch: {e}")
+    return None
 
-    Google was the one provider never refreshed live - its dropdown stayed
-    pinned to the hardcoded static list forever. Uses the same SDK call the
-    app already uses for generation, so it always matches the installed version.
-    """
+
+def fetch_hf_live_models(api_key: str = None):
+    key = api_key or os.getenv("HF_API_KEY")
+    if not key:
+        return None
+    try:
+        req = urllib.request.Request("https://api-inference.huggingface.co/models", headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "StoryWeaver/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [{"id": m.get("id"), "created": _created_ts(m.get("createdAt") or m.get("lastModified"))}
+                      for m in data if m.get("id") and m.get("pipeline_tag") == "text-generation"]
+            if models:
+                return "hf", models
+    except Exception as e:
+        print(f"[Live Fetch Note] HF models fetch: {e}")
+    return None
+
+
+def fetch_nokey_live_models():
+    """The gemini-nokey local proxy exposes an OpenAI-style /models endpoint."""
+    try:
+        if not nokey_client:
+            return None
+        page = nokey_client.models.list()
+        models = [{"id": m.id, "created": _created_ts(getattr(m, "created", None))}
+                  for m in (getattr(page, "data", None) or []) if getattr(m, "id", None)]
+        if models:
+            return "nokey", models
+    except Exception as e:
+        print(f"[Live Fetch Note] Nokey models fetch: {e}")
+    return None
+
+
+def fetch_google_live_models(api_key: str = None):
+    """Fetch the live Gemini model list via the raw HTTP API.
+
+    Uses generativelanguage.googleapis.com/v1beta/models directly (not the SDK)
+    because the installed google-genai version's Model type drops the API's
+    createTime field, and registration date is what "newest first" sorting
+    needs. Filters to models that support generateContent (image-gen/TTS/audio
+    models don't accept system_instruction or plain text prompts - selecting
+    them causes 400 errors)."""
     key = api_key or os.getenv("GEMINI_API_KEY")
     if not key:
         return None
     try:
-        gclient = genai.Client(api_key=key)
         models = []
-        # Model IDs that can't be used for text-chat story generation. Selecting
-        # these from the dropdown sends a request Google rejects with a 400
-        # "bad request" (image-gen/TTS/audio models don't accept system_instruction
-        # or plain text prompts). Keep them out of the picker entirely.
-        NON_CHAT_HINTS = (
-            "image", "imagen", "tts", "audio", "embedding", "rerank",
-            "robotics", "computer-use", "-live", "live-preview", "bidi",
-        )
-        for m in gclient.models.list(config={"page_size": 100}):
-            name = (m.name or "")
-            if name.startswith("models/"):
-                name = name[len("models/"):]
-            if not name:
-                continue
-            lower_name = name.lower()
-            if any(hint in lower_name for hint in NON_CHAT_HINTS):
-                continue
-            try:
-                actions = list(getattr(m, "supported_actions", None) or [])
-                if actions and "generateContent" not in actions:
+        page_token = None
+        while True:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=500"
+            if page_token:
+                url += f"&pageToken={urllib.parse.quote(page_token)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "StoryWeaver/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("models", []) or []:
+                name = (m.get("name") or "")
+                if name.startswith("models/"):
+                    name = name[len("models/"):]
+                if not name:
                     continue
-            except Exception:
-                pass
-            models.append(name)
+                lower_name = name.lower()
+                if any(hint in lower_name for hint in NON_CHAT_GOOGLE_MODEL_HINTS):
+                    continue
+                methods = m.get("supportedGenerationMethods") or []
+                if methods and "generateContent" not in methods:
+                    continue
+                models.append({"id": name, "created": _created_ts(m.get("createTime"))})
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
         if models:
             return "google", models
     except Exception as e:
@@ -6260,7 +6510,7 @@ def refresh_live_provider_models():
         print("[Live Fetch] Fetching real-time online AI model lists...")
         updated = {}
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
+        with ThreadPoolExecutor(max_workers=9) as executor:
             futures = [
                 executor.submit(fetch_openai_live_models),
                 executor.submit(fetch_openrouter_live_models),
@@ -6268,16 +6518,27 @@ def refresh_live_provider_models():
                 executor.submit(fetch_groq_live_models),
                 executor.submit(fetch_google_live_models),
                 executor.submit(fetch_cerebras_live_models),
+                executor.submit(fetch_mistral_live_models),
+                executor.submit(fetch_hf_live_models),
+                executor.submit(fetch_nokey_live_models),
             ]
             for f in futures:
                 res = f.result()
                 if res:
                     provider_key, live_models = res
-                    deduped = list(dict.fromkeys(live_models))
+                    ids = [item["id"] for item in live_models if item.get("id")]
+                    deduped = list(dict.fromkeys(ids))
                     if deduped:
+                        created = {}
+                        for item in live_models:
+                            mid = item.get("id")
+                            ts = item.get("created")
+                            if mid and ts:
+                                created.setdefault(mid, ts)
                         updated[provider_key] = {
                             "name": PROVIDER_DISPLAY_NAMES.get(provider_key, provider_key.title()),
                             "models": deduped,
+                            "created": created,
                         }
 
         DYNAMIC_PROVIDER_MODELS = updated
