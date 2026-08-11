@@ -598,10 +598,12 @@ def list_user_stories_firestore(uid: str) -> list:
             docs = db_firestore.collection("users").document(uid).collection("stories").stream()
             for doc in docs:
                 data = doc.to_dict() or {}
+                files = data.get("files") or {}
                 stories.append({
                     "id": doc.id,
                     "title": data.get("title", doc.id.capitalize()),
-                    "updated_at": data.get("updated_at", 0)
+                    "updated_at": data.get("updated_at", 0),
+                    "size": sum(len(str(v)) for v in files.values())
                 })
         except Exception as e:
             print(f"[Firestore List Error] {e}")
@@ -1863,6 +1865,30 @@ from fastapi.responses import FileResponse
 async def read_root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
+def _story_dir_size(story_dir: str) -> int:
+    """Total byte size of a story's text files (.md/.json), excluding temp and
+    audio files. Mirrors the file set that sync_story_directory_to_firestore
+    uploads, so the shown size is consistent whether the story is read from
+    local disk, Firestore, or Postgres."""
+    total = 0
+    if not os.path.isdir(story_dir):
+        return 0
+    try:
+        for name in os.listdir(story_dir):
+            if not (name.endswith(".md") or name.endswith(".json")):
+                continue
+            if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                continue
+            path = os.path.join(story_dir, name)
+            if os.path.isfile(path):
+                try:
+                    total += os.path.getsize(path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
 @app.get("/stories")
 async def list_stories(user_id: str = Depends(get_current_user_id)):
     """List stories belonging specifically to the authenticated user (merges local disk and Firestore)."""
@@ -1879,7 +1905,7 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
             story_dir = os.path.join(user_dir, name)
             if os.path.isdir(story_dir):
                 story_file = os.path.join(story_dir, "story.md")
-                size = os.path.getsize(story_file) if os.path.exists(story_file) else 0
+                size = _story_dir_size(story_dir)
                 modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
                 stories.append({
                     "id": name,
@@ -1897,7 +1923,7 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                 stories.append({
                     "id": s["id"],
                     "name": s.get("title", s["id"].replace("-", " ").title()),
-                    "size": 2048,
+                    "size": s.get("size", 0),
                     "modified": s.get("updated_at", 0)
                 })
                 seen_ids.add(s["id"])
@@ -1909,18 +1935,19 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
             conn = psycopg2.connect(db_conn_str)
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT story_id, MAX(title) as title, MAX(updated_at) as updated_at
+                    SELECT story_id, MAX(title) as title, MAX(updated_at) as updated_at,
+                           SUM(LENGTH(content)) as size
                     FROM user_stories
                     WHERE uid = %s
                     GROUP BY story_id
                 """, (user_id,))
                 rows = cur.fetchall()
-                for story_id, title, updated_at in rows:
+                for story_id, title, updated_at, size in rows:
                     if story_id not in seen_ids:
                         stories.append({
                             "id": story_id,
                             "name": title if title else story_id.replace("-", " ").title(),
-                            "size": 2048,
+                            "size": size or 0,
                             "modified": updated_at
                         })
                         seen_ids.add(story_id)
@@ -1934,7 +1961,7 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
             story_dir = os.path.join(STORIES_DIR, name)
             if os.path.isdir(story_dir) and name != safe_uid and name not in seen_ids:
                 story_file = os.path.join(story_dir, "story.md")
-                size = os.path.getsize(story_file) if os.path.exists(story_file) else 0
+                size = _story_dir_size(story_dir)
                 modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
                 stories.append({
                     "id": name,
