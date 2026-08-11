@@ -86,6 +86,8 @@ async function fetchUserSettings() {
         }
         renderUserSettingsUI();
         await populatePipelineModelDropdowns();
+        addLocalProviderToDropdown();
+        populateLocalPipelineModelDropdowns();
     } catch (e) {
         console.warn('Failed to fetch user settings:', e);
     }
@@ -153,6 +155,22 @@ function renderUserSettingsUI() {
     if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
     if (document.getElementById('input-rules-model')) document.getElementById('input-rules-model').dataset.val = masked.rules_model || '';
     if (document.getElementById('input-audio-model')) document.getElementById('input-audio-model').dataset.val = masked.audio_model || '';
+
+    // Local OpenAI-compatible server (browser-direct)
+    const localEnabledInput = document.getElementById('input-local-enabled');
+    if (localEnabledInput) localEnabledInput.checked = !!masked.local_enabled;
+    if (masked.local_base_url && document.getElementById('input-local-base-url')) {
+        document.getElementById('input-local-base-url').placeholder = `Current: ${masked.local_base_url}`;
+    }
+    if (masked.local_name && document.getElementById('input-local-name')) {
+        document.getElementById('input-local-name').placeholder = `Current: ${masked.local_name}`;
+    }
+
+    // Local per-task model overrides
+    if (document.getElementById('input-local-story-model')) document.getElementById('input-local-story-model').dataset.val = masked.local_story_model || '';
+    if (document.getElementById('input-local-background-model')) document.getElementById('input-local-background-model').dataset.val = masked.local_background_model || '';
+    if (document.getElementById('input-local-rules-model')) document.getElementById('input-local-rules-model').dataset.val = masked.local_rules_model || '';
+    if (document.getElementById('input-local-audio-model')) document.getElementById('input-local-audio-model').dataset.val = masked.local_audio_model || '';
 }
 
 function toggleSettingsModal() {
@@ -181,6 +199,14 @@ async function saveUserSettings(e) {
         background_model: document.getElementById('input-background-model').value.trim(),
         rules_model: document.getElementById('input-rules-model').value.trim(),
         audio_model: document.getElementById('input-audio-model').value.trim(),
+        local_enabled: document.getElementById('input-local-enabled')?.checked ? 'true' : '',
+        local_base_url: document.getElementById('input-local-base-url')?.value?.trim() || '',
+        local_api_key: document.getElementById('input-local-key')?.value?.trim() || '',
+        local_name: document.getElementById('input-local-name')?.value?.trim() || '',
+        local_story_model: document.getElementById('input-local-story-model')?.value?.trim() || '',
+        local_background_model: document.getElementById('input-local-background-model')?.value?.trim() || '',
+        local_rules_model: document.getElementById('input-local-rules-model')?.value?.trim() || '',
+        local_audio_model: document.getElementById('input-local-audio-model')?.value?.trim() || '',
     };
 
     try {
@@ -203,6 +229,9 @@ async function saveUserSettings(e) {
         document.getElementById('input-openrouter-key').value = '';
         document.getElementById('input-groq-key').value = '';
         if (document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').value = '';
+        if (document.getElementById('input-local-key')) document.getElementById('input-local-key').value = '';
+        if (document.getElementById('input-local-base-url')) document.getElementById('input-local-base-url').value = '';
+        if (document.getElementById('input-local-name')) document.getElementById('input-local-name').value = '';
 
         await fetchUserSettings();
         // Refresh provider/model dropdowns to reflect newly saved API keys
@@ -1569,7 +1598,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                     console.log("[DEBUG] submitStory check:", { hasKeys, hasStoryOverride, providerVal, modelVal, currentUserSettings });
 
-                    if (hasKeys && !hasStoryOverride && (providerVal === 'auto' || modelVal === 'auto')) {
+                    if (hasKeys && !hasStoryOverride && providerVal !== 'local' && (providerVal === 'auto' || modelVal === 'auto')) {
                         const confirmModal = document.getElementById('confirm-override-modal');
                         if (confirmModal) {
                             confirmModal.classList.remove('hidden');
@@ -1662,8 +1691,22 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             let thinkingAnnounced = false;
 
             try {
+                const providerVal = document.getElementById('provider-select')?.value || 'auto';
+                const modelVal = document.getElementById('model-select')?.value || 'auto';
                 let response;
-                if (attachedAudioFile) {
+                if (providerVal === 'local') {
+                    // Local provider wins even with audio attached - multimodal local
+                    // models (gemma3, qwen2.5-omni) hear the audio natively.
+                    const audioInfo = attachedAudioFile ? {
+                        file: attachedAudioFile,
+                        name: (audioFileInput && audioFileInput.files && audioFileInput.files[0] && audioFileInput.files[0].name) || 'audio',
+                        mime: attachedAudioFile.type || 'audio/mpeg'
+                    } : null;
+                    attachedAudioFile = null;
+                    if (audioFileInput) audioFileInput.value = '';
+                    if (audioAttachment) audioAttachment.style.display = 'none';
+                    response = await runLocalGeneration(text, modelVal, audioInfo);
+                } else if (attachedAudioFile) {
                     const formData = new FormData();
                     formData.append('user_input', text);
                     formData.append('story_id', currentStoryId);
@@ -1724,8 +1767,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     audioFileInput.value = '';
                     audioAttachment.style.display = 'none';
                 } else {
-                    const providerVal = document.getElementById('provider-select')?.value || 'auto';
-                    const modelVal = document.getElementById('model-select')?.value || 'auto';
                     response = await authFetch('/generate', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -2344,7 +2385,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         opt.textContent = p.name || key.toUpperCase();
                         providerSelect.appendChild(opt);
                     }
-                    if (currentSelection && providersData[currentSelection]) {
+                    addLocalProviderToDropdown();
+                    if (currentSelection === 'local' || (currentSelection && providersData[currentSelection])) {
                         providerSelect.value = currentSelection;
                     }
                     onProviderChange();
@@ -2379,6 +2421,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const selectedProvider = providerSelect.value;
             modelSelect.innerHTML = '<option value="auto">Auto (Default Recommended)</option>';
             
+            if (selectedProvider === 'local') {
+                refreshLocalModelDropdown(modelSelect);
+                return;
+            }
+            
             if (selectedProvider !== 'auto' && providersData[selectedProvider]) {
                 const models = providersData[selectedProvider].models || [];
                 for (const m of models) {
@@ -2388,6 +2435,380 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     modelSelect.appendChild(opt);
                 }
             }
+        }
+
+        // ===== LOCAL OPENAI-COMPATIBLE SERVER (BROWSER-DIRECT) =====
+        // The browser talks to the user's local model server directly, so
+        // localhost means THEIR machine. The server only assembles the prompt
+        // (local-begin) and persists the result (local-finish).
+        function getLocalServerConfig() {
+            const mk = (currentUserSettings && currentUserSettings.masked_keys) || {};
+            return {
+                enabled: !!(mk.local_enabled),
+                baseUrl: (mk.local_base_url || '').trim(),
+                apiKey: (currentUserSettings && currentUserSettings.local_api_key_full) || '',
+                name: (mk.local_name || '').trim() || 'Local Server'
+            };
+        }
+
+        async function fetchLocalModels(cfg) {
+            const baseUrl = (cfg.baseUrl || '').replace(/\/+$/, '');
+            if (!baseUrl) return [];
+            const headers = {};
+            if (cfg.apiKey) headers['Authorization'] = 'Bearer ' + cfg.apiKey;
+            const res = await fetch(baseUrl + '/models', { headers });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            return (data.data || []).map(m => m.id || m.name || m).filter(Boolean);
+        }
+
+        function addLocalProviderToDropdown() {
+            const providerSelect = document.getElementById('provider-select');
+            if (!providerSelect) return;
+            const wasLocal = providerSelect.value === 'local';
+            for (const opt of Array.from(providerSelect.options)) {
+                if (opt.value === 'local') opt.remove();
+            }
+            const cfg = getLocalServerConfig();
+            if (!cfg.enabled || !cfg.baseUrl) {
+                if (wasLocal) onProviderChange();
+                return;
+            }
+            const opt = document.createElement('option');
+            opt.value = 'local';
+            opt.textContent = cfg.name || 'Local Server';
+            providerSelect.appendChild(opt);
+            if (wasLocal) {
+                providerSelect.value = 'local';
+                onProviderChange();
+            }
+        }
+
+        async function refreshLocalModelDropdown(modelSelect) {
+            const cfg = getLocalServerConfig();
+            if (!cfg.baseUrl) {
+                modelSelect.innerHTML = '<option value="auto">Local server not configured</option>';
+                return;
+            }
+            modelSelect.innerHTML = '<option value="auto">Auto (Default Recommended)</option>';
+            try {
+                const models = await fetchLocalModels(cfg);
+                for (const m of models) {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    modelSelect.appendChild(opt);
+                }
+                if (models.length) {
+                    providersData['local'] = { name: cfg.name || 'Local Server', models: models };
+                }
+                fillLocalPipelineDropdowns(models);
+            } catch (e) {
+                if (modelSelect.options.length <= 1) {
+                    const opt = document.createElement('option');
+                    opt.value = 'auto';
+                    opt.textContent = 'Local server unreachable';
+                    modelSelect.appendChild(opt);
+                }
+            }
+        }
+
+        // Fill the four per-task local model override dropdowns (Settings) from a
+        // fetched model list, preserving the saved selection (dataset.val).
+        function fillLocalPipelineDropdowns(models) {
+            const ids = ['input-local-story-model', 'input-local-background-model', 'input-local-rules-model', 'input-local-audio-model'];
+            ids.forEach(id => {
+                const sel = document.getElementById(id);
+                if (!sel) return;
+                const currentVal = sel.dataset.val || sel.value || '';
+                sel.innerHTML = '<option value="">Default (Auto)</option>';
+                (models || []).forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    if (m === currentVal) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+                if (currentVal && !(models || []).includes(currentVal)) {
+                    const opt = document.createElement('option');
+                    opt.value = currentVal;
+                    opt.textContent = `${currentVal} (Custom)`;
+                    opt.selected = true;
+                    sel.appendChild(opt);
+                }
+            });
+        }
+
+        async function populateLocalPipelineModelDropdowns() {
+            const cfg = getLocalServerConfig();
+            if (!cfg.enabled || !cfg.baseUrl) return;
+            try {
+                const models = await fetchLocalModels(cfg);
+                fillLocalPipelineDropdowns(models);
+            } catch (e) {
+                console.warn('Failed to populate local pipeline model dropdowns:', e);
+            }
+        }
+
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result);
+                fr.onerror = () => reject(fr.error || new Error('Failed to read audio file'));
+                fr.readAsDataURL(file);
+            });
+        }
+
+        // Browser-direct background analysis: build the prompt server-side, run it
+        // on the local model, then apply the result server-side (same parse/write
+        // logic as the cloud path). Non-critical - failures never fail the turn.
+        async function runLocalAnalysis(cfg, model, baseUrl, headers, newText, send) {
+            try {
+                const analyzeRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-analyze`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ new_text: newText })
+                });
+                if (!analyzeRes.ok) return;
+                const ad = await analyzeRes.json();
+                if (!ad.should_analyze || !ad.prompt) return;
+                send({ type: 'finalizing', message: 'Updating story memory...' });
+                const anaRes = await fetch(baseUrl + '/chat/completions', {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [
+                            { role: 'system', content: 'You are an expert story continuity manager.' },
+                            { role: 'user', content: ad.prompt }
+                        ],
+                        stream: false
+                    })
+                });
+                if (!anaRes.ok) return;
+                const anaBody = await anaRes.json();
+                const output = (anaBody.choices && anaBody.choices[0] && anaBody.choices[0].message && anaBody.choices[0].message.content) || '';
+                if (!output.trim()) return;
+                await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-analyze-save`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ output: output, model: model })
+                });
+            } catch (e) {
+                console.warn('Local background analysis failed (non-critical):', e);
+            }
+        }
+
+        async function runLocalGeneration(userText, modelVal, audioInfo) {
+            const cfg = getLocalServerConfig();
+            if (!cfg.baseUrl) throw new Error('Local server not configured. Add a base URL in Settings → Local OpenAI-Compatible Server.');
+            const skipRulesCheck = !!document.getElementById('skip-rules-check')?.checked;
+
+            let beginRes;
+            if (audioInfo && audioInfo.file) {
+                const formData = new FormData();
+                formData.append('user_input', userText);
+                formData.append('audio', audioInfo.file);
+                beginRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-audio-begin`, {
+                    method: 'POST',
+                    body: formData
+                });
+            } else {
+                beginRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-begin`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_input: userText })
+                });
+            }
+            if (!beginRes.ok) {
+                let errText = '';
+                try { errText = await beginRes.text(); } catch (e) {}
+                throw new Error(errText || 'Failed to start local generation (HTTP ' + beginRes.status + ')');
+            }
+            const beginData = await beginRes.json();
+            const systemMsg = beginData.system_msg || '';
+            const userMsg = beginData.user_msg || userText;
+
+            // Per-task model overrides (mirror the cloud Pipeline Model Overrides).
+            // Each task falls back: task override → provider dropdown → first local model.
+            const mk = (currentUserSettings && currentUserSettings.masked_keys) || {};
+            const localStoryModel = (mk.local_story_model || '').trim();
+            const localBackgroundModel = (mk.local_background_model || '').trim();
+            const localRulesModel = (mk.local_rules_model || '').trim();
+            const localAudioModel = (mk.local_audio_model || '').trim();
+
+            let baseModel = (modelVal && modelVal !== 'auto') ? modelVal : '';
+            if (!baseModel) {
+                const models = await fetchLocalModels(cfg).catch(() => []);
+                baseModel = models[0] || '';
+            }
+            if (!baseModel) throw new Error('No model selected and the local server reported none. Start a model in Ollama / LM Studio first.');
+            const storyModel = (audioInfo && audioInfo.file) ? (localAudioModel || localStoryModel || baseModel) : (localStoryModel || baseModel);
+            const rulesModel = localRulesModel || baseModel;
+            const backgroundModel = localBackgroundModel || baseModel;
+
+            // Return a normalized SSE stream so the existing submitStory reader
+            // loop handles rendering, thinking, errors and the done state unchanged.
+            let controller;
+            const stream = new ReadableStream({
+                start(c) { controller = c; }
+            });
+            const send = (obj) => {
+                try {
+                    controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(obj) + '\n\n'));
+                } catch (e) {}
+            };
+            const response = new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+
+            send({ type: 'info', model: storyModel });
+
+            const baseUrl = cfg.baseUrl.replace(/\/+$/, '');
+            const headers = { 'Content-Type': 'application/json' };
+            if (cfg.apiKey) headers['Authorization'] = 'Bearer ' + cfg.apiKey;
+
+            let fullText = '';
+            let sawChunk = false;
+            let rawBody = '';
+            try {
+                // Native-audio local models (gemma3, qwen2.5-omni, ...) receive the
+                // audio file directly as an input_audio part - no cloud transcription.
+                let messages;
+                if (audioInfo && audioInfo.file) {
+                    const dataUrl = await readFileAsDataURL(audioInfo.file);
+                    const base64 = (dataUrl || '').split(',')[1] || '';
+                    messages = [
+                        { role: 'system', content: systemMsg },
+                        { role: 'user', content: [
+                            { type: 'text', text: userMsg },
+                            { type: 'input_audio', input_audio: { data: base64, format: audioInfo.mime || 'audio/mpeg' } }
+                        ] }
+                    ];
+                } else {
+                    messages = [
+                        { role: 'system', content: systemMsg },
+                        { role: 'user', content: userMsg }
+                    ];
+                }
+                const streamRes = await fetch(baseUrl + '/chat/completions', {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify({
+                        model: storyModel,
+                        messages: messages,
+                        stream: true
+                    })
+                });
+                if (!streamRes.ok) {
+                    let errBody = '';
+                    try { errBody = await streamRes.text(); } catch (e) {}
+                    const hint = (audioInfo && audioInfo.file) ? ' — if this model can\'t hear audio, switch to a multimodal model (e.g. gemma3 or qwen2.5-omni) or use a cloud provider.' : '';
+                    throw new Error('Local server error (HTTP ' + streamRes.status + '): ' + (errBody || 'no response body').slice(0, 300) + hint);
+                }
+                const reader = streamRes.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const decoded = decoder.decode(value, { stream: true });
+                    buffer += decoded;
+                    rawBody += decoded;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const rawLine of lines) {
+                        const line = rawLine.trim();
+                        if (!line.startsWith('data:')) continue;
+                        const payloadStr = line.substring(5).trim();
+                        if (!payloadStr || payloadStr === '[DONE]') continue;
+                        let payload;
+                        try { payload = JSON.parse(payloadStr); } catch (e) { continue; }
+                        const choice = (payload.choices && payload.choices[0]) || {};
+                        const delta = choice.delta || {};
+                        const reasoning = delta.reasoning_content || delta.reasoning;
+                        if (reasoning) {
+                            send({ type: 'chunk', text: '<thought>' });
+                            send({ type: 'chunk', text: String(reasoning) });
+                            send({ type: 'chunk', text: '</thought>' });
+                            sawChunk = true;
+                        }
+                        if (delta.content) {
+                            send({ type: 'chunk', text: delta.content });
+                            fullText += delta.content;
+                            sawChunk = true;
+                        }
+                    }
+                }
+                // Fallback for servers that ignore stream:true and return one JSON body
+                if (!sawChunk && rawBody.trim()) {
+                    try {
+                        const body = JSON.parse(rawBody.trim());
+                        const content = (body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
+                        if (content) {
+                            send({ type: 'chunk', text: content });
+                            fullText += content;
+                            sawChunk = true;
+                        }
+                    } catch (e) {}
+                }
+
+                // Rules check on the local model (same prompt the server-side
+                // RulesEditor uses). Failure keeps the unedited text - the rules
+                // check is a refinement, never a gate.
+                let saveText = fullText;
+                if (!skipRulesCheck && beginData.rules_system_prompt && beginData.rules_prefix && saveText.trim()) {
+                    send({ type: 'finalizing', message: 'Checking rules & style...' });
+                    try {
+                        const rulesRes = await fetch(baseUrl + '/chat/completions', {
+                            method: 'POST',
+                            headers: headers,
+                            body: JSON.stringify({
+                                model: rulesModel,
+                                messages: [
+                                    { role: 'system', content: beginData.rules_system_prompt },
+                                    { role: 'user', content: beginData.rules_prefix + '=== GENERATED TEXT ===\n' + saveText }
+                                ],
+                                stream: false
+                            })
+                        });
+                        if (rulesRes.ok) {
+                            const rd = await rulesRes.json();
+                            const edited = rd.choices && rd.choices[0] && rd.choices[0].message && rd.choices[0].message.content;
+                            if (edited && edited.trim()) saveText = edited;
+                        }
+                    } catch (e) {
+                        console.warn('Local rules check failed, saving unedited text:', e);
+                    }
+                }
+
+                const finishRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-finish`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: saveText, user_input: userText, model: storyModel, error: '', audio_name: (audioInfo && audioInfo.name) || '' })
+                });
+                const finishData = await finishRes.json().catch(() => ({}));
+                if (finishData && finishData.truncated) {
+                    send({ type: 'warning', message: 'The response may have been cut off by the model length limit.' });
+                }
+                // Background memory update on the local model too (every BATCH_SIZE-th turn).
+                if (finishData && finishData.saved) {
+                    await runLocalAnalysis(cfg, backgroundModel, baseUrl, headers, saveText, send);
+                }
+                send({ type: 'done' });
+            } catch (err) {
+                // Report the failure server-side so the pending-retry marker is set
+                // and the logged prompt is dropped.
+                try {
+                    await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-finish`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text: '', user_input: userText, model: storyModel, error: String(err && err.message ? err.message : err).slice(0, 300), audio_name: (audioInfo && audioInfo.name) || '' })
+                    });
+                } catch (e) {}
+                send({ type: 'error', message: (err && err.message) || 'Local generation failed' });
+            } finally {
+                try { controller.close(); } catch (e) {}
+            }
+            return response;
         }
 
         // ===== GUEST MODE: Banner, Nag Dialog, Feature Restrictions =====
@@ -2612,6 +3033,61 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <span id="status-nvidia-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
                 <input type="password" id="input-nvidia-key" autocomplete="new-password" placeholder="nvapi-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+            </div>
+
+            <!-- Local OpenAI-Compatible Server (browser-direct) -->
+            <div class="border-t border-stone-800 pt-4 mt-2">
+                <h4 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span>🖥️</span> Local OpenAI-Compatible Server</h4>
+                <p class="text-[10px] text-stone-500 mb-3">Connect any OpenAI-compatible endpoint running on <strong>your machine</strong> (Ollama, LM Studio, vLLM, a custom proxy...). Your browser talks to it directly, so <code>localhost</code> means <em>your</em> computer. The server must send CORS headers (Ollama: set <code>OLLAMA_ORIGINS=*</code>; LM Studio: CORS on by default).</p>
+                <div class="flex items-center gap-2 mb-3">
+                    <input type="checkbox" id="input-local-enabled" class="w-4 h-4 accent-amber-500">
+                    <label for="input-local-enabled" class="font-medium text-stone-300">Enable Local model server</label>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">Base URL (OpenAI-style)</label>
+                        <input type="text" id="input-local-base-url" autocomplete="off" placeholder="http://localhost:11434/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                    </div>
+                    <div>
+                        <label class="block font-medium text-stone-400 mb-1 text-[10px]">API Key (optional)</label>
+                        <input type="password" id="input-local-key" autocomplete="new-password" placeholder="none needed for Ollama / LM Studio" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                    </div>
+                </div>
+                <div>
+                    <label class="block font-medium text-stone-400 mb-1 text-[10px]">Display Name (optional)</label>
+                    <input type="text" id="input-local-name" autocomplete="off" placeholder="My Local Models" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                </div>
+
+                <!-- Per-task model overrides for the local server (mirrors the cloud Pipeline Model Overrides) -->
+                <div class="border-t border-stone-800 pt-3 mt-3">
+                    <label class="block font-medium text-stone-300 mb-2 text-[10px]">Local Model Overrides — pick a different model per task (leave Default to use the model selected in the provider dropdown)</label>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block font-medium text-stone-400 mb-1 text-[10px]">📖 Story Model</label>
+                            <select id="input-local-story-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                                <option value="">Default (Auto)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-medium text-stone-400 mb-1 text-[10px]">📝 Background Model</label>
+                            <select id="input-local-background-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                                <option value="">Default (Auto)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-medium text-stone-400 mb-1 text-[10px]">📜 Rules Model</label>
+                            <select id="input-local-rules-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                                <option value="">Default (Auto)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-medium text-stone-400 mb-1 text-[10px]">🎵 Audio Model (multimodal)</label>
+                            <select id="input-local-audio-model" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-2 py-1.5 text-stone-100 focus:outline-none focus:border-amber-500 text-[10px]">
+                                <option value="">Default (Auto)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Pipeline Model Overrides -->
