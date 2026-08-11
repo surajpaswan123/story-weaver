@@ -6283,6 +6283,22 @@ DYNAMIC_PROVIDER_MODELS = {}
 LAST_DYNAMIC_FETCH = 0
 
 
+def _http_error_detail(e):
+    """Best-effort detail from an HTTPError - urllib's str() only shows
+    'HTTP Error 400: Bad Request', hiding the API's actual error message
+    (e.g. 'API key not valid'). Reads and parses the response body."""
+    try:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            parsed = json.loads(body)
+            msg = (parsed.get("error") or {}).get("message") or body
+        except Exception:
+            msg = body
+        return f"HTTP {e.code}: {msg.strip()[:300]}"
+    except Exception:
+        return f"HTTP {getattr(e, 'code', '?')}"
+
+
 def _created_ts(value):
     """Convert a provider registration timestamp (epoch int/float, or ISO-8601
     string like HF's createdAt / Google's createTime) to epoch seconds, or None
@@ -6365,6 +6381,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "openai", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] OpenAI models fetch ({url}): {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] OpenAI models fetch ({url}): {e}")
     return None
@@ -6383,6 +6401,8 @@ def fetch_openrouter_live_models(api_key: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "openrouter", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] OpenRouter models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] OpenRouter models fetch: {e}")
     return None
@@ -6402,6 +6422,8 @@ def fetch_nvidia_live_models(api_key: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "nvidia", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] NVIDIA models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] NVIDIA models fetch: {e}")
     return None
@@ -6421,6 +6443,8 @@ def fetch_groq_live_models(api_key: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "groq", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] Groq models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] Groq models fetch: {e}")
     return None
@@ -6441,6 +6465,8 @@ def fetch_cerebras_live_models(api_key: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "cerebras", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] Cerebras models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] Cerebras models fetch: {e}")
     return None
@@ -6460,6 +6486,8 @@ def fetch_mistral_live_models(api_key: str = None):
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "mistral", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] Mistral models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] Mistral models fetch: {e}")
     return None
@@ -6480,6 +6508,8 @@ def fetch_hf_live_models(api_key: str = None):
                       for m in data if m.get("id") and m.get("pipeline_tag") == "text-generation"]
             if models:
                 return "hf", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] HF models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] HF models fetch: {e}")
     return None
@@ -6503,20 +6533,26 @@ def fetch_nokey_live_models():
 def fetch_google_live_models(api_key: str = None):
     """Fetch the live Gemini model list via the raw HTTP API.
 
-    Uses generativelanguage.googleapis.com/v1beta/models directly (not the SDK)
-    because the installed google-genai version's Model type drops the API's
-    createTime field, and registration date is what "newest first" sorting
-    needs. Filters to models that support generateContent (image-gen/TTS/audio
-    models don't accept system_instruction or plain text prompts - selecting
-    them causes 400 errors)."""
-    key = api_key or os.getenv("GEMINI_API_KEY")
+    Uses generativelanguage.googleapis.com/v1beta/models directly (not the
+    SDK) and captures createTime if Google returns it (the installed
+    google-genai version's Model type drops it; the public API docs don't list
+    it either, so Google models may fall back to version-heuristic sorting).
+    Filters to models that support generateContent (image-gen/TTS/audio models
+    don't accept system_instruction or plain text prompts - selecting them
+    causes 400 errors)."""
+    key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not key:
+        return None
+    if not key.startswith("AIza"):
+        # Not a Gemini API key (e.g. a Cloud key / OAuth token / placeholder) -
+        # calling the API with it would just 400 "API key not valid".
+        print("[Live Fetch Note] Skipping Google models fetch: configured key is not a Gemini (AIza...) key")
         return None
     try:
         models = []
         page_token = None
         while True:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=500"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={urllib.parse.quote(key)}&pageSize=500"
             if page_token:
                 url += f"&pageToken={urllib.parse.quote(page_token)}"
             req = urllib.request.Request(url, headers={"User-Agent": "StoryWeaver/1.0"})
@@ -6540,6 +6576,8 @@ def fetch_google_live_models(api_key: str = None):
                 break
         if models:
             return "google", models
+    except urllib.error.HTTPError as e:
+        print(f"[Live Fetch Note] Google models fetch: {_http_error_detail(e)}")
     except Exception as e:
         print(f"[Live Fetch Note] Google models fetch: {e}")
     return None
