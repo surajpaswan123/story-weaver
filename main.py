@@ -40,6 +40,7 @@ import os
 import json
 import time
 import threading
+import queue
 from collections import deque
 from google import genai
 from google.genai import types
@@ -1822,6 +1823,29 @@ def append_chat_entry(story_id: str, role: str, text: str, model: str = "", uid:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(entries, f, ensure_ascii=False)
 
+def remove_last_user_entry(story_id: str, uid: str = "default_user"):
+    """If the last chat entry is a user prompt with no AI response after it,
+    remove it. Called when a generation turn fails, so the chat log never keeps
+    a dangling 'You said:' with no reply - otherwise a reload/retry shows a
+    broken turn (and undo would target the wrong pair)."""
+    path = get_chat_log_path(story_id, uid=uid, create=False)
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, Exception):
+        return
+    if not entries or entries[-1].get("role") != "user":
+        return
+    entries.pop()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def get_turn_count(story_id: str, uid: str = "default_user") -> int:
     """Count completed AI turns for THIS story, derived from chat_log.json instead of a
     shared global counter. Self-correcting on undo (which already removes the AI+user
@@ -3327,16 +3351,107 @@ def _safe_delta_content(chunk):
     except Exception:
         return ""
 
+def _safe_google_chunk_text(chunk):
+    """Extract text and thinking from a google-genai streamed chunk.
+
+    Google returns reasoning as separate parts with thought=True. The SDK's
+    .text property explicitly SKIPS those thought parts (and returns None for
+    thought-only chunks), so Google thinking was being silently dropped. Read
+    candidates[0].content.parts directly and wrap thought text in <thought>
+    tags - the same convention the NVIDIA/Nokey adapters emit - so the
+    frontend's thinking panel can render it."""
+    try:
+        if not getattr(chunk, "candidates", None):
+            return ""
+        parts = chunk.candidates[0].content.parts
+        if not parts:
+            return ""
+        out = []
+        for part in parts:
+            thought = bool(getattr(part, "thought", False))
+            text = getattr(part, "text", None) or ""
+            if not text:
+                continue
+            if thought:
+                out.append(f"<thought>{text}</thought>")
+            else:
+                out.append(text)
+        return "".join(out)
+    except Exception:
+        return ""
+
+
 def _safe_chunk_text(chunk):
-    """Return chunk text safely across both OpenAI-style and simple text chunk formats."""
+    """Return chunk text safely across OpenAI-style, google-genai, and simple text chunk formats."""
     try:
         if hasattr(chunk, "choices") and chunk.choices:
             return _safe_delta_content(chunk)
+        if hasattr(chunk, "candidates") and chunk.candidates:
+            return _safe_google_chunk_text(chunk)
         if hasattr(chunk, "text"):
             return chunk.text or ""
     except Exception:
         return ""
     return ""
+
+
+def _friendly_api_error(e):
+    """Turn provider SDK errors into short, human-readable messages.
+
+    google-genai raises APIError whose str() dumps the whole JSON details blob
+    (e.g. "400 INVALID_ARGUMENT. {'error': {...}}") - useless in the UI banner.
+    If the exception looks like a google-genai APIError, extract its clean
+    code/status/message instead; otherwise return the original text."""
+    try:
+        if hasattr(e, "details") and hasattr(e, "code"):
+            code = getattr(e, "code", "") or ""
+            status = getattr(e, "status", "") or ""
+            msg = getattr(e, "message", "") or ""
+            if msg:
+                return f"Google API error ({code} {status}): {msg}".strip()
+            return f"Google API error ({code} {status})".strip()
+    except Exception:
+        pass
+    return str(e)
+
+
+_HEARTBEAT = object()
+
+
+def _heartbeat_stream(stream, interval=15):
+    """Wrap a provider stream so the connection can't go idle.
+
+    Thinking models (e.g. Google Gemini with a dynamic budget) can ponder for
+    minutes before emitting the first chunk. During that silence a reverse
+    proxy or the browser can kill the SSE connection - which on Windows
+    surfaces as 'OSError: [Errno 9] Bad file descriptor' mid-generation and
+    loses the whole story. This wrapper pumps the stream in a background
+    thread and yields a _HEARTBEAT sentinel whenever no chunk arrives within
+    `interval` seconds, so the caller can emit an SSE 'heartbeat' event.
+    Real stream errors still propagate to the caller as normal exceptions."""
+    it = iter(stream)
+    q = queue.Queue(maxsize=16)
+
+    def _pump():
+        try:
+            for chunk in it:
+                q.put((False, chunk))
+        except Exception as exc:  # noqa: BLE001 - must forward any stream failure
+            q.put((True, exc))
+        q.put((False, None))
+
+    threading.Thread(target=_pump, daemon=True).start()
+    while True:
+        try:
+            is_error, item = q.get(timeout=interval)
+        except queue.Empty:
+            yield _HEARTBEAT
+            continue
+        if is_error:
+            raise item
+        if item is None:
+            return
+        yield item
 
 
 def _thought_blocks(text: str):
@@ -3674,6 +3789,15 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                                 **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
                             )
                         )
+                        if _thinks:
+                            # A thinking model can ponder for minutes before its first
+                            # token. Prefetching here blocks the whole request with zero
+                            # SSE bytes flowing, and proxies/browsers kill idle
+                            # connections (Windows: [Errno 9] Bad file descriptor).
+                            # Return immediately so the caller can send its
+                            # 'info'/'thinking' events first.
+                            print(f"  -> Google thinking model; returning stream immediately.", flush=True)
+                            return stream, f"Google/{base_m}", True
                         first_chunk = next(iter(stream))
                         return StreamWithFirstChunk(stream, first_chunk), f"Google/{base_m}", _thinks
                     except Exception as err:
@@ -3784,6 +3908,9 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                             **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
                         )
                     )
+                    if _thinks:
+                        print(f"  -> Google thinking model; returning stream immediately.", flush=True)
+                        return stream, f"Google/{base_m}", True
                     first_chunk = next(iter(stream))
                     return StreamWithFirstChunk(stream, first_chunk), f"Google/{base_m}", _thinks
                 except Exception as err:
@@ -3955,6 +4082,9 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                                 "thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
                         )
                     )
+                    if _thinks:
+                        print(f"  -> Google thinking model; returning stream immediately.", flush=True)
+                        return stream, f"GenAI/{model_name}", True
                     first_chunk = next(iter(stream))
                     wrapped = StreamWithFirstChunk(stream, first_chunk)
                     return wrapped, f"GenAI/{model_name}", _thinks
@@ -4237,9 +4367,13 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                         **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if is_thinking_model(model_name) else {})
                     )
                 )
+                _thinks = is_thinking_model(model_name)
+                if _thinks:
+                    print(f"  -> Google thinking model; returning stream immediately.", flush=True)
+                    return stream, model_name, True
                 first_chunk = next(iter(stream))
                 wrapped = StreamWithFirstChunk(stream, first_chunk)
-                return wrapped, model_name, is_thinking_model(model_name)
+                return wrapped, model_name, _thinks
             except Exception as e:
                 err_str = str(e)
                 print(f"  Model {model_name} failed: {err_str}", flush=True)
@@ -4820,6 +4954,22 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     if not entries:
         raise HTTPException(status_code=400, detail="No chat history to undo")
 
+    # A failed generation (network/API error) leaves a dangling user prompt - its
+    # AI response was never saved. If the LAST entry is a user entry, undo means
+    # "drop that failed prompt and nothing else" - there is no response to remove
+    # from story.md. Without this, undo would delete the PREVIOUS successful
+    # AI+user pair instead, orphaning the failed prompt and leaving the story
+    # display with a lone 'You said:' heading and no AI reply.
+    if entries[-1].get("role") == "user":
+        dangling = entries.pop()
+        try:
+            with open(chat_path, "w", encoding="utf-8") as f:
+                json.dump(entries, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"  Undo: could not write chat log: {e}")
+        sync_story_directory_to_firestore(user_id, story_id)
+        return {"removed_text": "", "restored_prompt": dangling.get("text", "")}
+
     # Find the last AI entry
     last_ai_idx = None
     for i in range(len(entries) - 1, -1, -1):
@@ -5107,7 +5257,8 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 stream_model_name = model_name
                 stream_is_thinking = is_thinking
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'message': f'Story generation failed: {e}'})}\n\n"
+                remove_last_user_entry(story_id, uid=user_id)
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Story generation failed: {_friendly_api_error(e)}'})}\n\n"
                 return
 
             # Update model info
@@ -5156,6 +5307,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                                 yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
 
             if not full_response:
+                remove_last_user_entry(story_id, uid=user_id)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. Safety filters may have blocked the response.'})}\n\n"
                 return
 
@@ -5196,6 +5348,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                         print(f"DEBUG: Audio cleanup applied after retry: {note}")
 
             if not full_response.strip():
+                remove_last_user_entry(story_id, uid=user_id)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. Safety filters may have blocked the response.'})}\n\n"
                 return
 
@@ -5213,6 +5366,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 full_response = strip_thought_tags(refined_text, filter_reasoning_lines=False)
 
                 if not full_response.strip():
+                    remove_last_user_entry(story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
             else:
@@ -5222,6 +5376,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     print("Rules Editor skipped: no rules.md/style.md content for this story")
 
                 if not full_response.strip():
+                    remove_last_user_entry(story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
@@ -5294,11 +5449,28 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             # Signal completion - only now, after story memory is fully caught up
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
+        except OSError as e:
+            print(f"AUDIO PIPELINE ERROR: {e}")
+            if e.errno in (22, 9) and full_response and full_response.strip():
+                # Connection/provider stream died mid-turn - keep whatever the
+                # reader already saw instead of losing the whole story.
+                print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
+                try:
+                    with open(story_path, "a", encoding="utf-8") as f:
+                        f.write(clean_text("\n\n" + full_response))
+                    append_chat_entry(story_id, "ai", full_response, model_used_ref, uid=user_id)
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+                except Exception as save_err:
+                    print(f"Failed to save partial response: {save_err}")
+            remove_last_user_entry(story_id, uid=user_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
         except Exception as e:
             print(f"AUDIO PIPELINE ERROR: {e}")
             import traceback
             traceback.print_exc()
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            remove_last_user_entry(story_id, uid=user_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
 
     if background_tasks:
         background_tasks.add_task(sync_story_directory_to_firestore, user_id, story_id)
@@ -5502,8 +5674,16 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             # Tell the UI the model is thinking (so it can show a spinner)
             if is_thinking:
                 yield f"data: {json.dumps({'type': 'thinking', 'message': model_used + ' is thinking deeply... this may take a few minutes.'})}\n\n"
-            
+
+            # Keep the SSE connection alive during long thinking phases - proxies
+            # and browsers kill idle connections (Windows: [Errno 9] Bad file
+            # descriptor), which used to abort the whole generation.
+            stream = _heartbeat_stream(stream)
+
             for chunk in stream:
+                if chunk is _HEARTBEAT:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                    continue
                 text_content = _safe_chunk_text(chunk)
 
                 if text_content:
@@ -5548,7 +5728,11 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
                     last_finish_reason = ""
                     chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+                    stream = _heartbeat_stream(stream)
                     for chunk in stream:
+                        if chunk is _HEARTBEAT:
+                            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                            continue
                         text_content = _safe_chunk_text(chunk)
                         if text_content:
                             fresh_text = chunk_normalizer.take(text_content)
@@ -5567,6 +5751,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     print(f"DEBUG: Retry stream finished. Full len: {len(full_response)}, finish_reason: {last_finish_reason}")
 
             if not full_response:
+                remove_last_user_entry(input_data.story_id, uid=user_id)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. It might be blocked by safety filters.'})}\n\n"
                 return
 
@@ -5594,7 +5779,11 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry after non-visible response)'})}\n\n"
                     if retry_is_thinking:
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
+                    stream = _heartbeat_stream(stream)
                     for chunk in stream:
+                        if chunk is _HEARTBEAT:
+                            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                            continue
                         text_content = _safe_chunk_text(chunk)
                         if text_content:
                             fresh_text = chunk_normalizer.take(text_content)
@@ -5616,6 +5805,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                         print(f"DEBUG: Story cleanup applied after retry: {note}")
 
             if not full_response.strip():
+                remove_last_user_entry(input_data.story_id, uid=user_id)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. It might be blocked by safety filters.'})}\n\n"
                 return
             
@@ -5663,6 +5853,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     print(f"DEBUG: Story post-rules cleanup applied (persisted copy only): {note}")
 
                 if not full_response.strip():
+                    remove_last_user_entry(input_data.story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
             else:
@@ -5676,6 +5867,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     print(f"DEBUG: Story post-rules cleanup applied: {note}")
 
                 if not full_response.strip():
+                    remove_last_user_entry(input_data.story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
@@ -5743,10 +5935,15 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except OSError as e:
-            if e.errno == 22:
-                # Client disconnected
+            # errno 22 (EINVAL) and errno 9 (EBADF) are both "socket/stream died" on
+            # Windows - either the client disconnected or the provider connection
+            # broke mid-generation (common with Google thinking models after long
+            # silent phases). Either way, DON'T lose the story: save whatever
+            # streamed so far and close the turn cleanly instead of surfacing a raw
+            # '[Errno 9] Bad file descriptor' error.
+            if e.errno in (22, 9):
                 if full_response and not response_persisted:
-                    print(f"Client disconnected, saving partial response ({len(full_response)} chars).")
+                    print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
                     try:
                         with open(story_path, "a", encoding="utf-8") as f:
                             f.write(clean_text("\n\n" + full_response))
@@ -5756,12 +5953,16 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             chat_logged = True
                     except Exception as save_err:
                         print(f"Failed to save partial response: {save_err}")
+                # Tell the UI the turn is over (harmless if the client is really gone).
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
             else:
                 print(f"STREAM ERROR: {e}")
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                remove_last_user_entry(input_data.story_id, uid=user_id)
+                yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
         except Exception as e:
             print(f"STREAM ERROR: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            remove_last_user_entry(input_data.story_id, uid=user_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
 
     background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -5895,11 +6096,22 @@ def fetch_google_live_models(api_key: str = None):
     try:
         gclient = genai.Client(api_key=key)
         models = []
+        # Model IDs that can't be used for text-chat story generation. Selecting
+        # these from the dropdown sends a request Google rejects with a 400
+        # "bad request" (image-gen/TTS/audio models don't accept system_instruction
+        # or plain text prompts). Keep them out of the picker entirely.
+        NON_CHAT_HINTS = (
+            "image", "imagen", "tts", "audio", "embedding", "rerank",
+            "robotics", "computer-use", "-live", "live-preview", "bidi",
+        )
         for m in gclient.models.list(config={"page_size": 100}):
             name = (m.name or "")
             if name.startswith("models/"):
                 name = name[len("models/"):]
             if not name:
+                continue
+            lower_name = name.lower()
+            if any(hint in lower_name for hint in NON_CHAT_HINTS):
                 continue
             try:
                 actions = list(getattr(m, "supported_actions", None) or [])

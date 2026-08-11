@@ -1915,7 +1915,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             } catch (err) {
                 const msg = err.message || '';
-                const isDisconnect = msg.includes('Errno 22') || msg.includes('network') ||
+                const isDisconnect = msg.includes('Errno 22') || msg.includes('Errno 9') || msg.includes('network') ||
                     msg.includes('Failed to fetch') || msg.includes('aborted') ||
                     msg.includes('BodyStreamBuffer');
 
