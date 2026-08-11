@@ -521,7 +521,7 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
                 files_payload = {}
                 for name in os.listdir(story_dir):
                     if name.endswith(".md") or name.endswith(".json"):
-                        if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                        if name.startswith("temp_") or name == "pending_retry.json" or name.endswith(".wav") or name.endswith(".mp3"):
                             continue
                         file_path = os.path.join(story_dir, name)
                         if os.path.isfile(file_path):
@@ -550,7 +550,7 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
                 with conn.cursor() as cur:
                     for name in os.listdir(story_dir):
                          if name.endswith(".md") or name.endswith(".json"):
-                             if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+                             if name.startswith("temp_") or name == "pending_retry.json" or name.endswith(".wav") or name.endswith(".mp3"):
                                  continue
                              file_path = os.path.join(story_dir, name)
                              if os.path.isfile(file_path):
@@ -1846,6 +1846,48 @@ def remove_last_user_entry(story_id: str, uid: str = "default_user"):
         pass
 
 
+def get_pending_retry_path(story_id: str, uid: str = "default_user") -> str:
+    return os.path.join(get_story_dir(story_id, uid=uid, create=False), "pending_retry.json")
+
+
+def write_pending_retry(story_id: str, uid: str, prompt: str, error: str):
+    """Remember a failed generation so the UI can offer a Retry button even
+    after a page reload. Cleared on the next successful turn."""
+    try:
+        with open(get_pending_retry_path(story_id, uid=uid), "w", encoding="utf-8") as f:
+            json.dump({
+                "prompt": prompt,
+                "error": (error or "Generation failed.")[:500],
+                "time": time.strftime("%H:%M"),
+            }, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"  Could not write pending_retry.json: {e}")
+
+
+def clear_pending_retry(story_id: str, uid: str = "default_user"):
+    """Remove the failed-prompt marker (called when a turn succeeds)."""
+    try:
+        p = get_pending_retry_path(story_id, uid=uid)
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception as e:
+        print(f"  Could not clear pending_retry.json: {e}")
+
+
+def read_pending_retry(story_id: str, uid: str = "default_user"):
+    """Return the stored failed prompt (or None)."""
+    p = get_pending_retry_path(story_id, uid=uid)
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data and data.get("prompt"):
+                return data
+        except Exception:
+            return None
+    return None
+
+
 def get_turn_count(story_id: str, uid: str = "default_user") -> int:
     """Count completed AI turns for THIS story, derived from chat_log.json instead of a
     shared global counter. Self-correcting on undo (which already removes the AI+user
@@ -2088,7 +2130,7 @@ async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get
                     display_text = "...\n\n" + display_text
                 entries = [{"role": "ai", "text": display_text, "model": "", "time": ""}]
     
-    return {"messages": entries[-last:]}
+    return {"messages": entries[-last:], "pending_retry": read_pending_retry(story_id, uid=user_id)}
 
 @app.get("/story/{story_id}")
 async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_current_user_id)):
@@ -3451,6 +3493,36 @@ def _heartbeat_stream(stream, interval=15):
             raise item
         if item is None:
             return
+        yield item
+
+
+def _relay_stream(gen):
+    """Run a generator in a background thread and relay its items over a queue.
+
+    This decouples generation from the SSE connection: if the client disconnects
+    (browser closed, tab killed, network drop), the relay stops reading but the
+    worker thread keeps running to completion - the story still gets saved, the
+    chat entry logged, and Firestore synced. Without this, closing the browser
+    aborted the turn mid-generation and lost everything after the last chunk.
+    The queue is unbounded: once the client is gone the events just accumulate
+    until the worker finishes (a whole story is only a few hundred KB)."""
+    q = queue.Queue()
+
+    def _pump():
+        try:
+            for item in gen:
+                q.put(("item", item))
+        except Exception as exc:  # noqa: BLE001 - surface worker bugs to the client
+            q.put(("error", exc))
+        q.put(("done", None))
+
+    threading.Thread(target=_pump, daemon=True).start()
+    while True:
+        kind, item = q.get()
+        if kind == "done":
+            return
+        if kind == "error":
+            raise item
         yield item
 
 
@@ -5037,6 +5109,20 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
 
     return {"removed_text": ai_text_clean, "restored_prompt": restored_prompt}
 
+
+@app.post("/story/{story_id}/retry")
+async def retry_failed_prompt(story_id: str, user_id: str = Depends(get_current_user_id)):
+    """Clear the failed-prompt marker and return the prompt so the UI can resubmit
+    it. No undo happens here - the failed turn left nothing in the story, and
+    previous successful turns must stay untouched."""
+    restore_story_directory_from_firestore(user_id, story_id)
+    data = read_pending_retry(story_id, uid=user_id)
+    clear_pending_retry(story_id, uid=user_id)
+    if not data or not data.get("prompt"):
+        raise HTTPException(status_code=404, detail="No failed prompt to retry")
+    sync_story_directory_to_firestore(user_id, story_id)
+    return {"prompt": data["prompt"], "error": data.get("error", "")}
+
 # ===== AUDIO UPLOAD ENDPOINT =====
 from fastapi import File, UploadFile, Form
 import base64
@@ -5202,6 +5288,11 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}", uid=user_id)
 
     def event_stream():
+        # Same background-thread treatment as /generate: closing the browser stops
+        # the SSE relay but the audio pipeline keeps running to completion.
+        yield from _relay_stream(_audio_worker())
+
+    def _audio_worker():
         full_response = ""
         model_used_ref = ""
         media_analysis = ""
@@ -5258,6 +5349,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 stream_is_thinking = is_thinking
             except Exception as e:
                 remove_last_user_entry(story_id, uid=user_id)
+                write_pending_retry(story_id, uid=user_id, prompt=user_input, error=f'Story generation failed: {_friendly_api_error(e)}')
                 yield f"data: {json.dumps({'type': 'error', 'message': f'Story generation failed: {_friendly_api_error(e)}'})}\n\n"
                 return
 
@@ -5308,6 +5400,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
             if not full_response:
                 remove_last_user_entry(story_id, uid=user_id)
+                write_pending_retry(story_id, uid=user_id, prompt=user_input, error='AI generated no text. Safety filters may have blocked the response.')
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. Safety filters may have blocked the response.'})}\n\n"
                 return
 
@@ -5349,6 +5442,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
             if not full_response.strip():
                 remove_last_user_entry(story_id, uid=user_id)
+                write_pending_retry(story_id, uid=user_id, prompt=user_input, error='AI generated no visible text. Safety filters may have blocked the response.')
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. Safety filters may have blocked the response.'})}\n\n"
                 return
 
@@ -5367,6 +5461,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
                 if not full_response.strip():
                     remove_last_user_entry(story_id, uid=user_id)
+                    write_pending_retry(story_id, uid=user_id, prompt=user_input, error='AI produced an empty response after post-processing.')
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
             else:
@@ -5377,6 +5472,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
                 if not full_response.strip():
                     remove_last_user_entry(story_id, uid=user_id)
+                    write_pending_retry(story_id, uid=user_id, prompt=user_input, error='AI produced an empty response after post-processing.')
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
@@ -5447,6 +5543,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                         yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
 
             # Signal completion - only now, after story memory is fully caught up
+            clear_pending_retry(story_id, uid=user_id)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except OSError as e:
@@ -5459,21 +5556,29 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     with open(story_path, "a", encoding="utf-8") as f:
                         f.write(clean_text("\n\n" + full_response))
                     append_chat_entry(story_id, "ai", full_response, model_used_ref, uid=user_id)
+                    clear_pending_retry(story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     return
                 except Exception as save_err:
                     print(f"Failed to save partial response: {save_err}")
+            _err_msg = _friendly_api_error(e)
             remove_last_user_entry(story_id, uid=user_id)
-            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
+            write_pending_retry(story_id, uid=user_id, prompt=user_input, error=_err_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
         except Exception as e:
             print(f"AUDIO PIPELINE ERROR: {e}")
             import traceback
             traceback.print_exc()
+            _err_msg = _friendly_api_error(e)
             remove_last_user_entry(story_id, uid=user_id)
-            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
+            write_pending_retry(story_id, uid=user_id, prompt=user_input, error=_err_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
+        finally:
+            try:
+                sync_story_directory_to_firestore(user_id, story_id)
+            except Exception as sync_err:
+                print(f"  Final Firestore sync failed: {sync_err}")
 
-    if background_tasks:
-        background_tasks.add_task(sync_story_directory_to_firestore, user_id, story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/generate")
@@ -5650,6 +5755,12 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     append_chat_entry(input_data.story_id, "user", input_data.user_input, uid=user_id)
 
     def event_stream():
+        # Run the whole turn in a background thread (see _relay_stream): if the
+        # browser is closed mid-generation, the worker keeps going - the story is
+        # still saved, chat-logged, synced, and the retry marker is updated.
+        yield from _relay_stream(_generate_worker())
+
+    def _generate_worker():
         full_response = ""
         model_used_ref = ""
         last_finish_reason = ""
@@ -5752,6 +5863,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             if not full_response:
                 remove_last_user_entry(input_data.story_id, uid=user_id)
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no text. It might be blocked by safety filters.')
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. It might be blocked by safety filters.'})}\n\n"
                 return
 
@@ -5806,6 +5918,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             if not full_response.strip():
                 remove_last_user_entry(input_data.story_id, uid=user_id)
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no visible text. It might be blocked by safety filters.')
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. It might be blocked by safety filters.'})}\n\n"
                 return
             
@@ -5854,6 +5967,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
                 if not full_response.strip():
                     remove_last_user_entry(input_data.story_id, uid=user_id)
+                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.')
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
             else:
@@ -5868,6 +5982,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
                 if not full_response.strip():
                     remove_last_user_entry(input_data.story_id, uid=user_id)
+                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.')
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
@@ -5932,6 +6047,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 print(f"Skipping background analysis (Next update at turn {turn_counter + (BATCH_SIZE - (turn_counter % BATCH_SIZE))})")
 
             # Signal completion - only now, after story memory is fully caught up (or skipped)
+            clear_pending_retry(input_data.story_id, uid=user_id)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except OSError as e:
@@ -5954,17 +6070,28 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     except Exception as save_err:
                         print(f"Failed to save partial response: {save_err}")
                 # Tell the UI the turn is over (harmless if the client is really gone).
+                clear_pending_retry(input_data.story_id, uid=user_id)
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
             else:
                 print(f"STREAM ERROR: {e}")
+                _err_msg = _friendly_api_error(e)
                 remove_last_user_entry(input_data.story_id, uid=user_id)
-                yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg)
+                yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
         except Exception as e:
             print(f"STREAM ERROR: {e}")
+            _err_msg = _friendly_api_error(e)
             remove_last_user_entry(input_data.story_id, uid=user_id)
-            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_api_error(e)})}\n\n"
+            write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
+        finally:
+            # The worker thread outlives the SSE connection, so this always runs -
+            # even when the browser was closed mid-generation.
+            try:
+                sync_story_directory_to_firestore(user_id, input_data.story_id)
+            except Exception as sync_err:
+                print(f"  Final Firestore sync failed: {sync_err}")
 
-    background_tasks.add_task(sync_story_directory_to_firestore, user_id, input_data.story_id)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 # Model lists come ONLY from live provider API fetches - no hardcoded model lists.

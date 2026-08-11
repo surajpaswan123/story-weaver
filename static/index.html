@@ -1294,10 +1294,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         const storyData = await storyRes.json();
                         if (storyData.content && storyData.content.trim()) {
                             renderStoryContent(storyData.content);
+                            showPendingRetryBanner(chatData.pending_retry);
                             return;
                         }
                     }
                     storyDisplay.innerHTML = '<p class="text-stone-500 italic text-center mt-16">The page is blank. Waiting for your first words...</p>';
+                    showPendingRetryBanner(chatData.pending_retry);
                     return;
                 }
 
@@ -1312,6 +1314,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 // Render only the last CHAT_PAGE_SIZE entries
                 renderedStartIndex = Math.max(0, allChatEntries.length - CHAT_PAGE_SIZE);
                 renderBatch(renderedStartIndex, allChatEntries.length, false);
+                showPendingRetryBanner(chatData.pending_retry);
                 storyDisplay.scrollTop = storyDisplay.scrollHeight;
             } catch (err) {
                 console.error('Failed to load story:', err);
@@ -1538,6 +1541,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         // ===== STORY SUBMISSION (SSE streaming) =====
         let lastUserPrompt = '';
+        let pendingRetryPrompt = '';
 
 
 
@@ -1978,16 +1982,52 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
+        function showPendingRetryBanner(pending) {
+            if (!pending || !pending.prompt) return;
+            pendingRetryPrompt = pending.prompt;
+            const banner = document.createElement('div');
+            banner.className = 'bg-red-50/90 backdrop-blur border border-red-200 text-red-800 p-4 rounded-xl my-4 text-sm flex flex-col gap-2 shadow-sm mx-6';
+            banner.setAttribute('role', 'alert');
+            const title = document.createElement('strong');
+            title.className = 'block font-semibold text-red-900';
+            title.textContent = '⚠️ Last generation failed';
+            const desc = document.createElement('span');
+            desc.className = 'text-red-700 text-xs block';
+            desc.textContent = (pending.error || 'The last generation failed.') + ' Your prompt is still saved - run it again.';
+            const btnWrap = document.createElement('div');
+            btnWrap.className = 'flex gap-2';
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.className = 'px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors';
+            retryBtn.textContent = '🔄 Retry Failed Prompt';
+            retryBtn.addEventListener('click', () => retryLastPrompt(pendingRetryPrompt));
+            const dismissBtn = document.createElement('button');
+            dismissBtn.type = 'button';
+            dismissBtn.className = 'px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors';
+            dismissBtn.textContent = 'Dismiss';
+            dismissBtn.addEventListener('click', () => banner.remove());
+            btnWrap.appendChild(retryBtn);
+            btnWrap.appendChild(dismissBtn);
+            banner.appendChild(title);
+            banner.appendChild(desc);
+            banner.appendChild(btnWrap);
+            storyDisplay.appendChild(banner);
+        }
+
         async function retryLastPrompt(promptText) {
+            // The failed turn saved nothing to the story, so there's nothing to undo
+            // (previous successful turns stay untouched). Just clear the server-side
+            // retry marker and resubmit the prompt.
             try {
-                announceStatus('Undoing failed turn...');
-                const res = await authFetch(`/story/${currentStoryId}/undo`, { method: 'POST' });
-                if (!res.ok) {
-                    const err = await res.json();
-                    console.warn("Undo during retry noted:", err.detail || 'Undo failed');
+                const res = await authFetch(`/story/${currentStoryId}/retry`, { method: 'POST' });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.prompt) promptText = data.prompt;
+                } else {
+                    console.warn('No pending retry marker:', await res.text());
                 }
             } catch (e) {
-                console.warn("Undo during retry failed or not needed:", e);
+                console.warn('Clear pending retry failed:', e);
             }
             try {
                 await loadStory();
