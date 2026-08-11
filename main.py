@@ -6308,6 +6308,47 @@ def _created_ts(value):
     return None
 
 
+def _sorted_registered_ids(items, created_map=None):
+    """Sort provider model items (either [{"id", "created"}] dicts or plain id
+    strings) newest-first by registration date, using the version heuristic as
+    fallback for undated models. Returns deduped plain id strings - exactly
+    what the frontend dropdowns expect."""
+    created = dict(created_map or {})
+    ids = []
+    for it in items or []:
+        if isinstance(it, dict):
+            mid = it.get("id")
+            ts = it.get("created")
+        else:
+            mid = it
+            ts = None
+        if not mid:
+            continue
+        if ts:
+            created.setdefault(mid, ts)
+        ids.append(mid)
+    ids = list(dict.fromkeys(ids))
+
+    def _key(m):
+        v = _model_version_tuple(m)
+        ts = created.get(m)
+        if ts:
+            return (float(ts), v[0], v[1])
+        return (0.0, v[0], v[1])  # undated models sort after dated ones
+
+    return sorted(ids, key=_key, reverse=True)
+
+
+def _dropdown_models(provider_key, live_result=None):
+    """Build the dropdown model list for a provider: prefer the live fetch
+    result (already {id, created} items), else the cached list + created map.
+    Sorted newest-first by registration date."""
+    if live_result and live_result[1]:
+        return _sorted_registered_ids(live_result[1])
+    cached = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}) or {}
+    return _sorted_registered_ids(cached.get("models", []) or [], cached.get("created", {}) or {})
+
+
 def fetch_openai_live_models(api_key: str = None, base_url: str = None):
     key = api_key or os.getenv("OPENAI_API_KEY")
     url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/models"
@@ -6560,7 +6601,13 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
 
     is_super_admin = user_info.get("is_super_admin", False)
     if is_super_admin:
-        return {"providers": DYNAMIC_PROVIDER_MODELS}
+        providers = {}
+        for pkey, pinfo in (DYNAMIC_PROVIDER_MODELS or {}).items():
+            providers[pkey] = {
+                "name": pinfo.get("name", pkey.title()),
+                "models": _dropdown_models(pkey),
+            }
+        return {"providers": providers}
 
     # Standard User: Only return providers for which the user has configured an API key
     uid = user_info.get("uid", "default_user")
@@ -6569,29 +6616,29 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     allowed_providers = {}
     if user_keys.get("gemini_api_key"):
         live_google = fetch_google_live_models(user_keys["gemini_api_key"])
-        models_list = live_google[1] if live_google else DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", [])
+        models_list = _dropdown_models("google", live_google)
         if models_list:
-            allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": list(dict.fromkeys(models_list))}
+            allowed_providers["google"] = {"name": "Google GenAI (Gemini)", "models": models_list}
     if user_keys.get("openai_api_key"):
         live_openai = fetch_openai_live_models(user_keys["openai_api_key"], user_keys.get("openai_base_url"))
-        models_list = live_openai[1] if live_openai else DYNAMIC_PROVIDER_MODELS.get("openai", {}).get("models", [])
+        models_list = _dropdown_models("openai", live_openai)
         if models_list:
-            allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": list(dict.fromkeys(models_list))}
+            allowed_providers["openai"] = {"name": "OpenAI (User Key)", "models": models_list}
     if user_keys.get("openrouter_api_key"):
         live_or = fetch_openrouter_live_models(user_keys["openrouter_api_key"])
-        models_list = live_or[1] if live_or else DYNAMIC_PROVIDER_MODELS.get("openrouter", {}).get("models", [])
+        models_list = _dropdown_models("openrouter", live_or)
         if models_list:
-            allowed_providers["openrouter"] = {"name": "OpenRouter", "models": list(dict.fromkeys(models_list))}
+            allowed_providers["openrouter"] = {"name": "OpenRouter", "models": models_list}
     if user_keys.get("groq_api_key"):
         live_groq = fetch_groq_live_models(user_keys["groq_api_key"])
-        models_list = live_groq[1] if live_groq else DYNAMIC_PROVIDER_MODELS.get("groq", {}).get("models", [])
+        models_list = _dropdown_models("groq", live_groq)
         if models_list:
-            allowed_providers["groq"] = {"name": "Groq", "models": list(dict.fromkeys(models_list))}
+            allowed_providers["groq"] = {"name": "Groq", "models": models_list}
     if user_keys.get("nvidia_api_key"):
         live_nv = fetch_nvidia_live_models(user_keys["nvidia_api_key"])
-        models_list = live_nv[1] if live_nv else DYNAMIC_PROVIDER_MODELS.get("nvidia", {}).get("models", [])
+        models_list = _dropdown_models("nvidia", live_nv)
         if models_list:
-            allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": list(dict.fromkeys(models_list))}
+            allowed_providers["nvidia"] = {"name": "NVIDIA NIM", "models": models_list}
 
     if not allowed_providers:
         allowed_providers = {
