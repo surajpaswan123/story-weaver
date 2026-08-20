@@ -1,4 +1,10 @@
 @echo off
+setlocal
+set "APP_DIR=%~dp0"
+set "PROXY_DIR=%USERPROFILE%\Documents\gemini-nokey"
+set "NODE_EXE=%USERPROFILE%\Documents\node-v22.16.0-win-x64\node.exe"
+if not exist "%NODE_EXE%" set "NODE_EXE=node"
+
 echo ===================================================
 echo     Story Weaver & AI Proxy Startup Script
 echo ===================================================
@@ -14,13 +20,16 @@ timeout /t 2 >nul
 echo.
 
 echo [2/4] Starting Gemini-Nokey Local AI Proxy...
-:: We use the absolute path to Node.js since it was missing from your system PATH
-start "Gemini-Nokey Proxy" cmd /k "title Gemini-Nokey Proxy && cd /d C:\Users\suraj\Documents\gemini-nokey && C:\Users\suraj\Documents\node-v22.16.0-win-x64\node.exe node.mjs --host 0.0.0.0 --port 8080"
-echo   - Proxy launched in a new window on port 8080.
+if exist "%PROXY_DIR%\node.mjs" (
+    start "Gemini-Nokey Proxy" cmd /k "title Gemini-Nokey Proxy && cd /d ""%PROXY_DIR%"" && ""%NODE_EXE%"" node.mjs --host 127.0.0.1 --port 8080"
+    echo   - Proxy launched locally on 127.0.0.1:8080.
+) else (
+    echo   - Proxy not found at "%PROXY_DIR%"; continuing without it.
+)
 echo.
 
 echo [3/4] Starting Story Weaver Backend...
-start "Story Weaver Server" cmd /k "title Story Weaver Backend && cd /d C:\Users\suraj\AppData\Local\Packages\1527c705-839a-4832-9118-54d4Bd6a0c89_cw5n1h2txyewy\LocalState\story-weaver && python main.py"
+start "Story Weaver Server" cmd /k "title Story Weaver Backend && cd /d ""%APP_DIR%"" && python main.py"
 echo   - Backend launched in a new window on port 8000.
 echo.
 

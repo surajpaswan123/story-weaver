@@ -15,8 +15,6 @@
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 let isGuestMode = false;
-let guestGenerationCount = 0;
-const GUEST_NAG_INTERVAL = 2; // Show nag dialog every N generations
 
 
 
@@ -104,10 +102,10 @@ function renderUserSettingsUI() {
     if (currentUserSettings.is_super_admin) {
         if (adminBadge) {
             adminBadge.className = 'px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1';
-            adminBadge.innerHTML = '👑 Super Admin (Server .ENV Keys Active)';
+            adminBadge.innerHTML = '👑 Super Admin';
         }
         if (statusNotice) {
-            statusNotice.innerHTML = '<div class="p-3 rounded-lg bg-amber-950/40 border border-amber-700/50 text-amber-200 text-xs leading-relaxed">👑 <strong>Super Admin Access:</strong> You are logged in as <code>surajssd1000@gmail.com</code>. All server system API keys (.env) are automatically active for your account! Custom keys below are optional.</div>';
+            statusNotice.innerHTML = '<div class="p-3 rounded-lg bg-amber-950/40 border border-amber-700/50 text-amber-200 text-xs leading-relaxed">👑 <strong>Super Admin Access:</strong> Configure your own provider keys below. If the local keyless proxy is running, it is also available as a fallback.</div>';
         }
     } else {
         if (adminBadge) {
@@ -115,7 +113,7 @@ function renderUserSettingsUI() {
             adminBadge.innerHTML = '👤 Standard User (Custom Key Required)';
         }
         if (statusNotice) {
-            statusNotice.innerHTML = '<div class="p-3 rounded-lg bg-blue-950/40 border border-blue-700/50 text-blue-200 text-xs leading-relaxed">👤 <strong>Standard User Mode:</strong> Super Admin keys are reserved for surajssd1000@gmail.com. Please enter your Google GenAI or OpenAI API Key below to enable story generation.</div>';
+            statusNotice.innerHTML = '<div class="p-3 rounded-lg bg-blue-950/40 border border-blue-700/50 text-blue-200 text-xs leading-relaxed">👤 <strong>Standard User Mode:</strong> Add your own Google GenAI, OpenAI, OpenRouter, Groq, or NVIDIA API key below to enable story generation.</div>';
         }
     }
 
@@ -147,8 +145,8 @@ function renderUserSettingsUI() {
     updateKeyStatus('input-groq-key', 'status-groq-key', masked.groq_api_key, 'gsk_...');
     updateKeyStatus('input-nvidia-key', 'status-nvidia-key', masked.nvidia_api_key, 'nvapi-...');
 
-    if (masked.openai_base_url && document.getElementById('input-openai-base-url')) {
-        document.getElementById('input-openai-base-url').placeholder = `Current: ${masked.openai_base_url}`;
+    if (document.getElementById('input-openai-base-url')) {
+        document.getElementById('input-openai-base-url').value = masked.openai_base_url || 'https://api.openai.com/v1';
     }
 
     if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
@@ -159,11 +157,11 @@ function renderUserSettingsUI() {
     // Local OpenAI-compatible server (browser-direct)
     const localEnabledInput = document.getElementById('input-local-enabled');
     if (localEnabledInput) localEnabledInput.checked = !!masked.local_enabled;
-    if (masked.local_base_url && document.getElementById('input-local-base-url')) {
-        document.getElementById('input-local-base-url').placeholder = `Current: ${masked.local_base_url}`;
+    if (document.getElementById('input-local-base-url')) {
+        document.getElementById('input-local-base-url').value = masked.local_base_url || '';
     }
-    if (masked.local_name && document.getElementById('input-local-name')) {
-        document.getElementById('input-local-name').placeholder = `Current: ${masked.local_name}`;
+    if (document.getElementById('input-local-name')) {
+        document.getElementById('input-local-name').value = masked.local_name || '';
     }
 
     // Local per-task model overrides
@@ -207,6 +205,9 @@ async function saveUserSettings(e) {
         local_background_model: document.getElementById('input-local-background-model')?.value?.trim() || '',
         local_rules_model: document.getElementById('input-local-rules-model')?.value?.trim() || '',
         local_audio_model: document.getElementById('input-local-audio-model')?.value?.trim() || '',
+        clear_keys: document.getElementById('clear-api-keys')?.checked
+            ? ['gemini_api_key', 'openai_api_key', 'openrouter_api_key', 'groq_api_key', 'nvidia_api_key', 'local_api_key']
+            : [],
     };
 
     try {
@@ -215,7 +216,8 @@ async function saveUserSettings(e) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Settings request failed (HTTP ${res.status})`);
 
         if (msg) {
             msg.className = 'text-xs text-emerald-400 font-medium py-1';
@@ -232,6 +234,7 @@ async function saveUserSettings(e) {
         if (document.getElementById('input-local-key')) document.getElementById('input-local-key').value = '';
         if (document.getElementById('input-local-base-url')) document.getElementById('input-local-base-url').value = '';
         if (document.getElementById('input-local-name')) document.getElementById('input-local-name').value = '';
+        if (document.getElementById('clear-api-keys')) document.getElementById('clear-api-keys').checked = false;
 
         await fetchUserSettings();
         // Refresh provider/model dropdowns to reflect newly saved API keys
@@ -999,7 +1002,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function loadStoryList() {
             try {
                 const res = await authFetch('/stories');
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Failed to load stories');
                 storyList.innerHTML = '';
 
                 if (data.stories.length === 0) {
@@ -1058,6 +1061,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function createNewStory() {
+            if (isGuestMode) {
+                showGuestNagDialog();
+                return;
+            }
             const name = prompt('Enter story name:');
             if (!name || !name.trim()) return;
 
@@ -1067,15 +1074,20 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: name.trim() })
                 });
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Failed to create story');
                 switchStory(data.id, name.trim());
                 loadStoryList();
             } catch (err) {
                 console.error('Failed to create story:', err);
+                alert(err.message || 'Failed to create story.');
             }
         }
 
         async function deleteStory(storyId) {
+            if (isGuestMode) {
+                showGuestNagDialog();
+                return;
+            }
             if (!confirm(`Delete this story and ALL its files? This cannot be undone.`)) return;
             try {
                 const res = await authFetch(`/story/${storyId}`, { method: 'DELETE' });
@@ -1452,7 +1464,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function loadSummary() {
             try {
                 const res = await authFetch(`/story/${currentStoryId}/summary`);
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Failed to load summary');
                 document.getElementById('summary-textarea').value = data.summary || '';
                 document.getElementById('summary-status').textContent = data.summary ? 'Last loaded just now' : 'No summary yet — it will be created after AI generates content.';
             } catch (err) {
@@ -1463,11 +1475,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveSummary() {
             const text = document.getElementById('summary-textarea').value;
             try {
-                await authFetch(`/story/${currentStoryId}/summary`, {
+                const res = await authFetch(`/story/${currentStoryId}/summary`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ summary: text })
                 });
+                await requireJsonResponse(res, 'Failed to save summary');
                 document.getElementById('summary-status').textContent = 'Saved!';
                 announceToScreenReader('Summary saved successfully.');
                 setTimeout(() => { document.getElementById('summary-status').textContent = ''; }, 2000);
@@ -1481,7 +1494,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function loadStyle() {
             try {
                 const res = await authFetch(`/story/${currentStoryId}/style`);
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Failed to load style');
                 document.getElementById('style-textarea').value = data.text || '';
                 document.getElementById('style-status').textContent = data.text ? 'Loaded' : 'No style guide yet — add your writing preferences.';
             } catch (err) { console.error('Failed to load style:', err); }
@@ -1490,11 +1503,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveStyle() {
             const text = document.getElementById('style-textarea').value;
             try {
-                await authFetch(`/story/${currentStoryId}/style`, {
+                const res = await authFetch(`/story/${currentStoryId}/style`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: text })
                 });
+                await requireJsonResponse(res, 'Failed to save style');
                 document.getElementById('style-status').textContent = 'Saved!';
                 announceToScreenReader('Style guide saved.');
                 setTimeout(() => { document.getElementById('style-status').textContent = ''; }, 2000);
@@ -1507,7 +1521,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function loadRules() {
             try {
                 const res = await authFetch(`/story/${currentStoryId}/rules`);
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Failed to load rules');
                 document.getElementById('rules-textarea').value = data.text || '';
                 document.getElementById('rules-status').textContent = data.text ? 'Loaded' : 'No rules yet — define your world constraints.';
             } catch (err) { console.error('Failed to load rules:', err); }
@@ -1516,11 +1530,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function saveRules() {
             const text = document.getElementById('rules-textarea').value;
             try {
-                await authFetch(`/story/${currentStoryId}/rules`, {
+                const res = await authFetch(`/story/${currentStoryId}/rules`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: text })
                 });
+                await requireJsonResponse(res, 'Failed to save rules');
                 document.getElementById('rules-status').textContent = 'Saved!';
                 announceToScreenReader('World rules saved.');
                 setTimeout(() => { document.getElementById('rules-status').textContent = ''; }, 2000);
@@ -1577,6 +1592,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         async function submitStory(overrideText, bypassCheck = false) {
             const text = (typeof overrideText === 'string' ? overrideText : input.value.trim());
             if (!text) return;
+            if (isGuestMode) {
+                showGuestNagDialog();
+                return;
+            }
 
             // API key & Override Check for Standard Users
             if (!bypassCheck) {
@@ -1624,13 +1643,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             input.value = '';
             input.disabled = true;
             sendBtn.disabled = true;
-            // Guest nag dialog every few generations
-            if (isGuestMode) {
-                guestGenerationCount++;
-                if (guestGenerationCount % GUEST_NAG_INTERVAL === 0) {
-                    showGuestNagDialog();
-                }
-            }
             announceStatus('Generating response...');
 
             // Show user prompt block
@@ -1896,6 +1908,15 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                         thinkingPanel.querySelector('.thinking-panel').textContent = thinkingText.trim();
                                         thinkingToggleBtn.style.display = '';
                                     }
+                                    storyDisplay.scrollTop = storyDisplay.scrollHeight;
+                                } else if (payload.type === 'replace') {
+                                    // The server has finished cleanup/rules processing. Replace
+                                    // the live draft with the exact text committed to story.md.
+                                    fullResponseText = payload.text || '';
+                                    textBuffer = '';
+                                    isInThinking = false;
+                                    lastChunkPayload = '';
+                                    body.textContent = fullResponseText.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
                                     storyDisplay.scrollTop = storyDisplay.scrollHeight;
                                 } else if (payload.type === 'finalizing') {
                                     // Story text is done, but the server is still updating its background
@@ -2320,7 +2341,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (userName) userName.textContent = 'Guest User';
             currentUser = { email: 'guest@storyweaver.local', displayName: 'Guest User' };
             isGuestMode = true;
-            guestGenerationCount = 0;
             showGuestBanner();
             applyGuestRestrictions();
             loadStoryList();
@@ -2350,6 +2370,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 options.headers['Authorization'] = `Bearer ${currentUserToken}`;
             }
             return fetch(url, options);
+        }
+
+        async function requireJsonResponse(res, fallbackMessage = 'Request failed') {
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.detail || `${fallbackMessage} (HTTP ${res.status})`);
+            }
+            return data;
         }
 
         // ===== PROVIDER & MODEL SELECTION LOGIC WITH AUTO-RETRY & PROGRESS BAR =====
@@ -2562,12 +2590,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // Browser-direct background analysis: build the prompt server-side, run it
         // on the local model, then apply the result server-side (same parse/write
         // logic as the cloud path). Non-critical - failures never fail the turn.
-        async function runLocalAnalysis(cfg, model, baseUrl, headers, newText, send) {
+        async function runLocalAnalysis(cfg, model, baseUrl, headers, storyId, turnToken, newText, send) {
             try {
-                const analyzeRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-analyze`, {
+                const analyzeRes = await authFetch(`/story/${encodeURIComponent(storyId)}/local-analyze`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ new_text: newText })
+                    body: JSON.stringify({ new_text: newText, turn_token: turnToken })
                 });
                 if (!analyzeRes.ok) return;
                 const ad = await analyzeRes.json();
@@ -2589,17 +2617,20 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const anaBody = await anaRes.json();
                 const output = (anaBody.choices && anaBody.choices[0] && anaBody.choices[0].message && anaBody.choices[0].message.content) || '';
                 if (!output.trim()) return;
-                await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-analyze-save`, {
+                const saveRes = await authFetch(`/story/${encodeURIComponent(storyId)}/local-analyze-save`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ output: output, model: model })
+                    body: JSON.stringify({ output: output, model: model, turn_token: turnToken })
                 });
+                if (!saveRes.ok) console.warn('Local analysis save failed (HTTP ' + saveRes.status + ')');
             } catch (e) {
                 console.warn('Local background analysis failed (non-critical):', e);
             }
         }
 
         async function runLocalGeneration(userText, modelVal, audioInfo) {
+            const turnStoryId = currentStoryId;
+            let turnToken = '';
             const cfg = getLocalServerConfig();
             if (!cfg.baseUrl) throw new Error('Local server not configured. Add a base URL in Settings → Local OpenAI-Compatible Server.');
             const skipRulesCheck = !!document.getElementById('skip-rules-check')?.checked;
@@ -2609,12 +2640,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const formData = new FormData();
                 formData.append('user_input', userText);
                 formData.append('audio', audioInfo.file);
-                beginRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-audio-begin`, {
+                beginRes = await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-audio-begin`, {
                     method: 'POST',
                     body: formData
                 });
             } else {
-                beginRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-begin`, {
+                beginRes = await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-begin`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_input: userText })
@@ -2626,6 +2657,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 throw new Error(errText || 'Failed to start local generation (HTTP ' + beginRes.status + ')');
             }
             const beginData = await beginRes.json();
+            turnToken = beginData.turn_token || '';
+            if (!turnToken) throw new Error('Server did not return a local generation turn token.');
+            const savedAudioName = beginData.audio_name || ((audioInfo && audioInfo.name) || '');
             const systemMsg = beginData.system_msg || '';
             const userMsg = beginData.user_msg || userText;
 
@@ -2642,7 +2676,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const models = await fetchLocalModels(cfg).catch(() => []);
                 baseModel = models[0] || '';
             }
-            if (!baseModel) throw new Error('No model selected and the local server reported none. Start a model in Ollama / LM Studio first.');
+            if (!baseModel) {
+                try {
+                    await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-turn-end`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ turn_token: turnToken })
+                    });
+                } catch (e) {}
+                turnToken = '';
+                throw new Error('No model selected and the local server reported none. Start a model in Ollama / LM Studio first.');
+            }
             const storyModel = (audioInfo && audioInfo.file) ? (localAudioModel || localStoryModel || baseModel) : (localStoryModel || baseModel);
             const rulesModel = localRulesModel || baseModel;
             const backgroundModel = localBackgroundModel || baseModel;
@@ -2780,32 +2824,42 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     }
                 }
 
-                const finishRes = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-finish`, {
+                const finishRes = await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-finish`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: saveText, user_input: userText, model: storyModel, error: '', audio_name: (audioInfo && audioInfo.name) || '' })
+                    body: JSON.stringify({ text: saveText, user_input: userText, model: storyModel, error: '', audio_name: savedAudioName, turn_token: turnToken })
                 });
-                const finishData = await finishRes.json().catch(() => ({}));
+                const finishData = await requireJsonResponse(finishRes, 'Failed to save local generation');
+                if (!finishData.ok) throw new Error(finishData.error || 'The server could not commit the local generation.');
                 if (finishData && finishData.truncated) {
                     send({ type: 'warning', message: 'The response may have been cut off by the model length limit.' });
                 }
                 // Background memory update on the local model too (every BATCH_SIZE-th turn).
                 if (finishData && finishData.saved) {
-                    await runLocalAnalysis(cfg, backgroundModel, baseUrl, headers, saveText, send);
+                    await runLocalAnalysis(cfg, backgroundModel, baseUrl, headers, turnStoryId, turnToken, saveText, send);
                 }
                 send({ type: 'done' });
             } catch (err) {
                 // Report the failure server-side so the pending-retry marker is set
                 // and the logged prompt is dropped.
                 try {
-                    await authFetch(`/story/${encodeURIComponent(currentStoryId)}/local-finish`, {
+                    await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-finish`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: '', user_input: userText, model: storyModel, error: String(err && err.message ? err.message : err).slice(0, 300), audio_name: (audioInfo && audioInfo.name) || '' })
+                        body: JSON.stringify({ text: '', user_input: userText, model: storyModel, error: String(err && err.message ? err.message : err).slice(0, 300), audio_name: savedAudioName, turn_token: turnToken })
                     });
                 } catch (e) {}
                 send({ type: 'error', message: (err && err.message) || 'Local generation failed' });
             } finally {
+                if (turnToken) {
+                    try {
+                        await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-turn-end`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ turn_token: turnToken })
+                        });
+                    } catch (e) {}
+                }
                 try { controller.close(); } catch (e) {}
             }
             return response;
@@ -2818,7 +2872,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             banner.id = 'guest-banner';
             banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(135deg,#f59e0b,#d97706);color:#1c1917;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
             banner.innerHTML = `
-                <span>⚡ You're in Guest Mode — Sign in with Google for unlimited access, audio upload, rules editor & more!</span>
+                <span>⚡ You're in read-only Guest Mode — sign in with Google to create, edit, or generate stories.</span>
                 <button onclick="handleGoogleLogin()" style="background:#1c1917;color:#fbbf24;border:none;padding:6px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;white-space:nowrap;">Sign In Now →</button>
             `;
             document.body.prepend(banner);
@@ -2847,11 +2901,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         Sign in with Google to unlock:
                     </p>
                     <ul style="color:#d6d3d1;font-size:12px;text-align:left;margin:0 auto 20px;max-width:280px;line-height:2;">
-                        <li>✅ Unlimited story generations</li>
+                        <li>✅ Create and generate stories</li>
                         <li>✅ Audio file upload & analysis</li>
                         <li>✅ Rules & Style editor</li>
                         <li>✅ Custom API keys & model selection</li>
-                        <li>✅ Permanent story saving</li>
+                        <li>✅ Private, account-scoped story saving</li>
                     </ul>
                     <div style="display:flex;gap:10px;justify-content:center;">
                         <button onclick="handleGoogleLogin();document.getElementById('guest-nag-overlay')?.remove();" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#1c1917;border:none;padding:10px 24px;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px;">Sign In with Google</button>
@@ -2872,44 +2926,54 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 audioBtn.title = 'Sign in to use audio upload';
                 audioBtn.onclick = (e) => { e.preventDefault(); showGuestNagDialog(); };
             }
-            // Disable settings button
-            const settingsBtn = document.getElementById('settings-btn');
-            if (settingsBtn) settingsBtn.title = 'Sign in to access settings';
-            // Make rules tab show locked state
-            const rulesTab = document.querySelector('[data-tab="tab-rules"]');
-            if (rulesTab) {
-                rulesTab.addEventListener('click', () => {
-                    if (isGuestMode) {
-                        setTimeout(() => {
-                            const rulesArea = document.getElementById('rules-textarea');
-                            if (rulesArea) { rulesArea.disabled = true; rulesArea.placeholder = '🔒 Sign in with Google to edit world rules.'; }
-                            document.querySelectorAll('#tab-rules button').forEach(b => { if (b.textContent.includes('Save')) { b.disabled = true; b.style.opacity = '0.4'; } });
-                        }, 100);
+            // Lock account settings and server logs. The old code targeted a
+            // nonexistent settings-btn, leaving the real button fully active.
+            const settingsBtn = document.getElementById('open-settings-btn');
+            if (settingsBtn) {
+                settingsBtn.title = 'Sign in to access settings';
+                settingsBtn.onclick = (e) => { e.preventDefault(); showGuestNagDialog(); };
+            }
+            const logsBtn = document.getElementById('toggle-logs-btn');
+            if (logsBtn) {
+                logsBtn.title = 'Server logs are restricted to the super admin';
+                logsBtn.onclick = (e) => { e.preventDefault(); showGuestNagDialog(); };
+            }
+            const lockedEditors = [
+                ['summary', 'Sign in with Google to edit the story summary.'],
+                ['style', 'Sign in with Google to edit the writing style.'],
+                ['rules', 'Sign in with Google to edit world rules.'],
+            ];
+            lockedEditors.forEach(([name, message]) => {
+                const area = document.getElementById(`${name}-textarea`);
+                if (area) { area.disabled = true; area.title = message; }
+                document.querySelectorAll(`#tab-${name} button`).forEach(button => {
+                    if (button.textContent.includes('Save')) {
+                        button.disabled = true;
+                        button.style.opacity = '0.4';
+                        button.title = message;
                     }
                 });
-            }
-            // Make style tab show locked state
-            const styleTab = document.querySelector('[data-tab="tab-style"]');
-            if (styleTab) {
-                styleTab.addEventListener('click', () => {
-                    if (isGuestMode) {
-                        setTimeout(() => {
-                            const styleArea = document.getElementById('style-textarea');
-                            if (styleArea) { styleArea.disabled = true; styleArea.placeholder = '🔒 Sign in with Google to edit writing style.'; }
-                            document.querySelectorAll('#tab-style button').forEach(b => { if (b.textContent.includes('Save')) { b.disabled = true; b.style.opacity = '0.4'; } });
-                        }, 100);
-                    }
-                });
-            }
+            });
         }
 
         function removeGuestRestrictions() {
             const audioBtn = document.getElementById('audio-btn');
             if (audioBtn) { audioBtn.disabled = false; audioBtn.style.opacity = ''; audioBtn.style.cursor = ''; audioBtn.title = 'Attach audio'; audioBtn.onclick = null; }
-            const rulesArea = document.getElementById('rules-textarea');
-            if (rulesArea) { rulesArea.disabled = false; rulesArea.placeholder = ''; }
-            const styleArea = document.getElementById('style-textarea');
-            if (styleArea) { styleArea.disabled = false; styleArea.placeholder = ''; }
+            ['summary', 'style', 'rules'].forEach(name => {
+                const area = document.getElementById(`${name}-textarea`);
+                if (area) { area.disabled = false; area.title = ''; }
+                document.querySelectorAll(`#tab-${name} button`).forEach(button => {
+                    if (button.textContent.includes('Save')) {
+                        button.disabled = false;
+                        button.style.opacity = '';
+                        button.title = '';
+                    }
+                });
+            });
+            const settingsBtn = document.getElementById('open-settings-btn');
+            if (settingsBtn) { settingsBtn.title = 'Open settings'; settingsBtn.onclick = toggleSettingsModal; }
+            const logsBtn = document.getElementById('toggle-logs-btn');
+            if (logsBtn) { logsBtn.title = 'Toggle server logs'; logsBtn.onclick = toggleLogsSidebar; }
         }
 
         // ===== INIT =====
@@ -3121,6 +3185,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     </div>
                 </div>
             </div>
+
+            <label class="flex items-start gap-2 rounded-lg border border-red-900/50 bg-red-950/20 p-3 text-xs text-red-200">
+                <input id="clear-api-keys" type="checkbox" class="mt-0.5 accent-red-500">
+                <span><strong>Clear all saved API keys</strong><br><span class="text-red-300/80">Checked keys are permanently removed when you save. Model and endpoint preferences are kept.</span></span>
+            </label>
 
             <div id="settings-status-msg" class="min-h-[20px]"></div>
 

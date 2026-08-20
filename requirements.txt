@@ -1,8 +1,8 @@
-fastapi
-uvicorn
-python-multipart
-google-genai
-python-dotenv
-openai
-firebase-admin
-psycopg2-binary
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.9,<1
+google-genai>=1,<3
+python-dotenv>=1,<2
+openai>=1.50,<4
+firebase-admin>=6.5,<8
+psycopg2-binary>=2.9,<3

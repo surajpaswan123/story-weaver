@@ -35,12 +35,18 @@ from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os
 import json
 import time
 import threading
 import queue
+import ipaddress
+import socket
+import tempfile
+import uuid
+import urllib.parse
+import re
 from collections import deque
 from google import genai
 from google.genai import types
@@ -134,16 +140,26 @@ def _get_client_ip(request) -> str:
     honored when TRUST_PROXY_HEADERS=true. Otherwise anyone could spoof them to
     impersonate another guest's IP-derived UID."""
     if TRUST_PROXY_HEADERS and hasattr(request, 'headers'):
-        forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+        # Cloudflare overwrites CF-Connecting-IP with the actual client address.
+        # If it is unavailable, use the rightmost X-Forwarded-For hop: callers can
+        # prepend arbitrary values, which made the previous first-hop logic a
+        # guest-workspace impersonation primitive on the live deployment.
+        cloudflare_ip = request.headers.get("cf-connecting-ip")
+        if cloudflare_ip:
+            return cloudflare_ip.strip()
+        forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return forwarded.split(",")[-1].strip()
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
     if hasattr(request, 'client') and request.client:
         return request.client.host
     return "unknown"
 
 def _ip_to_guest_uid(ip: str) -> str:
     """Convert an IP address to a deterministic guest UID."""
-    ip_hash = hashlib.md5(ip.encode()).hexdigest()[:12]
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:20]
     return f"guest_{ip_hash}"
 
 def get_current_user_id(request: Request = None, authorization: str = Header(None)) -> str:
@@ -189,13 +205,30 @@ def get_current_user_id(request: Request = None, authorization: str = Header(Non
 
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "surajssd1000@gmail.com").strip().lower()
 
+
+def _is_public_deployment_environment(environment=None) -> bool:
+    """Detect common hosted runtimes where local-only auth fallbacks are unsafe."""
+    env = environment if environment is not None else os.environ
+    return any(env.get(name) for name in (
+        "RENDER", "RENDER_SERVICE_ID", "K_SERVICE", "WEBSITE_HOSTNAME", "DYNO", "PORT",
+    ))
+
+
+IS_PUBLIC_DEPLOYMENT = _is_public_deployment_environment()
+
 # Unverified JWT payload decoding (no signature check) is ONLY permitted in local mode
 # (no Firebase Admin credentials). On any deployment where Firebase is initialized,
 # only admin-SDK-verified ID tokens are trusted; forged tokens fall back to guest mode.
-ALLOW_UNVERIFIED_JWT = os.getenv("ALLOW_UNVERIFIED_JWT", "auto").strip().lower()
-if ALLOW_UNVERIFIED_JWT == "auto":
-    ALLOW_UNVERIFIED_JWT = "true" if not firebase_initialized else "false"
-ALLOW_UNVERIFIED_JWT = ALLOW_UNVERIFIED_JWT == "true"
+_unverified_jwt_setting = os.getenv("ALLOW_UNVERIFIED_JWT", "auto").strip().lower()
+if _unverified_jwt_setting == "auto":
+    _unverified_jwt_setting = "true" if not firebase_initialized and not IS_PUBLIC_DEPLOYMENT else "false"
+ALLOW_UNVERIFIED_JWT = (
+    _unverified_jwt_setting == "true"
+    and not firebase_initialized
+    and not IS_PUBLIC_DEPLOYMENT
+)
+if _unverified_jwt_setting == "true" and not ALLOW_UNVERIFIED_JWT:
+    print("[SECURITY] Ignoring ALLOW_UNVERIFIED_JWT=true outside an unhosted local server.")
 if ALLOW_UNVERIFIED_JWT:
     print("[SECURITY WARNING] Unverified JWT tokens are accepted (local mode, no Firebase Admin). "
           "Set Firebase credentials or ALLOW_UNVERIFIED_JWT=false before exposing this server publicly.")
@@ -242,10 +275,15 @@ def get_current_user_info(request: Request = None, authorization: str = Header(N
     # STRICT SUPER ADMIN CHECK: Only surajssd1000@gmail.com is Super Admin!
     if user_info["email"] and user_info["email"].lower() == SUPER_ADMIN_EMAIL.lower():
         user_info["is_super_admin"] = True
-    elif not authorization and os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "false").lower() == "true":
+    elif (
+        not authorization
+        and not IS_PUBLIC_DEPLOYMENT
+        and os.getenv("ALLOW_LOCAL_SUPER_ADMIN", "false").lower() == "true"
+    ):
         # Only allow unauthenticated fallback if explicitly set to true in env
         user_info["is_super_admin"] = True
         user_info["email"] = SUPER_ADMIN_EMAIL
+        user_info["is_guest"] = False
     else:
         user_info["is_super_admin"] = False
 
@@ -258,12 +296,188 @@ def get_current_user_info(request: Request = None, authorization: str = Header(N
 
     return user_info
 
+
+def require_authenticated_user(user_info: dict = Depends(get_current_user_info)) -> dict:
+    """Reject guest callers for account-level or persistent editing features."""
+    if user_info.get("is_guest", True):
+        raise HTTPException(status_code=403, detail="Sign in with Google to use this feature")
+    return user_info
+
 def get_user_keys_file(uid: str) -> str:
     """Get absolute path to user_keys.json inside user stories directory."""
     safe_uid = re.sub(r'[^a-zA-Z0-9_-]', '_', uid or "default_user").lower()
     user_dir = os.path.join(STORIES_DIR, safe_uid)
     os.makedirs(user_dir, exist_ok=True)
     return os.path.join(user_dir, "user_keys.json")
+
+
+def _atomic_write_text(path: str, content: str, encoding: str = "utf-8") -> None:
+    """Replace a text file atomically so a crash cannot leave a half-written file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".story-weaver-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path: str, value, *, indent: int | None = None) -> None:
+    _atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=indent))
+
+
+def _atomic_write_bytes(path: str, content: bytes) -> None:
+    """Replace a binary file atomically so interrupted uploads leave no partial file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".story-weaver-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+WINDOWS_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
+
+
+def sanitize_id(name: str) -> str:
+    """Make a stable, ASCII-only identifier safe for Windows folder names."""
+    safe = "".join(
+        c for c in str(name or "").lower().replace(" ", "-")
+        if c.isascii() and (c.isalnum() or c in "-_")
+    )
+    safe = re.sub(r'-+', '-', safe).strip('-_')
+    safe = (safe or "untitled")[:80].rstrip(" .") or "untitled"
+    if safe.casefold() in WINDOWS_RESERVED_NAMES:
+        safe = f"story-{safe}"
+    return safe
+
+
+_story_locks: dict[tuple[str, str], threading.RLock] = {}
+_story_locks_guard = threading.Lock()
+_active_story_turns: dict[tuple[str, str], tuple[str, float]] = {}
+_active_story_turns_guard = threading.Lock()
+STORY_TURN_TTL_SECONDS = 30 * 60
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+def get_story_lock(story_id: str, uid: str = "default_user") -> threading.RLock:
+    """Return the process-local lock that serializes mutations for one user's story."""
+    key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+    with _story_locks_guard:
+        lock = _story_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _story_locks[key] = lock
+        return lock
+
+
+def begin_story_turn(story_id: str, uid: str = "default_user") -> str:
+    """Reserve a story turn or reject a concurrent generation from another tab."""
+    key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+    now = time.time()
+    with _active_story_turns_guard:
+        current = _active_story_turns.get(key)
+        if current and now - current[1] < STORY_TURN_TTL_SECONDS:
+            raise HTTPException(status_code=409, detail="Another generation is already running for this story")
+        token = uuid.uuid4().hex
+        _active_story_turns[key] = (token, now)
+        return token
+
+
+def end_story_turn(story_id: str, uid: str, token: str) -> None:
+    key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+    with _active_story_turns_guard:
+        current = _active_story_turns.get(key)
+        if current and current[0] == token:
+            _active_story_turns.pop(key, None)
+
+
+def story_turn_is_active(story_id: str, uid: str = "default_user") -> bool:
+    key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+    with _active_story_turns_guard:
+        current = _active_story_turns.get(key)
+        if not current:
+            return False
+        if time.time() - current[1] >= STORY_TURN_TTL_SECONDS:
+            _active_story_turns.pop(key, None)
+            return False
+        return True
+
+
+def validate_story_turn_token(story_id: str, uid: str, token: str) -> None:
+    """Require the browser-direct caller to own the active turn reservation."""
+    key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+    now = time.time()
+    with _active_story_turns_guard:
+        current = _active_story_turns.get(key)
+        if not current or now - current[1] >= STORY_TURN_TTL_SECONDS:
+            _active_story_turns.pop(key, None)
+            raise HTTPException(status_code=409, detail="This generation turn has expired or is no longer active")
+        if not token or current[0] != token:
+            raise HTTPException(status_code=409, detail="Generation turn token does not match the active story turn")
+        # Refresh the reservation while a multi-step local turn is progressing.
+        _active_story_turns[key] = (current[0], now)
+
+
+def validate_openai_base_url(value: str) -> str:
+    """Validate server-side custom OpenAI endpoints and reject SSRF targets.
+
+    Browser-direct local providers use ``local_base_url`` and never pass through
+    this function. ``openai_base_url`` is contacted by the hosted server, so it
+    must be HTTPS and resolve exclusively to public addresses.
+    """
+    raw = (value or "https://api.openai.com/v1").strip()
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("OpenAI base URL must use HTTPS")
+    if not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("OpenAI base URL must contain a valid host and no credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("OpenAI base URL cannot contain a query string or fragment")
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+        raise ValueError("OpenAI base URL cannot target localhost")
+
+    addresses = []
+    try:
+        addresses.append(ipaddress.ip_address(hostname))
+    except ValueError:
+        if hostname == "api.openai.com":
+            return raw.rstrip("/")
+        try:
+            port = parsed.port or 443
+            addresses = list({
+                ipaddress.ip_address(item[4][0])
+                for item in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+            })
+        except (OSError, ValueError) as exc:
+            raise ValueError("OpenAI base URL host could not be resolved safely") from exc
+
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("OpenAI base URL must resolve only to public internet addresses")
+    return raw.rstrip("/")
 
 
 def _clients_from_keys(user_keys: dict) -> dict:
@@ -289,8 +503,12 @@ def _clients_from_keys(user_keys: dict) -> dict:
 
     if user_keys.get("openai_api_key"):
         try:
-            base_url = (user_keys.get("openai_base_url") or "https://api.openai.com/v1").strip()
-            user_clients["openai_client"] = OpenAI(base_url=base_url, api_key=user_keys["openai_api_key"])
+            base_url = validate_openai_base_url(user_keys.get("openai_base_url") or "https://api.openai.com/v1")
+            user_clients["openai_client"] = OpenAI(
+                base_url=base_url,
+                api_key=user_keys["openai_api_key"],
+                http_client=DefaultHttpxClient(follow_redirects=False),
+            )
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client: {e}")
 
@@ -415,9 +633,17 @@ def load_user_keys(uid: str) -> dict:
 
     return keys
 
-def save_user_keys(uid: str, new_keys: dict):
+def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
     """Save user-specific custom API keys to user_keys.json and Firestore."""
     keys = load_user_keys(uid)
+    secret_fields = {
+        "gemini_api_key", "openai_api_key", "openrouter_api_key",
+        "groq_api_key", "nvidia_api_key", "local_api_key",
+    }
+    for key in clear_keys or []:
+        if key in secret_fields:
+            keys[key] = ""
+
     # Non-secret fields can be set to empty (to clear a model override)
     NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
@@ -425,6 +651,8 @@ def save_user_keys(uid: str, new_keys: dict):
     for k in keys:
         if k in new_keys and isinstance(new_keys[k], str):
             val = new_keys[k].strip()
+            if k == "openai_base_url" and val:
+                val = validate_openai_base_url(val)
             if val:
                 # Always accept non-empty values
                 keys[k] = val
@@ -434,11 +662,7 @@ def save_user_keys(uid: str, new_keys: dict):
             # else: skip empty strings for secret keys — preserves existing value
 
     key_file = get_user_keys_file(uid)
-    try:
-        with open(key_file, "w", encoding="utf-8") as f:
-            json.dump(keys, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"[UserKeys Save Error] {e}")
+    _atomic_write_json(key_file, keys, indent=2)
 
     if db_firestore and uid and uid != "default_user":
         try:
@@ -482,8 +706,23 @@ def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: st
         except Exception as e:
             print(f"[Firestore Write Error] {e}")
 
+SYNC_META_FILE = "_sync_meta.json"
+
+
+def _story_sync_timestamp(story_dir: str) -> float:
+    try:
+        with open(os.path.join(story_dir, SYNC_META_FILE), "r", encoding="utf-8") as handle:
+            return float((json.load(handle) or {}).get("remote_updated_at", 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0.0
+
+
+def _write_story_sync_timestamp(story_dir: str, updated_at: float) -> None:
+    _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), {"remote_updated_at": float(updated_at)})
+
+
 def restore_story_directory_from_firestore(uid: str, story_id: str):
-    """Restore all files for a story from Firestore or Postgres if they are missing locally."""
+    """Restore files when cloud state is newer than this local cache."""
     if not uid or uid == "default_user":
         return
         
@@ -498,14 +737,15 @@ def restore_story_directory_from_firestore(uid: str, story_id: str):
                 if files:
                     story_dir = get_story_dir(story_id, uid=uid)
                     os.makedirs(story_dir, exist_ok=True)
-                    for file_key, file_content in files.items():
-                        # basename guard: never let a stored key escape the story folder
-                        file_name = os.path.basename(file_key.replace("_json", ".json").replace("_md", ".md"))
-                        local_path = os.path.join(story_dir, file_name)
-                        if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
-                            with open(local_path, "w", encoding="utf-8") as f:
-                                f.write(file_content)
-                            print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
+                    remote_updated_at = float(data.get("updated_at") or 0)
+                    if not os.path.exists(os.path.join(story_dir, "story.md")) or remote_updated_at > _story_sync_timestamp(story_dir):
+                        with get_story_lock(story_id, uid):
+                            for file_key, file_content in files.items():
+                                # basename guard: never let a stored key escape the story folder
+                                file_name = os.path.basename(file_key.replace("_json", ".json").replace("_md", ".md"))
+                                _atomic_write_text(os.path.join(story_dir, file_name), str(file_content))
+                                print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
+                            _write_story_sync_timestamp(story_dir, remote_updated_at)
         except Exception as e:
             print(f"[Firestore Restore Error] {e}")
             
@@ -516,20 +756,21 @@ def restore_story_directory_from_firestore(uid: str, story_id: str):
             conn = psycopg2.connect(db_conn_str)
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT file_name, content FROM user_stories
+                    SELECT file_name, content, updated_at FROM user_stories
                     WHERE uid = %s AND story_id = %s
                 """, (uid, story_id))
                 rows = cur.fetchall()
                 if rows:
                     story_dir = get_story_dir(story_id, uid=uid)
                     os.makedirs(story_dir, exist_ok=True)
-                    for file_name, file_content in rows:
-                        file_name = os.path.basename(file_name)  # never escape the story folder
-                        local_path = os.path.join(story_dir, file_name)
-                        if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
-                            with open(local_path, "w", encoding="utf-8") as f:
-                                f.write(file_content)
-                            print(f"[Postgres Sync] Restored {file_name} for story {story_id}")
+                    remote_updated_at = max(float(row[2] or 0) for row in rows)
+                    if not os.path.exists(os.path.join(story_dir, "story.md")) or remote_updated_at > _story_sync_timestamp(story_dir):
+                        with get_story_lock(story_id, uid):
+                            for file_name, file_content, _updated_at in rows:
+                                file_name = os.path.basename(file_name)  # never escape the story folder
+                                _atomic_write_text(os.path.join(story_dir, file_name), str(file_content))
+                                print(f"[Postgres Sync] Restored {file_name} for story {story_id}")
+                            _write_story_sync_timestamp(story_dir, remote_updated_at)
             conn.close()
         except Exception as e:
             print(f"[Postgres Restore Error] {e}")
@@ -547,7 +788,7 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
                 files_payload = {}
                 for name in os.listdir(story_dir):
                     if name.endswith(".md") or name.endswith(".json"):
-                        if name.startswith("temp_") or name == "pending_retry.json" or name.endswith(".wav") or name.endswith(".mp3"):
+                        if name.startswith("temp_") or name in {"pending_retry.json", SYNC_META_FILE} or name.endswith(".wav") or name.endswith(".mp3"):
                             continue
                         file_path = os.path.join(story_dir, name)
                         if os.path.isfile(file_path):
@@ -558,10 +799,20 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
                             
                 if files_payload:
                     doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-                    doc_ref.set({
-                        "updated_at": time.time(),
+                    sync_timestamp = time.time()
+                    cloud_payload = {
+                        "updated_at": sync_timestamp,
                         "files": files_payload
-                    }, merge=True)
+                    }
+                    # update() replaces the entire files map, so files removed by
+                    # undo do not survive forever in cloud storage and reappear on
+                    # a fresh instance. Fall back to set() for a brand-new doc.
+                    existing_doc = doc_ref.get()
+                    if existing_doc.exists:
+                        doc_ref.update(cloud_payload)
+                    else:
+                        doc_ref.set(cloud_payload)
+                    _write_story_sync_timestamp(story_dir, sync_timestamp)
                     print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
         except Exception as e:
             print(f"[Firestore Sync Error] {e}")
@@ -573,32 +824,54 @@ def sync_story_directory_to_firestore(uid: str, story_id: str):
             story_dir = get_story_dir(story_id, uid=uid)
             if os.path.exists(story_dir):
                 conn = psycopg2.connect(db_conn_str)
-                with conn.cursor() as cur:
-                    for name in os.listdir(story_dir):
-                         if name.endswith(".md") or name.endswith(".json"):
-                             if name.startswith("temp_") or name == "pending_retry.json" or name.endswith(".wav") or name.endswith(".mp3"):
-                                 continue
-                             file_path = os.path.join(story_dir, name)
-                             if os.path.isfile(file_path):
-                                 with open(file_path, "r", encoding="utf-8") as f:
-                                     file_content = f.read()
-                                 
-                                 title = None
-                                 if name == "story.md":
-                                     for line in file_content.split("\n"):
-                                         if line.startswith("# "):
-                                             title = line[2:].strip()
-                                             break
-                                 
-                                 cur.execute("""
-                                     INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
-                                     VALUES (%s, %s, %s, %s, %s, %s)
-                                     ON CONFLICT (uid, story_id, file_name)
-                                     DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at, title = COALESCE(EXCLUDED.title, user_stories.title)
-                                 """, (uid, story_id, name, file_content, time.time(), title))
-                    conn.commit()
-                conn.close()
-                print(f"[Postgres Sync] Saved files for story {story_id}")
+                try:
+                    sync_timestamp = time.time()
+                    saved_file_count = 0
+                    saved_file_names = set()
+                    with conn.cursor() as cur:
+                        for name in os.listdir(story_dir):
+                            if not (name.endswith(".md") or name.endswith(".json")):
+                                continue
+                            if name.startswith("temp_") or name in {"pending_retry.json", SYNC_META_FILE} or name.endswith(".wav") or name.endswith(".mp3"):
+                                continue
+                            file_path = os.path.join(story_dir, name)
+                            if not os.path.isfile(file_path):
+                                continue
+                            with open(file_path, "r", encoding="utf-8") as handle:
+                                file_content = handle.read()
+
+                            title = None
+                            if name == "story.md":
+                                for line in file_content.split("\n"):
+                                    if line.startswith("# "):
+                                        title = line[2:].strip()
+                                        break
+
+                            cur.execute("""
+                                INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (uid, story_id, file_name)
+                                DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at, title = COALESCE(EXCLUDED.title, user_stories.title)
+                            """, (uid, story_id, name, file_content, sync_timestamp, title))
+                            saved_file_count += 1
+                            saved_file_names.add(name)
+
+                        cur.execute(
+                            "SELECT file_name FROM user_stories WHERE uid = %s AND story_id = %s",
+                            (uid, story_id),
+                        )
+                        stale_file_names = [row[0] for row in cur.fetchall() if row[0] not in saved_file_names]
+                        if stale_file_names:
+                            cur.executemany(
+                                "DELETE FROM user_stories WHERE uid = %s AND story_id = %s AND file_name = %s",
+                                [(uid, story_id, name) for name in stale_file_names],
+                            )
+                        conn.commit()
+                finally:
+                    conn.close()
+                if saved_file_count:
+                    _write_story_sync_timestamp(story_dir, sync_timestamp)
+                    print(f"[Postgres Sync] Saved {saved_file_count} files for story {story_id}")
         except Exception as e:
             print(f"[Postgres Sync Error] {e}")
 
@@ -930,6 +1203,22 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
             except Exception as e:
                 print(f"  [{label}] Configured NVIDIA/{target_model} note: {e}")
 
+        # 4. OpenAI-compatible providers with the same configured model name.
+        for provider_name, client_key in (("Groq", "groq_client"), ("OpenRouter", "openrouter_client")):
+            provider_client = active_clients.get(client_key)
+            if not provider_client:
+                continue
+            try:
+                print(f"  [{label}] Trying user configured target {provider_name}/{target_model}...")
+                resp = provider_client.chat.completions.create(
+                    model=target_model, messages=messages, temperature=temperature
+                )
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"Configured/{provider_name}/{target_model}"
+            except Exception as e:
+                print(f"  [{label}] Configured {provider_name}/{target_model} note: {e}")
+
     # Fallback to Super Admin system chain or Standard User available keys
     if user_info.get("is_super_admin"):
         return _call_with_full_fallback(system_prompt, user_prompt, temperature=temperature, label=label)
@@ -958,6 +1247,42 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
                 res = resp.choices[0].message.content or ""
                 if res.strip(): return res, f"UserOpenAI/{m}"
             except Exception as e:
+                pass
+
+    if active_clients.get("nvidia_client"):
+        c = active_clients["nvidia_client"]
+        for m in NVIDIA_BACKGROUND_MODELS:
+            try:
+                resp = c.chat.completions.create(
+                    messages=messages,
+                    **build_nvidia_request_kwargs(m, temperature, use_thinking=False),
+                )
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"UserNVIDIA/{m}"
+            except Exception:
+                pass
+
+    if active_clients.get("groq_client"):
+        c = active_clients["groq_client"]
+        for m in GROQ_MODELS:
+            try:
+                resp = c.chat.completions.create(model=m, messages=messages, temperature=temperature)
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"UserGroq/{m}"
+            except Exception:
+                pass
+
+    if active_clients.get("openrouter_client"):
+        c = active_clients["openrouter_client"]
+        for m in OPENROUTER_FREE_MODELS:
+            try:
+                resp = c.chat.completions.create(model=m, messages=messages, temperature=temperature)
+                res = resp.choices[0].message.content or ""
+                if res.strip():
+                    return res, f"UserOpenRouter/{m}"
+            except Exception:
                 pass
 
     raise Exception("No active API keys found for standard user. Please enter your API key in Settings (⚙️).")
@@ -1264,7 +1589,7 @@ def nvidia_model_thinks(model: str) -> bool:
 
 # Provider clients come from each user's Settings keys via
 # get_effective_ai_clients - no provider is initialized from server .env.
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpxClient
 nvidia_client = None
 openrouter_client = None
 groq_client = None
@@ -1483,18 +1808,11 @@ def parse_current_time_state(story_id: str, uid: str = "default_user") -> str:
     return ""
 
 class StoryInput(BaseModel):
-    user_input: str
-    story_id: str
+    user_input: str = Field(min_length=1, max_length=100_000)
+    story_id: str = Field(min_length=1, max_length=120)
     skip_rules_check: bool = False
-    provider: Optional[str] = None
-    model: Optional[str] = None
-
-import re
-def sanitize_id(name: str) -> str:
-    """Make a string safe for Windows folder names."""
-    safe = "".join([c for c in name.lower().replace(" ", "-") if c.isalnum() or c in "-_"])
-    safe = re.sub(r'-+', '-', safe).strip('-_')
-    return safe if safe else "untitled"
+    provider: Optional[str] = Field(default=None, max_length=100)
+    model: Optional[str] = Field(default=None, max_length=300)
 
 def sanitize_filename(name: str, default: str = "uploaded_audio") -> str:
     """Keep uploads inside the story folder and strip unsafe Windows filename characters."""
@@ -1504,8 +1822,11 @@ def sanitize_filename(name: str, default: str = "uploaded_audio") -> str:
     safe_ext = re.sub(r'[^A-Za-z0-9.]+', '', ext)[:10]
     if safe_ext and not safe_ext.startswith("."):
         safe_ext = "." + safe_ext
+    safe_stem = safe_stem[:100].rstrip(". ")
     if not safe_stem:
         safe_stem = default
+    if safe_stem.casefold() in WINDOWS_RESERVED_NAMES:
+        safe_stem = f"upload-{safe_stem}"
     return f"{safe_stem}{safe_ext}"
 
 def clean_text(text: str) -> str:
@@ -1564,52 +1885,75 @@ def strip_thought_tags(text: str, filter_reasoning_lines: bool = True) -> str:
     
     return '\n'.join(filtered_lines).strip()
 
-# === SNAPSHOT SYSTEM — backup .md files before generation, restore on undo ===
-SNAPSHOT_FILES = {"summary.md", "incidents.md", "items.md", "time.md", "characters.md", "positions.md", "villains.md", "locations.md"}
+# === SNAPSHOT SYSTEM — backup reference .md files before generation, restore on undo ===
+SNAPSHOT_MANIFEST = "manifest.json"
+
+
+def _snapshot_reference_files(story_dir: str) -> list[str]:
+    """Return every mutable reference Markdown file in a story directory."""
+    return sorted(
+        name for name in os.listdir(story_dir)
+        if name.lower().endswith(".md")
+        and name.casefold() != "story.md"
+        and os.path.isfile(os.path.join(story_dir, name))
+    )
 
 def save_snapshot(story_id: str, uid: str = "default_user"):
-    """Save a snapshot of all tracked .md files before a generation.
+    """Save a snapshot of all reference .md files before a generation.
     Only keeps the latest snapshot (for single undo)."""
-    story_dir = get_story_dir(story_id, uid=uid)
-    snap_dir = os.path.join(story_dir, "_snapshots")
-    os.makedirs(snap_dir, exist_ok=True)
-    
-    for filename in SNAPSHOT_FILES:
-        filepath = os.path.join(story_dir, filename)
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                snap_path = os.path.join(snap_dir, filename)
-                with open(snap_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                print(f"  [Snapshot] Failed to save {filename}: {e}")
-    print(f"  [Snapshot] Saved {len(SNAPSHOT_FILES)} files for {story_id}")
+    with get_story_lock(story_id, uid):
+        story_dir = get_story_dir(story_id, uid=uid)
+        snap_dir = os.path.join(story_dir, "_snapshots")
+        os.makedirs(snap_dir, exist_ok=True)
+
+        # Remove files from the prior snapshot so an absent file is represented
+        # accurately in the new manifest.
+        for name in os.listdir(snap_dir):
+            path = os.path.join(snap_dir, name)
+            if os.path.isfile(path):
+                os.remove(path)
+
+        filenames = _snapshot_reference_files(story_dir)
+        for filename in filenames:
+            filepath = os.path.join(story_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as handle:
+                _atomic_write_text(os.path.join(snap_dir, filename), handle.read())
+        _atomic_write_json(os.path.join(snap_dir, SNAPSHOT_MANIFEST), {"files": filenames})
+        print(f"  [Snapshot] Saved {len(filenames)} reference files for {story_id}")
 
 def restore_snapshot(story_id: str, uid: str = "default_user"):
     """Restore .md files from the latest snapshot (called on undo)."""
-    story_dir = get_story_dir(story_id, uid=uid)
-    snap_dir = os.path.join(story_dir, "_snapshots")
-    
-    if not os.path.exists(snap_dir):
-        print("  [Snapshot] No snapshots found, skipping restore.")
-        return
-    
-    restored = 0
-    for filename in SNAPSHOT_FILES:
-        snap_path = os.path.join(snap_dir, filename)
-        if os.path.exists(snap_path):
-            try:
-                with open(snap_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                filepath = os.path.join(story_dir, filename)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                restored += 1
-            except Exception as e:
-                print(f"  [Snapshot] Failed to restore {filename}: {e}")
-    print(f"  [Snapshot] Restored {restored} files for {story_id}")
+    with get_story_lock(story_id, uid):
+        story_dir = get_story_dir(story_id, uid=uid)
+        snap_dir = os.path.join(story_dir, "_snapshots")
+        manifest_path = os.path.join(snap_dir, SNAPSHOT_MANIFEST)
+
+        if not os.path.exists(manifest_path):
+            print("  [Snapshot] No complete snapshot found, skipping restore.")
+            return
+
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        filenames = {
+            name for name in manifest.get("files", [])
+            if isinstance(name, str) and os.path.basename(name) == name and name.lower().endswith(".md")
+        }
+
+        # Files created by background analysis after the snapshot must disappear
+        # on undo, otherwise custom categories survive a supposedly rolled-back turn.
+        for filename in _snapshot_reference_files(story_dir):
+            if filename not in filenames:
+                os.remove(os.path.join(story_dir, filename))
+
+        restored = 0
+        for filename in filenames:
+            snap_path = os.path.join(snap_dir, filename)
+            if not os.path.isfile(snap_path):
+                raise RuntimeError(f"Snapshot is incomplete: missing {filename}")
+            with open(snap_path, "r", encoding="utf-8") as handle:
+                _atomic_write_text(os.path.join(story_dir, filename), handle.read())
+            restored += 1
+        print(f"  [Snapshot] Restored {restored} reference files for {story_id}")
 
 CHARACTER_PHYSICAL_KEYWORDS = (
     "hair", "eye", "eyes", "skin", "face", "voice", "build", "frame", "body", "height",
@@ -1838,9 +2182,15 @@ def get_story_dir(story_id: str, uid: str = "default_user", create: bool = True)
     user_dir = os.path.join(STORIES_DIR, safe_uid)
     story_dir = os.path.join(user_dir, safe_id)
     
-    # Fallback/backward compatibility for root stories
+    # Fallback/backward compatibility for genuine root-level legacy stories.
+    # A root directory without story.md is a user namespace and must never be
+    # opened (or recursively deleted) as if it belonged to default_user.
     root_dir = os.path.join(STORIES_DIR, safe_id)
-    if not os.path.exists(story_dir) and os.path.exists(root_dir) and safe_uid == "default_user":
+    if (
+        not os.path.exists(story_dir)
+        and safe_uid == "default_user"
+        and os.path.isfile(os.path.join(root_dir, "story.md"))
+    ):
         return root_dir
 
     if create:
@@ -1868,58 +2218,103 @@ def get_consistency_path(story_id: str, uid: str = "default_user", create: bool 
 def get_chat_log_path(story_id: str, uid: str = "default_user", create: bool = True):
     return os.path.join(get_story_dir(story_id, uid=uid, create=create), "chat_log.json")
 
-def has_any_generation_provider() -> bool:
+def commit_ai_turn(story_id: str, text: str, model: str = "", uid: str = "default_user") -> str:
+    """Commit story text and its AI chat entry as one rollback-safe operation."""
+    with get_story_lock(story_id, uid):
+        story_path = get_story_path(story_id, uid=uid)
+        chat_path = get_chat_log_path(story_id, uid=uid)
+        original_story = ""
+        if os.path.exists(story_path):
+            with open(story_path, "r", encoding="utf-8") as handle:
+                original_story = handle.read()
+
+        entries = []
+        if os.path.exists(chat_path):
+            try:
+                with open(chat_path, "r", encoding="utf-8") as handle:
+                    entries = json.load(handle)
+                if not isinstance(entries, list):
+                    entries = []
+            except (OSError, json.JSONDecodeError):
+                entries = []
+
+        cleaned_text = clean_text(text)
+        updated_story = original_story + ("\n\n" if original_story else "") + cleaned_text
+        entries.append({
+            "role": "ai",
+            "text": cleaned_text,
+            "model": model,
+            "time": time.strftime("%H:%M"),
+        })
+
+        _atomic_write_text(story_path, updated_story)
+        try:
+            _atomic_write_json(chat_path, entries)
+        except Exception:
+            # Keep story.md and chat_log.json aligned if the second write fails.
+            _atomic_write_text(story_path, original_story)
+            raise
+        return updated_story
+
+def has_any_generation_provider(user_info: dict = None) -> bool:
+    """Check providers available to this request, never just process globals."""
+    if user_info is not None:
+        effective = get_effective_ai_clients(user_info)
+        return any([
+            bool(effective.get("genai_clients")),
+            effective.get("nvidia_client") is not None,
+            effective.get("nokey_client") is not None,
+            effective.get("groq_client") is not None,
+            effective.get("mistral_client") is not None,
+            effective.get("openrouter_client") is not None,
+            effective.get("openai_client") is not None,
+            effective.get("hf_client") is not None,
+            effective.get("cerebras_client") is not None,
+        ])
     return any([
-        bool(clients),
-        nvidia_client is not None,
-        nokey_client is not None,
-        groq_client is not None,
-        mistral_client is not None,
-        openrouter_client is not None,
-        hf_client is not None,
-        cerebras_client is not None,
+        bool(clients), nvidia_client, nokey_client, groq_client, mistral_client,
+        openrouter_client, official_openai_client, hf_client, cerebras_client,
     ])
 
 def append_chat_entry(story_id: str, role: str, text: str, model: str = "", uid: str = "default_user"):
     """Append a chat entry to the story's chat log."""
-    path = get_chat_log_path(story_id, uid=uid)
-    entries = []
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                entries = json.load(f)
-        except (json.JSONDecodeError, Exception):
-            entries = []
-    entries.append({
-        "role": role,
-        "text": clean_text(text),
-        "model": model,
-        "time": time.strftime("%H:%M")
-    })
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False)
+    with get_story_lock(story_id, uid):
+        path = get_chat_log_path(story_id, uid=uid)
+        entries = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+                if not isinstance(entries, list):
+                    entries = []
+            except (json.JSONDecodeError, OSError):
+                entries = []
+        entries.append({
+            "role": role,
+            "text": clean_text(text),
+            "model": model,
+            "time": time.strftime("%H:%M")
+        })
+        _atomic_write_json(path, entries)
 
 def remove_last_user_entry(story_id: str, uid: str = "default_user"):
     """If the last chat entry is a user prompt with no AI response after it,
     remove it. Called when a generation turn fails, so the chat log never keeps
     a dangling 'You said:' with no reply - otherwise a reload/retry shows a
     broken turn (and undo would target the wrong pair)."""
-    path = get_chat_log_path(story_id, uid=uid, create=False)
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-    except (json.JSONDecodeError, Exception):
-        return
-    if not entries or entries[-1].get("role") != "user":
-        return
-    entries.pop()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, ensure_ascii=False)
-    except Exception:
-        pass
+    with get_story_lock(story_id, uid):
+        path = get_chat_log_path(story_id, uid=uid, create=False)
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+        if not entries or entries[-1].get("role") != "user":
+            return
+        entries.pop()
+        _atomic_write_json(path, entries)
 
 
 def get_pending_retry_path(story_id: str, uid: str = "default_user") -> str:
@@ -1930,12 +2325,11 @@ def write_pending_retry(story_id: str, uid: str, prompt: str, error: str):
     """Remember a failed generation so the UI can offer a Retry button even
     after a page reload. Cleared on the next successful turn."""
     try:
-        with open(get_pending_retry_path(story_id, uid=uid), "w", encoding="utf-8") as f:
-            json.dump({
-                "prompt": prompt,
-                "error": (error or "Generation failed.")[:500],
-                "time": time.strftime("%H:%M"),
-            }, f, ensure_ascii=False)
+        _atomic_write_json(get_pending_retry_path(story_id, uid=uid), {
+            "prompt": prompt,
+            "error": (error or "Generation failed.")[:500],
+            "time": time.strftime("%H:%M"),
+        })
     except Exception as e:
         print(f"  Could not write pending_retry.json: {e}")
 
@@ -2019,7 +2413,7 @@ def _story_dir_size(story_dir: str) -> int:
         for name in os.listdir(story_dir):
             if not (name.endswith(".md") or name.endswith(".json")):
                 continue
-            if name.startswith("temp_") or name.endswith(".wav") or name.endswith(".mp3"):
+            if name.startswith("temp_") or name in {"pending_retry.json", SYNC_META_FILE} or name.endswith(".wav") or name.endswith(".mp3"):
                 continue
             path = os.path.join(story_dir, name)
             if os.path.isfile(path):
@@ -2045,7 +2439,7 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
     if os.path.exists(user_dir):
         for name in sorted(os.listdir(user_dir)):
             story_dir = os.path.join(user_dir, name)
-            if os.path.isdir(story_dir):
+            if os.path.isdir(story_dir) and os.path.isfile(os.path.join(story_dir, "story.md")):
                 story_file = os.path.join(story_dir, "story.md")
                 size = _story_dir_size(story_dir)
                 modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
@@ -2101,7 +2495,12 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
     if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
         for name in sorted(os.listdir(STORIES_DIR)):
             story_dir = os.path.join(STORIES_DIR, name)
-            if os.path.isdir(story_dir) and name != safe_uid and name not in seen_ids:
+            if (
+                os.path.isdir(story_dir)
+                and os.path.isfile(os.path.join(story_dir, "story.md"))
+                and name != safe_uid
+                and name not in seen_ids
+            ):
                 story_file = os.path.join(story_dir, "story.md")
                 size = _story_dir_size(story_dir)
                 modified = os.path.getmtime(story_file) if os.path.exists(story_file) else 0
@@ -2115,23 +2514,25 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
     return {"stories": stories}
 
 class CreateStoryInput(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=120)
 
 @app.post("/stories/create")
-async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_current_user_id)):
+async def create_story(input_data: CreateStoryInput, user_info: dict = Depends(require_authenticated_user)):
     """Create a new story locally and sync metadata to Firestore."""
+    user_id = user_info["uid"]
     safe_id = sanitize_id(input_data.name)
-    story_dir = get_story_dir(safe_id, uid=user_id)
-    story_path = os.path.join(story_dir, "story.md")
-    if not os.path.exists(story_path):
-        with open(story_path, "w", encoding="utf-8") as f:
-            f.write("")
-    # Create all element files with headers so they exist from the start
-    for cat in ELEMENT_CATEGORIES:
-        cat_path = get_element_path(safe_id, cat, uid=user_id)
-        if not os.path.exists(cat_path):
-            with open(cat_path, "w", encoding="utf-8") as f:
-                f.write(f"## {cat.title()}\n")
+    if not any(c.isascii() and c.isalnum() for c in input_data.name):
+        raise HTTPException(status_code=422, detail="Story name must contain at least one ASCII letter or number")
+
+    with get_story_lock(safe_id, user_id):
+        story_dir = get_story_dir(safe_id, uid=user_id, create=False)
+        if os.path.exists(story_dir):
+            raise HTTPException(status_code=409, detail="A story with this name already exists")
+        os.makedirs(story_dir, exist_ok=False)
+        _atomic_write_text(os.path.join(story_dir, "story.md"), "")
+        # Create all element files with headers so they exist from the start.
+        for cat in ELEMENT_CATEGORIES:
+            _atomic_write_text(get_element_path(safe_id, cat, uid=user_id), f"## {cat.title()}\n")
 
     # Sync to Firestore if active. Title is user input — strip HTML so a crafted name
     # can't become stored XSS in the story list.
@@ -2141,20 +2542,33 @@ async def create_story(input_data: CreateStoryInput, user_id: str = Depends(get_
     return {"id": safe_id, "name": input_data.name}
 
 @app.delete("/story/{story_id}")
-async def delete_story(story_id: str, user_id: str = Depends(get_current_user_id)):
+async def delete_story(story_id: str, user_info: dict = Depends(require_authenticated_user)):
     """Delete a story and all its files from local disk and cloud databases."""
     import shutil
     import stat
+    user_id = user_info["uid"]
     safe_id = sanitize_id(story_id)
+    if story_turn_is_active(safe_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before deleting this story")
     
     # 1. Delete from local disk
     story_dir = get_story_dir(safe_id, uid=user_id, create=False)
+    expected_user_story = os.path.realpath(os.path.join(STORIES_DIR, sanitize_id(user_id), safe_id))
+    resolved_story_dir = os.path.realpath(story_dir)
+    is_allowed_legacy = (
+        sanitize_id(user_id) == "default_user"
+        and resolved_story_dir == os.path.realpath(os.path.join(STORIES_DIR, safe_id))
+        and os.path.isfile(os.path.join(resolved_story_dir, "story.md"))
+    )
+    if resolved_story_dir != expected_user_story and not is_allowed_legacy:
+        raise HTTPException(status_code=409, detail="Refusing to delete an invalid story directory")
     if os.path.exists(story_dir):
-        # Windows fix: handle read-only files
-        def on_rm_error(func, path, exc_info):
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-        shutil.rmtree(story_dir, onerror=on_rm_error)
+        with get_story_lock(safe_id, user_id):
+            # Windows fix: handle read-only files
+            def on_rm_error(func, path, exc_info):
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            shutil.rmtree(story_dir, onerror=on_rm_error)
         
     # 2. Delete from Firestore if active
     if db_firestore and user_id != "default_user":
@@ -2263,20 +2677,23 @@ async def get_summary(story_id: str, user_id: str = Depends(get_current_user_id)
         return {"summary": f.read()}
 
 class SummaryInput(BaseModel):
-    summary: str
+    summary: str = Field(max_length=1_000_000)
 
 @app.put("/story/{story_id}/summary")
-async def update_summary(story_id: str, input_data: SummaryInput, user_id: str = Depends(get_current_user_id)):
+async def update_summary(story_id: str, input_data: SummaryInput, user_info: dict = Depends(require_authenticated_user)):
     """Manually update the story summary."""
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before editing the summary")
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_summary_path(story_id, uid=user_id)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(input_data.summary)
+    with get_story_lock(story_id, user_id):
+        _atomic_write_text(path, clean_text(input_data.summary))
     sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
 class TextInput(BaseModel):
-    text: str
+    text: str = Field(max_length=250_000)
 
 # --- Style Guide ---
 @app.get("/story/{story_id}/style")
@@ -2289,11 +2706,14 @@ async def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
         return {"text": f.read()}
 
 @app.put("/story/{story_id}/style")
-async def update_style(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+async def update_style(story_id: str, input_data: TextInput, user_info: dict = Depends(require_authenticated_user)):
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before editing the style")
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_style_path(story_id, uid=user_id)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(input_data.text)
+    with get_story_lock(story_id, user_id):
+        _atomic_write_text(path, clean_text(input_data.text))
     sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
@@ -2308,11 +2728,14 @@ async def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
         return {"text": f.read()}
 
 @app.put("/story/{story_id}/rules")
-async def update_rules(story_id: str, input_data: TextInput, user_id: str = Depends(get_current_user_id)):
+async def update_rules(story_id: str, input_data: TextInput, user_info: dict = Depends(require_authenticated_user)):
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before editing the rules")
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_rules_path(story_id, uid=user_id)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(input_data.text)
+    with get_story_lock(story_id, user_id):
+        _atomic_write_text(path, clean_text(input_data.text))
     sync_story_directory_to_firestore(user_id, story_id)
     return {"success": True}
 
@@ -2368,12 +2791,15 @@ Just describe the raw media file objectively, like a music reviewer or art criti
     import base64 as b64mod
     media_b64 = b64mod.b64encode(media_bytes).decode("utf-8")
     
-    # Get user-specific clients if available, otherwise use global
-    active_genai_clients = clients  # default global
+    # Get user-specific clients. A standard user's failed/missing key must never
+    # fall through to a process-global admin or keyless client.
     if user_info:
         eff = get_effective_ai_clients(user_info)
-        if eff.get("genai_clients"):
-            active_genai_clients = eff["genai_clients"]
+        active_genai_clients = eff.get("genai_clients") or []
+        active_nokey_client = eff.get("nokey_client")
+    else:
+        active_genai_clients = clients
+        active_nokey_client = nokey_client
     
     # 0. Try Google GenAI native keys FIRST
     for client in active_genai_clients:
@@ -2403,7 +2829,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
                 print(f"  [MediaAnalyzer] GenAI/{model_name} failed: {e}")
 
     # 1. Fallback to Nokey
-    if nokey_client:
+    if active_nokey_client:
         for model in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash", "gemini-3-flash-preview"]:
             try:
                 print(f"  [MediaAnalyzer] Trying {model} via nokey...")
@@ -2419,7 +2845,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
                 if is_thinking_model(model):
                     extra["google"] = {**extra["google"], "thinking_config": {"thinkingBudget": HIGH_THINKING_BUDGET}}
 
-                response = _retry_on_429(lambda m=model: nokey_client.chat.completions.create(
+                response = _retry_on_429(lambda m=model: active_nokey_client.chat.completions.create(
                     model=m,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -2469,10 +2895,11 @@ def _build_rules_check_prefix(rules_text: str, style_text: str) -> str:
 
 
 def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: str, user_info: dict = None):
-    """Silent post-editor: checks rules/style and streams the (possibly refined) text
-    live as the editor model generates it. No suspicion/rollback safety net —
-    whatever the model streams is forwarded straight to the client. If a rewrite
-    goes wrong, regenerate from the story UI.
+    """Silent post-editor: check rules/style and yield one complete provider result.
+
+    Each attempted stream is buffered until it finishes successfully. This avoids
+    concatenating a partial response from a disconnected provider with the next
+    fallback provider's complete rewrite.
     Yields text chunks. If there's nothing to check against, yields the original
     text unchanged in one piece."""
 
@@ -2529,13 +2956,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                     label=f"RulesEditor/Configured/NVIDIA/{rules_model_override}",
                 )
                 got_any = False
+                pieces = []
                 for chunk in stream:
                     text = _safe_chunk_text(chunk)
                     if text:
                         got_any = True
-                        yield text
+                        pieces.append(text)
                 if got_any:
                     print(f"  [RulesEditor] Streamed successfully via configured NVIDIA/{rules_model_override}")
+                    yield from pieces
                     return
             except Exception as e:
                 print(f"  [RulesEditor] Configured NVIDIA/{rules_model_override} failed: {e}")
@@ -2555,13 +2984,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                         ),
                     )
                     got_any = False
+                    pieces = []
                     for chunk in stream:
                         text = _safe_chunk_text(chunk)
                         if text:
                             got_any = True
-                            yield text
+                            pieces.append(text)
                     if got_any:
                         print(f"  [RulesEditor] Streamed successfully via configured GenAI/{base_m}")
+                        yield from pieces
                         return
                 except Exception as e:
                     print(f"  [RulesEditor] Configured GenAI/{base_m} failed: {e}")
@@ -2580,13 +3011,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                 ),
             )
             got_any = False
+            pieces = []
             for chunk in stream:
                 text = _safe_chunk_text(chunk)
                 if text:
                     got_any = True
-                    yield text
+                    pieces.append(text)
             if got_any:
                 print(f"  [RulesEditor] Streamed successfully via GenAI/{primary_model}")
+                yield from pieces
                 return
         except Exception as e:
             print(f"  [RulesEditor] GenAI/{primary_model} failed: {e}")
@@ -2608,13 +3041,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                     label=f"RulesEditor/NVIDIA/{model}",
                 )
                 got_any = False
+                pieces = []
                 for chunk in stream:
                     text = _safe_chunk_text(chunk)
                     if text:
                         got_any = True
-                        yield text
+                        pieces.append(text)
                 if got_any:
                     print(f"  [RulesEditor] Streamed successfully via NVIDIA/{model}")
+                    yield from pieces
                     return
             except Exception as e:
                 print(f"  [RulesEditor] NVIDIA/{model} streaming failed: {e}")
@@ -2641,13 +3076,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                     label=f"RulesEditor/Nokey/{model_name}",
                 )
                 got_any = False
+                pieces = []
                 for chunk in stream:
                     text = _safe_chunk_text(chunk)
                     if text:
                         got_any = True
-                        yield text
+                        pieces.append(text)
                 if got_any:
                     print(f"  [RulesEditor] Streamed successfully via Nokey/{model_name}")
+                    yield from pieces
                     return
             except Exception as e:
                 print(f"  [RulesEditor] Nokey/{model_name} streaming failed: {e}")
@@ -2667,13 +3104,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                     ),
                 )
                 got_any = False
+                pieces = []
                 for chunk in stream:
                     text = _safe_chunk_text(chunk)
                     if text:
                         got_any = True
-                        yield text
+                        pieces.append(text)
                 if got_any:
                     print(f"  [RulesEditor] Streamed successfully via GenAI/{model_name}")
+                    yield from pieces
                     return
             except Exception as e:
                 print(f"  [RulesEditor] GenAI/{model_name} streaming failed: {e}")
@@ -2921,10 +3360,9 @@ What inventory changes occurred? Return JSON array only."""
                         print(f"    ~ QTY: {item_name} → {qty_label}" + (f" (Last: {new_location})" if new_location else ""))
                         break
                 updated_items = "\n".join(lines)
-        
+
         # Write updated items.md
-        with open(items_path, "w", encoding="utf-8") as f:
-            f.write(updated_items)
+        _atomic_write_text(items_path, clean_text(updated_items))
         print(f"  [INVENTORY] items.md updated successfully!")
         
     except json.JSONDecodeError as e:
@@ -2937,12 +3375,15 @@ What inventory changes occurred? Return JSON array only."""
 def verify_reference_files(story_id: str, user_id: str = "default_user", user_info: dict = None):
     """Phase 2 Verification Layer: Runs AFTER background_analysis completes.
     Reads story.md, summary.md, and incidents.md as READ-ONLY source of truth,
-    then checks all other reference .md files in parallel using different models.
+    then checks the other reference .md files sequentially to avoid provider bursts.
     Each verifier fixes its file if it finds inaccuracies.
     Prioritizes NVIDIA (deepseek-v4-pro), falls back to Nokey and native Gemini API keys."""
 
-    if not nvidia_client and not nokey_client and not clients:
-        print("[VERIFY] No NVIDIA, nokey, or native API clients, skipping verification.")
+    if user_info is not None and not has_any_generation_provider(user_info):
+        print("[VERIFY] No user provider is available, skipping verification.")
+        return
+    if user_info is None and not has_any_generation_provider():
+        print("[VERIFY] No provider is available, skipping verification.")
         return
 
     story_dir = get_story_dir(story_id, uid=user_id)
@@ -2987,16 +3428,6 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
         return
 
     print(f"[VERIFY] Starting Phase 2 verification for {len(files_to_verify)} files: {', '.join(files_to_verify)}")
-
-    # Assign a DIFFERENT model to each file so they run in parallel without competing
-    VERIFY_MODELS = LiveModelList("google", [
-        "gemini-2.5-flash",
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash-lite",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-2.5-pro",
-        "gemini-3.1-pro-preview",
-    ])
 
     def _strip_markdown_fences(text):
         """Remove ```markdown ... ``` wrappers that models often add."""
@@ -3080,8 +3511,7 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
                 if isinstance(patches, list) and len(patches) > 0:
                     new_content, changes_made = _apply_diff_patches(original_content, patches, filename)
                     if changes_made > 0:
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(clean_text(new_content))
+                        _atomic_write_text(file_path, clean_text(new_content))
                         print(f"  [VERIFY] {filename} PATCHED ({changes_made} change(s) applied)")
                         return True
                     else:
@@ -3107,15 +3537,14 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
                 print(f"  [VERIFY] {filename} REJECTED — response too short ({result_len} chars) for large file ({original_len} chars)")
                 return True
             # Accept the full rewrite only if it's comparable in size
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(clean_text(result))
+            _atomic_write_text(file_path, clean_text(result))
             print(f"  [VERIFY] {filename} REWRITTEN ({result_len} chars, was {original_len} chars)")
             return True
 
         print(f"  [VERIFY] {filename} response too short or unrecognized, skipping.")
         return True
 
-    def verify_single_file(filename, model):
+    def verify_single_file(filename):
         """Verify one reference file against the source of truth.
         Uses diff-based patches to avoid truncation on large files.
         Tries NVIDIA first, then falls back to Nokey and native Gemini API keys."""
@@ -3269,17 +3698,10 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
         except Exception as e:
             print(f"  [VERIFY] {filename} failed: {e}")
 
-    # Launch all verifications in parallel — each to a different model
-    threads = []
-    for i, filename in enumerate(files_to_verify):
-        model = VERIFY_MODELS[i % len(VERIFY_MODELS)]
-        t = threading.Thread(target=verify_single_file, args=(filename, model))
-        threads.append(t)
-        t.start()
-
-    # Wait for all to complete
-    for t in threads:
-        t.join()
+    # Run sequentially: parallel verifier calls exhausted per-user rate limits and
+    # the assigned model argument was never actually used by the completion path.
+    for filename in files_to_verify:
+        verify_single_file(filename)
 
     print("[VERIFY] All reference file verifications complete.")
 
@@ -4649,8 +5071,7 @@ def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: se
             if is_valid_auto_category_name(cat_clean, existing_categories, known_character_names):
                 # Create the new file.
                 filepath = os.path.join(story_dir, f"{cat_clean}.md")
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(f"## {cat_clean.title()}\n")
+                _atomic_write_text(filepath, f"## {cat_clean.title()}\n")
                 created.append(cat_clean)
                 print(f"  [Auto-Spawn] Invented new category file: {cat_clean}.md")
             elif cat_clean:
@@ -5174,8 +5595,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                 if cat.lower() in FULL_REWRITE_CATEGORIES:
                     # Only overwrite if the AI actually returned substantial content
                     if len(new_content) > 20:  # Sanity check: don't overwrite with tiny output
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(clean_text(f"## {cat.title()}\n\n{new_content}"))
+                        _atomic_write_text(path, clean_text(f"## {cat.title()}\n\n{new_content}"))
                         print(f"  Rewrote {cat}.md (structured, {len(new_content)} chars)")
                     else:
                         print(f"  Skipped {cat}.md rewrite (AI output too small: {len(new_content)} chars)")
@@ -5208,15 +5628,14 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                             merged_text += "\n"
                         merged_text += "\n".join(new_lines)
                         canonical_characters = compact_character_content(merged_text)
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(clean_text(canonical_characters or "## Characters"))
+                        _atomic_write_text(path, clean_text(canonical_characters or "## Characters"))
                         print(f"  Rebuilt characters.md with {len(new_lines)} new cast-sheet entries")
                     else:
-                        with open(path, "a", encoding="utf-8") as f:
-                            if not existing.strip():  # File empty or new
-                                f.write(clean_text(f"## {cat.title()}\n"))
-                            for ln in new_lines:
-                                f.write(clean_text(f"\n{ln}"))
+                        updated = existing
+                        if not updated.strip():  # File empty or new
+                            updated = f"## {cat.title()}\n"
+                        updated += "".join(f"\n{line}" for line in new_lines)
+                        _atomic_write_text(path, clean_text(updated))
                         print(f"  Appended {len(new_lines)} new entries to {cat}.md")
                 else:
                     print(f"  No new entries for {cat}.md")
@@ -5239,11 +5658,9 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                             and not line_stripped.startswith("=====")):
                         new_lines.append(line_stripped)
                 if new_lines:
-                    with open(summary_path, "a", encoding="utf-8") as f:
-                        if not existing.strip():
-                            f.write(clean_text("## Summary\n"))
-                        for ln in new_lines:
-                            f.write(clean_text(f"\n\n{ln}"))
+                    updated_summary = existing if existing.strip() else "## Summary\n"
+                    updated_summary += "".join(f"\n\n{line}" for line in new_lines)
+                    _atomic_write_text(summary_path, clean_text(updated_summary))
                     print(f"  Appended {len(new_lines)} new paragraphs to summary.md")
                 else:
                     print(f"  No new summary content to append")
@@ -5253,8 +5670,11 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
             consistency_path = get_consistency_path(story_id, uid=user_id)
             timestamp = time.strftime("%Y-%m-%d %H:%M")
             entry = f"\n---\n**Check at {timestamp}** (model: {model_used})\n{sections['consistency']}\n"
-            with open(consistency_path, "a", encoding="utf-8") as f:
-                f.write(clean_text(entry))
+            existing_consistency = ""
+            if os.path.exists(consistency_path):
+                with open(consistency_path, "r", encoding="utf-8") as handle:
+                    existing_consistency = handle.read()
+            _atomic_write_text(consistency_path, existing_consistency + clean_text(entry))
             print(f"  Updated consistency.md")
 
         # === Model 4: Inventory Tracker — update item status/quantities ===
@@ -5276,8 +5696,11 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         print(f"Background analysis failed (non-critical): {e}")
 
 @app.post("/analyze/{story_id}")
-async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_user_id)):
+async def trigger_analysis(story_id: str, user_info: dict = Depends(require_authenticated_user)):
     """Manually trigger background analysis for a story."""
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before analyzing")
     try:
         story_path = get_story_path(story_id, uid=user_id, create=False)
         if not os.path.exists(story_path):
@@ -5287,18 +5710,24 @@ async def trigger_analysis(story_id: str, user_id: str = Depends(get_current_use
             full_story = f.read()
 
         # Run in background
-        thread = threading.Thread(
-            target=background_analysis,
-            args=(story_id, full_story, "", user_id) # Pass empty new_text to just re-analyze everything
-        )
+        def run_analysis():
+            with get_story_lock(story_id, user_id):
+                background_analysis(story_id, full_story, "", user_id, user_info)
+
+        thread = threading.Thread(target=run_analysis, daemon=True)
         thread.start()
-        return {"status": "analysis_started", "message": "Background analysis triggerd."}
+        return {"status": "analysis_started", "message": "Background analysis triggered."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/story/{story_id}/undo")
-async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
+async def undo_last(story_id: str, user_info: dict = Depends(require_authenticated_user)):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before undoing")
     restore_story_directory_from_firestore(user_id, story_id)
     story_path = get_story_path(story_id, uid=user_id, create=False)
     chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
@@ -5327,8 +5756,7 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
     if entries[-1].get("role") == "user":
         dangling = entries.pop()
         try:
-            with open(chat_path, "w", encoding="utf-8") as f:
-                json.dump(entries, f, ensure_ascii=False)
+            _atomic_write_json(chat_path, entries)
         except Exception as e:
             print(f"  Undo: could not write chat log: {e}")
         sync_story_directory_to_firestore(user_id, story_id)
@@ -5378,8 +5806,7 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
             detail="Cannot safely undo because the story was modified after the last AI response."
         )
 
-    with open(story_path, "w", encoding="utf-8") as f:
-        f.write(story_content)
+    _atomic_write_text(story_path, story_content)
 
     # 3. Remove entries from chat log (AI entry + its preceding user entry)
     indices_to_remove = [last_ai_idx]
@@ -5387,8 +5814,7 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
         indices_to_remove.append(last_user_idx)
     entries = [e for i, e in enumerate(entries) if i not in indices_to_remove]
 
-    with open(chat_path, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False)
+    _atomic_write_json(chat_path, entries)
 
     print(f"Undo: removed {len(ai_text_clean)} chars from story, restored prompt: '{restored_prompt[:50]}...'")
     
@@ -5403,10 +5829,11 @@ async def undo_last(story_id: str, user_id: str = Depends(get_current_user_id)):
 
 
 @app.post("/story/{story_id}/retry")
-async def retry_failed_prompt(story_id: str, user_id: str = Depends(get_current_user_id)):
+async def retry_failed_prompt(story_id: str, user_info: dict = Depends(require_authenticated_user)):
     """Clear the failed-prompt marker and return the prompt so the UI can resubmit
     it. No undo happens here - the failed turn left nothing in the story, and
     previous successful turns must stay untouched."""
+    user_id = user_info["uid"]
     restore_story_directory_from_firestore(user_id, story_id)
     data = read_pending_retry(story_id, uid=user_id)
     clear_pending_retry(story_id, uid=user_id)
@@ -5421,20 +5848,15 @@ import base64
 
 @app.post("/generate-audio")
 async def generate_with_audio(
-    request: Request,
-    user_input: str = Form(...),
-    story_id: str = Form(...),
+    user_input: str = Form(..., max_length=100_000),
+    story_id: str = Form(..., max_length=120),
     skip_rules_check: bool = Form(False),
     audio: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
-    user_id: str = Depends(get_current_user_id),
-    authorization: str = Header(None)
+    user_info: dict = Depends(require_authenticated_user),
 ):
+    user_id = user_info["uid"]
     restore_story_directory_from_firestore(user_id, story_id)
-    user_info = get_current_user_info(request, authorization)
-    # Guest mode restriction: audio upload not available
-    if user_info.get("is_guest", False):
-        raise HTTPException(status_code=403, detail="Audio upload requires sign-in. Please sign in with Google to use this feature.")
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
@@ -5444,7 +5866,6 @@ async def generate_with_audio(
     print(f"DEBUG: Audio generation request for {story_id}, audio: {audio.filename}", flush=True)
 
     # Read the audio file with a size cap (avoids memory/disk exhaustion)
-    MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
     audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
     if len(audio_bytes) > MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="Audio file too large (max 25 MB).")
@@ -5469,8 +5890,7 @@ async def generate_with_audio(
     safe_audio_name = sanitize_filename(audio.filename or "uploaded_audio")
     audio_save_path = os.path.join(story_dir, safe_audio_name)
     try:
-        with open(audio_save_path, "wb") as af:
-            af.write(audio_bytes)
+        _atomic_write_bytes(audio_save_path, audio_bytes)
         print(f"DEBUG: Saved audio to {audio_save_path}")
     except Exception as save_err:
         print(f"WARNING: Could not save audio file: {save_err}")
@@ -5573,11 +5993,15 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
 
     print(f"DEBUG: Audio generate system len: {len(system_msg)}, user len: {len(user_msg)}")
 
-    # Save snapshot of .md files before generation (for undo)
-    save_snapshot(story_id, uid=user_id)
-
-    # Log the user's input to chat log
-    append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}", uid=user_id)
+    turn_token = begin_story_turn(story_id, user_id)
+    try:
+        # Save snapshot of .md files before generation (for undo)
+        save_snapshot(story_id, uid=user_id)
+        # Log the user's input to chat log
+        append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}", uid=user_id)
+    except Exception:
+        end_story_turn(story_id, user_id, turn_token)
+        raise
 
     def event_stream():
         # Same background-thread treatment as /generate: closing the browser stops
@@ -5775,16 +6199,10 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     last_display_chunk = display_chunk
                     yield f"data: {json.dumps({'type': 'chunk', 'text': display_chunk})}\n\n"
 
-            # Save to story (refined if needed)
-            try:
-                prefix = "\n\n" if full_story_text else ""
-                with open(story_path, "a", encoding="utf-8") as f:
-                    f.write(clean_text(prefix + full_response))
-            except Exception as write_err:
-                print(f"FILE WRITE ERROR: {write_err}")
-
-            # Log AI response
-            append_chat_entry(story_id, "ai", full_response, model_used_ref, uid=user_id)
+            # Commit story.md and chat_log.json together before telling the
+            # browser that this exact cleaned version is final.
+            commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id)
+            yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
 
             # Save to audio_log.md — use Model 1's OBJECTIVE analysis, not story text
             try:
@@ -5795,17 +6213,16 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     with open(audio_log_path, "r", encoding="utf-8") as f:
                         existing_log = f.read()
                 if not existing_log.strip():
-                    with open(audio_log_path, "w", encoding="utf-8") as f:
-                        f.write("## Audio Log\n")
+                    existing_log = "## Audio Log\n"
                 story_snippet = full_response[:300].replace('\n', ' ').strip()
                 if len(full_response) > 300:
                     story_snippet += "..."
-                with open(audio_log_path, "a", encoding="utf-8") as f:
-                    f.write(clean_text(
-                        f"\n\n**{timestamp}** — 🎵 *{audio.filename}* (prompt: {user_input[:100]})\n"
-                        f"{story_snippet}\n"
-                        f"- **Objective Audio Analysis**: {media_analysis[:500]}"
-                    ))
+                entry = clean_text(
+                    f"\n\n**{timestamp}** — 🎵 *{audio.filename}* (prompt: {user_input[:100]})\n"
+                    f"{story_snippet}\n"
+                    f"- **Objective Audio Analysis**: {media_analysis[:500]}"
+                )
+                _atomic_write_text(audio_log_path, existing_log + entry)
                 print(f"  Updated audio_log.md with objective analysis")
             except Exception as log_err:
                 print(f"  WARNING: Could not update audio_log.md: {log_err}")
@@ -5845,9 +6262,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 # reader already saw instead of losing the whole story.
                 print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
                 try:
-                    with open(story_path, "a", encoding="utf-8") as f:
-                        f.write(clean_text("\n\n" + full_response))
-                    append_chat_entry(story_id, "ai", full_response, model_used_ref, uid=user_id)
+                    commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id)
                     clear_pending_retry(story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     return
@@ -5870,6 +6285,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 sync_story_directory_to_firestore(user_id, story_id)
             except Exception as sync_err:
                 print(f"  Final Firestore sync failed: {sync_err}")
+            end_story_turn(story_id, user_id, turn_token)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -6071,22 +6487,29 @@ def _trim_truncated_response(text: str) -> tuple:
 
 
 class LocalBeginPayload(BaseModel):
-    user_input: str = ""
+    user_input: str = Field(default="", max_length=100_000)
 
 
 class LocalFinishPayload(BaseModel):
-    text: str = ""
-    user_input: str = ""
-    model: str = "local"
-    error: str = ""
-    audio_name: str = ""
+    text: str = Field(default="", max_length=2_000_000)
+    user_input: str = Field(default="", max_length=100_000)
+    model: str = Field(default="local", max_length=300)
+    error: str = Field(default="", max_length=10_000)
+    audio_name: str = Field(default="", max_length=200)
+    turn_token: str = Field(min_length=16, max_length=128)
+
+
+class LocalTurnTokenPayload(BaseModel):
+    turn_token: str = Field(min_length=16, max_length=128)
 
 
 @app.post("/story/{story_id}/local-begin")
-async def local_begin(story_id: str, payload: LocalBeginPayload, user_id: str = Depends(get_current_user_id)):
+async def local_begin(story_id: str, payload: LocalBeginPayload, user_info: dict = Depends(require_authenticated_user)):
     """Start a local (browser-direct) generation turn: restore the story dir,
     snapshot for undo, log the user's prompt, and return the assembled prompts
     for the BROWSER to stream against the user's local OpenAI-compatible server."""
+    user_id = user_info["uid"]
+    turn_token = begin_story_turn(story_id, user_id)
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         ctx = _build_generate_messages(story_id, user_id, payload.user_input or "")
@@ -6099,19 +6522,26 @@ async def local_begin(story_id: str, payload: LocalBeginPayload, user_id: str = 
             # local model, so it needs the same prompt the server-side editor uses.
             "rules_system_prompt": RULES_EDITOR_SYSTEM_PROMPT,
             "rules_prefix": _build_rules_check_prefix(ctx.get("rules_text", ""), ctx.get("style_text", "")),
+            "turn_token": turn_token,
         }
+    except HTTPException:
+        end_story_turn(story_id, user_id, turn_token)
+        raise
     except Exception as e:
+        end_story_turn(story_id, user_id, turn_token)
         print(f"[LocalBegin] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start local generation: {_friendly_api_error(e)}")
 
 
 @app.post("/story/{story_id}/local-finish")
-async def local_finish(story_id: str, payload: LocalFinishPayload, request: Request, authorization: str = Header(None), user_id: str = Depends(get_current_user_id)):
+async def local_finish(story_id: str, payload: LocalFinishPayload, user_info: dict = Depends(require_authenticated_user)):
     """Persist the result of a browser-direct local generation turn: append to
     story.md, log the AI chat entry, run background analysis, and sync.
     If payload.error is set, the turn failed in the browser - drop the logged
     prompt and store a pending-retry marker instead."""
-    user_info = get_current_user_info(request, authorization)
+    user_id = user_info["uid"]
+    validate_story_turn_token(story_id, user_id, payload.turn_token)
+    keep_turn_active = False
     try:
         if payload.error:
             print(f"[LocalFinish] Error from browser: {payload.error[:300]}")
@@ -6128,17 +6558,8 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, request: Requ
             write_pending_retry(story_id, uid=user_id, prompt=payload.user_input, error="Local model generated no visible text.")
             return {"ok": True, "saved": False, "truncated": False}
 
-        story_path = get_story_path(story_id, uid=user_id)
-        full_story_text = ""
-        if os.path.exists(story_path):
-            with open(story_path, "r", encoding="utf-8") as f:
-                full_story_text = f.read()
-        prefix = "\n\n" if full_story_text else ""
-        with open(story_path, "a", encoding="utf-8") as f:
-            f.write(prefix + text)
-
         model_name = (payload.model or "local").strip() or "local"
-        append_chat_entry(story_id, "ai", text, f"Local/{model_name}", uid=user_id)
+        commit_ai_turn(story_id, text, f"Local/{model_name}", uid=user_id)
 
         # NOTE: no server-side background analysis here. When the main story is
         # generated by a local (browser-direct) model, the background analysis
@@ -6158,22 +6579,22 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, request: Requ
                     with open(audio_log_path, "r", encoding="utf-8") as f:
                         existing_log = f.read()
                 if not existing_log.strip():
-                    with open(audio_log_path, "w", encoding="utf-8") as f:
-                        f.write("## Audio Log\n")
+                    existing_log = "## Audio Log\n"
                 story_snippet = text[:300].replace('\n', ' ').strip()
                 if len(text) > 300:
                     story_snippet += "..."
-                with open(audio_log_path, "a", encoding="utf-8") as f:
-                    f.write(clean_text(
-                        f"\n\n**{timestamp}** — 🎵 *{payload.audio_name}* (prompt: {(payload.user_input or '')[:100]})\n"
-                        f"{story_snippet}\n"
-                        f"- **Audio heard natively by local model**: {model_name}"
-                    ))
+                entry = clean_text(
+                    f"\n\n**{timestamp}** — 🎵 *{payload.audio_name}* (prompt: {(payload.user_input or '')[:100]})\n"
+                    f"{story_snippet}\n"
+                    f"- **Audio heard natively by local model**: {model_name}"
+                )
+                _atomic_write_text(audio_log_path, existing_log + entry)
                 print(f"  Updated audio_log.md (local native audio: {payload.audio_name})")
             except Exception as log_err:
                 print(f"  WARNING: Could not update audio_log.md: {log_err}")
 
         clear_pending_retry(story_id, uid=user_id)
+        keep_turn_active = True
         return {"ok": True, "saved": True, "truncated": was_truncated}
     except Exception as e:
         print(f"[LocalFinish] Error: {e}")
@@ -6183,23 +6604,29 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, request: Requ
             sync_story_directory_to_firestore(user_id, story_id)
         except Exception as sync_err:
             print(f"  Final Firestore sync failed: {sync_err}")
+        if not keep_turn_active:
+            end_story_turn(story_id, user_id, payload.turn_token)
 
 
 class LocalAnalyzePayload(BaseModel):
-    new_text: str = ""
+    new_text: str = Field(default="", max_length=2_000_000)
+    turn_token: str = Field(min_length=16, max_length=128)
 
 
 class LocalAnalyzeSavePayload(BaseModel):
-    output: str = ""
-    model: str = "local"
+    output: str = Field(default="", max_length=2_000_000)
+    model: str = Field(default="local", max_length=300)
+    turn_token: str = Field(min_length=16, max_length=128)
 
 
 @app.post("/story/{story_id}/local-analyze")
-async def local_analyze(story_id: str, payload: LocalAnalyzePayload, user_id: str = Depends(get_current_user_id)):
+async def local_analyze(story_id: str, payload: LocalAnalyzePayload, user_info: dict = Depends(require_authenticated_user)):
     """Build the background-analysis prompt for a browser-direct local turn. The
     BROWSER sends the returned prompt to the local model, then posts the result
     to /story/{id}/local-analyze-save for server-side parsing and file writes.
     Mirrors the server-side batching (only every BATCH_SIZE-th turn)."""
+    user_id = user_info["uid"]
+    validate_story_turn_token(story_id, user_id, payload.turn_token)
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         story_path = get_story_path(story_id, uid=user_id, create=False)
@@ -6221,10 +6648,12 @@ async def local_analyze(story_id: str, payload: LocalAnalyzePayload, user_id: st
 
 
 @app.post("/story/{story_id}/local-analyze-save")
-async def local_analyze_save(story_id: str, payload: LocalAnalyzeSavePayload, user_id: str = Depends(get_current_user_id)):
+async def local_analyze_save(story_id: str, payload: LocalAnalyzeSavePayload, user_info: dict = Depends(require_authenticated_user)):
     """Apply a browser-direct local analysis result. Reuses background_analysis
     with local_output, so parsing and file-writing stay byte-identical to the
     cloud path (only the model call is skipped)."""
+    user_id = user_info["uid"]
+    validate_story_turn_token(story_id, user_id, payload.turn_token)
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         story_path = get_story_path(story_id, uid=user_id, create=False)
@@ -6237,7 +6666,7 @@ async def local_analyze_save(story_id: str, payload: LocalAnalyzeSavePayload, us
             full_story,
             "",
             user_id=user_id,
-            user_info=None,
+            user_info=user_info,
             local_output=payload.output or "",
         )
         return {"ok": True}
@@ -6251,21 +6680,36 @@ async def local_analyze_save(story_id: str, payload: LocalAnalyzeSavePayload, us
             print(f"  Final Firestore sync failed: {sync_err}")
 
 
+@app.post("/story/{story_id}/local-turn-end")
+async def local_turn_end(story_id: str, payload: LocalTurnTokenPayload, user_info: dict = Depends(require_authenticated_user)):
+    """Release a browser-direct turn after its optional local analysis finishes."""
+    user_id = user_info["uid"]
+    validate_story_turn_token(story_id, user_id, payload.turn_token)
+    end_story_turn(story_id, user_id, payload.turn_token)
+    return {"ok": True}
+
+
 @app.post("/story/{story_id}/local-audio-begin")
-async def local_audio_begin(story_id: str, user_input: str = Form(""), audio: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
+async def local_audio_begin(story_id: str, user_input: str = Form("", max_length=100_000), audio: UploadFile = File(...), user_info: dict = Depends(require_authenticated_user)):
     """Start a local (browser-direct) turn WITH native audio input: the browser
     sends the audio file straight to a multimodal local model (e.g. Ollama +
     gemma3 / qwen2.5-omni) as an input_audio part. The server saves the file
     for future context and returns the assembled prompts. No cloud transcription
     happens - the model hears the audio directly."""
+    user_id = user_info["uid"]
+    turn_token = begin_story_turn(story_id, user_id)
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         story_dir = get_story_dir(story_id, uid=user_id)
         safe_audio_name = sanitize_filename(audio.filename or "uploaded_audio")
         audio_save_path = os.path.join(story_dir, safe_audio_name)
-        audio_bytes = await audio.read()
-        with open(audio_save_path, "wb") as af:
-            af.write(audio_bytes)
+        audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=413, detail="Audio file too large (max 25 MB).")
+        audio_mime = audio.content_type or "audio/mpeg"
+        if not audio_mime.startswith("audio/"):
+            raise HTTPException(status_code=415, detail="Only audio files are supported.")
+        _atomic_write_bytes(audio_save_path, audio_bytes)
         ctx = _build_generate_messages(story_id, user_id, user_input or "")
         save_snapshot(story_id, uid=user_id)
         append_chat_entry(story_id, "user", user_input or "", uid=user_id)
@@ -6273,27 +6717,32 @@ async def local_audio_begin(story_id: str, user_input: str = Form(""), audio: Up
             "system_msg": ctx["system_msg"],
             "user_msg": ctx["user_msg"],
             "audio_name": safe_audio_name,
-            "audio_mime": audio.content_type or "audio/mpeg",
+            "audio_mime": audio_mime,
             "rules_system_prompt": RULES_EDITOR_SYSTEM_PROMPT,
             "rules_prefix": _build_rules_check_prefix(ctx.get("rules_text", ""), ctx.get("style_text", "")),
+            "turn_token": turn_token,
         }
+    except HTTPException:
+        end_story_turn(story_id, user_id, turn_token)
+        raise
     except Exception as e:
+        end_story_turn(story_id, user_id, turn_token)
         print(f"[LocalAudioBegin] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start local audio generation: {_friendly_api_error(e)}")
 
 
 @app.post("/generate")
-async def generate_story(request: Request, input_data: StoryInput, background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user_id), authorization: str = Header(None)):
+async def generate_story(input_data: StoryInput, background_tasks: BackgroundTasks, user_info: dict = Depends(require_authenticated_user)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
+    user_id = user_info["uid"]
     restore_story_directory_from_firestore(user_id, input_data.story_id)
-    user_info = get_current_user_info(request, authorization)
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
         if not any(bool(user_keys.get(k)) for k in api_keys):
             raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
 
-    if not has_any_generation_provider():
+    if not has_any_generation_provider(user_info):
         raise HTTPException(status_code=500, detail="No AI providers are configured or reachable.")
 
     story_path = get_story_path(input_data.story_id, uid=user_id)
@@ -6449,11 +6898,15 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     print(f"DEBUG: Generating for {input_data.story_id}, system len: {len(system_msg)}, user len: {len(user_msg)}")
     print(f"DEBUG: Story text empty? {not full_story_text}")
 
-    # Save snapshot of .md files before generation (for undo)
-    save_snapshot(input_data.story_id, uid=user_id)
-
-    # Log the user's input to chat log
-    append_chat_entry(input_data.story_id, "user", input_data.user_input, uid=user_id)
+    turn_token = begin_story_turn(input_data.story_id, user_id)
+    try:
+        # Save snapshot of .md files before generation (for undo)
+        save_snapshot(input_data.story_id, uid=user_id)
+        # Log the user's input to chat log
+        append_chat_entry(input_data.story_id, "user", input_data.user_input, uid=user_id)
+    except Exception:
+        end_story_turn(input_data.story_id, user_id, turn_token)
+        raise
 
     def event_stream():
         # Run the whole turn in a background thread (see _relay_stream): if the
@@ -6466,7 +6919,6 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         model_used_ref = ""
         last_finish_reason = ""
         response_persisted = False
-        chat_logged = False
         chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
         try:
             stream, model_used, is_thinking = stream_with_fallback(
@@ -6696,28 +7148,11 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                         last_display_chunk = display_chunk
                         yield f"data: {json.dumps({'type': 'chunk', 'text': display_chunk})}\n\n"
 
-            # Save the full response to file
-            try:
-                prefix = "\n\n" if full_story_text else ""
-                with open(story_path, "a", encoding="utf-8") as f:
-                    f.write(clean_text(prefix + full_response))
-                response_persisted = True
-            except OSError as write_err:
-                if write_err.errno == 22:
-                    print(f"  File write interrupted (client disconnected), saving anyway...")
-                    try:
-                        prefix = "\n\n" if full_story_text else ""
-                        with open(story_path, "a", encoding="utf-8") as f:
-                            f.write(clean_text(prefix + full_response))
-                        response_persisted = True
-                    except Exception:
-                        pass
-                else:
-                    print(f"FILE WRITE ERROR: {write_err}")
-            
-            # Log AI response to chat log
-            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref, uid=user_id)
-            chat_logged = True
+            # Commit story.md and chat_log.json together before telling the
+            # browser that this exact cleaned version is final.
+            commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id)
+            response_persisted = True
+            yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
             
             # Trigger background analysis (BATCHED) - and WAIT for it before signaling done,
             # so the input box stays locked until story memory is actually caught up. This
@@ -6762,12 +7197,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 if full_response and not response_persisted:
                     print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
                     try:
-                        with open(story_path, "a", encoding="utf-8") as f:
-                            f.write(clean_text("\n\n" + full_response))
+                        commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id)
                         response_persisted = True
-                        if not chat_logged:
-                            append_chat_entry(input_data.story_id, "ai", full_response, model_used_ref, uid=user_id)
-                            chat_logged = True
                     except Exception as save_err:
                         print(f"Failed to save partial response: {save_err}")
                 # Tell the UI the turn is over (harmless if the client is really gone).
@@ -6792,6 +7223,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 sync_story_directory_to_firestore(user_id, input_data.story_id)
             except Exception as sync_err:
                 print(f"  Final Firestore sync failed: {sync_err}")
+            end_story_turn(input_data.story_id, user_id, turn_token)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -6820,6 +7252,16 @@ import urllib.request
 import urllib.parse
 import datetime
 from concurrent.futures import ThreadPoolExecutor
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects when querying a user-controlled OpenAI-compatible host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
 
 DYNAMIC_PROVIDER_MODELS = {}
 LAST_DYNAMIC_FETCH = 0
@@ -6934,24 +7376,25 @@ def _cache_provider_models(provider_key, display, live_result):
 
 def fetch_openai_live_models(api_key: str = None, base_url: str = None):
     key = api_key or os.getenv("OPENAI_API_KEY")
-    url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/models"
     if not key:
         return None
     try:
+        safe_base_url = validate_openai_base_url(base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+        url = safe_base_url + "/models"
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {key}",
             "User-Agent": "StoryWeaver/1.0"
         })
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
                       for m in data.get("data", []) if m.get("id")]
             if models:
                 return "openai", models
     except urllib.error.HTTPError as e:
-        print(f"[Live Fetch Note] OpenAI models fetch ({url}): {_http_error_detail(e)}")
+        print(f"[Live Fetch Note] OpenAI models fetch: {_http_error_detail(e)}")
     except Exception as e:
-        print(f"[Live Fetch Note] OpenAI models fetch ({url}): {e}")
+        print(f"[Live Fetch Note] OpenAI models fetch: {e}")
     return None
 
 
@@ -7277,48 +7720,42 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
 
     return {"providers": allowed_providers}
 
-if __name__ == "__main__":
-    import uvicorn
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    port = int(os.getenv("PORT", 8000))
-    # Bind to localhost by default locally; Render (which sets PORT) gets 0.0.0.0.
-    host = os.getenv("HOST") or ("0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
-    reload_enabled = os.getenv("RELOAD", "false").lower() == "true"
-    print(f"Auto-reload watching: {project_dir} on {host}:{port} (reload={reload_enabled})")
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        reload=reload_enabled,
-        reload_dirs=[project_dir],
-    )
-
-
-
 class UserKeysPayload(BaseModel):
-    gemini_api_key: Optional[str] = ""
-    openai_api_key: Optional[str] = ""
-    openai_base_url: Optional[str] = "https://api.openai.com/v1"
-    openrouter_api_key: Optional[str] = ""
-    groq_api_key: Optional[str] = ""
-    nvidia_api_key: Optional[str] = ""
-    story_model: Optional[str] = ""
-    background_model: Optional[str] = ""
-    rules_model: Optional[str] = ""
-    audio_model: Optional[str] = ""
-    local_enabled: Optional[str] = ""
-    local_base_url: Optional[str] = ""
-    local_api_key: Optional[str] = ""
-    local_name: Optional[str] = ""
-    local_story_model: Optional[str] = ""
-    local_background_model: Optional[str] = ""
-    local_rules_model: Optional[str] = ""
-    local_audio_model: Optional[str] = ""
+    gemini_api_key: Optional[str] = Field(default=None, max_length=4096)
+    openai_api_key: Optional[str] = Field(default=None, max_length=4096)
+    openai_base_url: Optional[str] = Field(default=None, max_length=2048)
+    openrouter_api_key: Optional[str] = Field(default=None, max_length=4096)
+    groq_api_key: Optional[str] = Field(default=None, max_length=4096)
+    nvidia_api_key: Optional[str] = Field(default=None, max_length=4096)
+    story_model: Optional[str] = Field(default=None, max_length=300)
+    background_model: Optional[str] = Field(default=None, max_length=300)
+    rules_model: Optional[str] = Field(default=None, max_length=300)
+    audio_model: Optional[str] = Field(default=None, max_length=300)
+    local_enabled: Optional[str] = Field(default=None, max_length=10)
+    local_base_url: Optional[str] = Field(default=None, max_length=2048)
+    local_api_key: Optional[str] = Field(default=None, max_length=4096)
+    local_name: Optional[str] = Field(default=None, max_length=200)
+    local_story_model: Optional[str] = Field(default=None, max_length=300)
+    local_background_model: Optional[str] = Field(default=None, max_length=300)
+    local_rules_model: Optional[str] = Field(default=None, max_length=300)
+    local_audio_model: Optional[str] = Field(default=None, max_length=300)
+    clear_keys: List[str] = Field(default_factory=list, max_length=16)
 
 @app.get("/api/user/settings")
 async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
     """Retrieve user settings, role, and masked custom API keys."""
     uid = user_info["uid"]
+    if user_info.get("is_guest"):
+        return {
+            "uid": uid,
+            "email": "",
+            "is_super_admin": False,
+            "is_guest": True,
+            "has_custom_keys": False,
+            "masked_keys": {},
+            "local_api_key_full": "",
+            "super_admin_email": "",
+        }
     keys = load_user_keys(uid)
     # Non-secret fields that should be returned in full (not masked)
     NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model",
@@ -7349,11 +7786,14 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
     }
 
 @app.post("/api/user/settings")
-async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depends(get_current_user_info)):
+async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depends(require_authenticated_user)):
     """Update user-specific custom API keys."""
     uid = user_info["uid"]
-    new_keys = payload.model_dump()
-    saved = save_user_keys(uid, new_keys)
+    new_keys = payload.model_dump(exclude_none=True, exclude={"clear_keys"})
+    try:
+        saved = save_user_keys(uid, new_keys, clear_keys=payload.clear_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "status": "success",
         "message": "User API keys saved successfully!",
@@ -7381,10 +7821,26 @@ def _sanitize_log_line(line: str) -> str:
 
 @app.get("/api/logs")
 async def get_server_logs(user_info: dict = Depends(get_current_user_info)):
-    """Server logs stay usable for everyone: on deployments (Firebase active),
-    secret-shaped values (API keys, bearer tokens) are redacted for non-super-admins;
-    local mode returns full logs."""
-    logs = list(SERVER_LOGS)
+    """Return server logs to the super admin (or to an explicitly local server)."""
     if firebase_initialized and not user_info.get("is_super_admin"):
-        logs = [_sanitize_log_line(line) for line in logs]
+        raise HTTPException(status_code=403, detail="Server logs are restricted to the super admin")
+    logs = list(SERVER_LOGS)
     return {"logs": logs}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    port = int(os.getenv("PORT", 8000))
+    # Bind to localhost by default locally; Render (which sets PORT) gets 0.0.0.0.
+    host = os.getenv("HOST") or ("0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
+    reload_enabled = os.getenv("RELOAD", "false").lower() == "true"
+    print(f"Auto-reload watching: {project_dir} on {host}:{port} (reload={reload_enabled})")
+    if reload_enabled:
+        # Uvicorn requires an import string for its reloader subprocess.
+        uvicorn.run("main:app", host=host, port=port, reload=True, reload_dirs=[project_dir])
+    else:
+        # Passing the app object avoids importing this module a second time, which
+        # previously downgraded Firebase initialization and token verification.
+        uvicorn.run(app, host=host, port=port)
