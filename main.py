@@ -52,6 +52,7 @@ from google import genai
 from google.genai import types
 from difflib import SequenceMatcher
 import hashlib
+import ipaddress
 
 from dotenv import load_dotenv
 
@@ -136,29 +137,51 @@ if db_conn_str:
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
 
 def _get_client_ip(request) -> str:
-    """Extract real client IP. Proxy headers (X-Forwarded-For / X-Real-IP) are only
-    honored when TRUST_PROXY_HEADERS=true. Otherwise anyone could spoof them to
-    impersonate another guest's IP-derived UID."""
-    if TRUST_PROXY_HEADERS and hasattr(request, 'headers'):
-        # Cloudflare overwrites CF-Connecting-IP with the actual client address.
-        # If it is unavailable, use the rightmost X-Forwarded-For hop: callers can
-        # prepend arbitrary values, which made the previous first-hop logic a
-        # guest-workspace impersonation primitive on the live deployment.
+    """Extract real client IP without trusting client-supplied headers.
+
+    Client-supplied X-Forwarded-For / X-Real-IP can be trivially spoofed by any
+    remote caller, which lets an attacker mint an arbitrary guest_<hash> UID
+    and read/write another guest's workspace — this was verified live against
+    the Render deployment.
+
+    Source of truth, in order of preference:
+      1. CF-Connecting-IP — OVERWRITTEN by Cloudflare at the edge on every
+         request, so it is safe to honor unconditionally (clients cannot
+         spoof it through Cloudflare).
+      2. X-Forwarded-For / X-Real-IP — only when TRUST_PROXY_HEADERS=true,
+         i.e. the operator has placed the app behind a proxy that strips
+         client-supplied XFF (self-managed nginx etc.). When honored, the
+         RIGHT-MOST hop is used: callers can prepend arbitrary values, so the
+         left-most entry is attacker-controlled.
+      3. request.client.host — the socket peer IP. Behind Render's proxy this
+         is the proxy's egress IP (same for everyone): it won't distinguish
+         guests, but no remote caller can choose it to impersonate one.
+    """
+    if hasattr(request, 'headers'):
         cloudflare_ip = request.headers.get("cf-connecting-ip")
         if cloudflare_ip:
             return cloudflare_ip.strip()
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[-1].strip()
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            return real_ip.strip()
+        if TRUST_PROXY_HEADERS:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                return forwarded.split(",")[-1].strip()
+            real_ip = request.headers.get("x-real-ip")
+            if real_ip:
+                return real_ip.strip()
     if hasattr(request, 'client') and request.client:
         return request.client.host
     return "unknown"
 
 def _ip_to_guest_uid(ip: str) -> str:
-    """Convert an IP address to a deterministic guest UID."""
+    """Convert an IP address to a deterministic guest UID.
+
+    Validates the input with ipaddress so junk strings (e.g. `'; DROP TABLE--`
+    smuggled through a header) all collapse into one shared 'invalid-ip'
+    bucket instead of minting arbitrary guest workspaces."""
+    try:
+        ip = str(ipaddress.ip_address((ip or "").strip()))
+    except (ValueError, AttributeError):
+        ip = "invalid-ip"
     ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:20]
     return f"guest_{ip_hash}"
 
