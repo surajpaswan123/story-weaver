@@ -5745,6 +5745,109 @@ async def trigger_analysis(story_id: str, user_info: dict = Depends(require_auth
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/story/{story_id}/delete-turn")
+async def delete_turn(story_id: str, body: dict, user_info: dict = Depends(require_authenticated_user)):
+    """Delete an arbitrary turn pair (user prompt + its AI response) from the middle
+    or end of a story. Fixes the classic duplicate-prompt problem (same prompt sent
+    twice) which `undo` cannot reach once later turns exist.
+
+    Body: {"turn_index": <int>} — 0-based PAIR index over user/ai pairs in
+    chat_log.json (turn 0 = first You said + AI said).
+
+    Removal strategy: text-matching against story.md rather than positional
+    splitting, because clean_text() may transform text and naive "\\n\\n" splitting
+    can misalign. The AI entry's exact stored text is located in story.md and its
+    occurrence is removed with its leading separator. If the text is not found
+    (story manually edited), we still remove the chat-log pair but flag it so the
+    UI can warn the user to run the Consistency Checker.
+    """
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before deleting turns")
+    restore_story_directory_from_firestore(user_id, story_id)
+
+    try:
+        turn_index = int(body.get("turn_index", -1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="turn_index must be an integer")
+    if turn_index < 0:
+        raise HTTPException(status_code=422, detail="turn_index must be >= 0")
+
+    story_path = get_story_path(story_id, uid=user_id, create=False)
+    chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
+    if not os.path.exists(chat_path):
+        raise HTTPException(status_code=404, detail="Story not found")
+
+    try:
+        with open(chat_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        if not isinstance(entries, list):
+            entries = []
+    except (json.JSONDecodeError, OSError):
+        entries = []
+
+    # Walk entries, grouping into pairs: each AI response pairs with the nearest
+    # preceding user entry. Deleting turn N removes that AI entry plus (if found)
+    # its paired user entry.
+    ai_seen = -1
+    target_ai_idx = None
+    target_user_idx = None
+    last_user_idx = None
+    for i, e in enumerate(entries):
+        if e.get("role") == "user":
+            last_user_idx = i
+        elif e.get("role") == "ai":
+            ai_seen += 1
+            if ai_seen == turn_index:
+                target_ai_idx = i
+                target_user_idx = last_user_idx
+                break
+
+    if target_ai_idx is None:
+        raise HTTPException(status_code=404, detail=f"Turn {turn_index} not found (story has {ai_seen + 1} AI turns)")
+
+    ai_text_clean = clean_text(entries[target_ai_idx].get("text", "")).strip()
+    story_text_removed = False
+
+    if os.path.exists(story_path) and ai_text_clean:
+        with open(story_path, "r", encoding="utf-8") as f:
+            story_content = f.read()
+        # Remove the FIRST occurrence (with its leading separator). If the same
+        # text was generated twice (the duplicate-run case), deleting one turn
+        # removes one copy — exactly what the user wants.
+        for separator in ["\n\n", "\n", ""]:
+            needle = separator + ai_text_clean
+            pos = story_content.find(needle)
+            if pos != -1:
+                story_content = story_content[:pos] + story_content[pos + len(needle):]
+                story_text_removed = True
+                break
+        if story_text_removed:
+            _atomic_write_text(story_path, story_content.strip() + ("\n" if story_content.strip() else ""))
+
+    indices_to_remove = {target_ai_idx}
+    if target_user_idx is not None:
+        indices_to_remove.add(target_user_idx)
+    entries = [e for i, e in enumerate(entries) if i not in indices_to_remove]
+    _atomic_write_json(chat_path, entries)
+
+    # NOTE: deliberately NOT restoring the .md snapshot here. Snapshots only hold
+    # the state right before the LAST turn (single-undo semantics); restoring one
+    # after a middle-delete would roll summary/characters/rules back to a wrong
+    # point in history. The remaining side files stay as-is, and the UI suggests
+    # re-running analysis if the user wants the summary refreshed.
+
+    sync_story_directory_to_firestore(user_id, story_id)
+
+    remaining_ai = sum(1 for e in entries if e.get("role") == "ai")
+    print(f"Delete-turn {turn_index}: chat={'ok'}, story={'removed' if story_text_removed else 'NOT FOUND'}; {remaining_ai} AI turns remain")
+    return {
+        "deleted_turn": turn_index,
+        "story_text_removed": story_text_removed,
+        "remaining_turns": remaining_ai,
+        "consistency_warning": not story_text_removed,
+    }
+
 @app.post("/story/{story_id}/undo")
 async def undo_last(story_id: str, user_info: dict = Depends(require_authenticated_user)):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""

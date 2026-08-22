@@ -1256,20 +1256,52 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const block = document.createElement('div');
             block.className = 'mb-4';
 
-            const header = document.createElement('h3');
-            header.className = 'px-6 pt-4 pb-1 font-bold text-sm';
+            // Turn numbering: count AI entries up to and including this one so the
+            // heading screen readers announce ("Turn 5 — You said" / "Turn 5 — AI
+            // said") matches across the pair and heading-jump (H) skims turn by turn.
+            let turnNumber = 0;
+            {
+                const idx = allChatEntries.indexOf(entry);
+                for (let i = 0; i <= idx && i < allChatEntries.length; i++) {
+                    if (allChatEntries[i].role === 'ai') turnNumber++;
+                }
+                if (entry.role === 'user') {
+                    // A user prompt belongs to the AI turn that FOLLOWS it (turnNumber
+                    // currently counts earlier AI turns, so the upcoming one is +1).
+                    turnNumber += 1;
+                }
+            }
+            block.dataset.turnIndex = (entry.role === 'ai') ? (turnNumber - 1) : (turnNumber - 1);
 
+            const header = document.createElement('h3');
+            header.className = 'px-6 pt-4 pb-1 font-bold text-sm flex items-center justify-between gap-2';
+
+            const headerLabel = document.createElement('span');
             if (entry.role === 'user') {
                 header.className += ' text-stone-600';
-                header.textContent = 'You said:';
-                block.appendChild(header);
+                headerLabel.textContent = `Turn ${turnNumber} — You said:`;
+                header.appendChild(headerLabel);
 
+                block.appendChild(header);
                 const fullText = entry.text || '';
                 block.appendChild(createExpandablePrompt(fullText));
             } else {
                 header.className += ' text-stone-500';
-                const modelInfo = entry.model ? ` - ${entry.model}` : '';
-                header.textContent = `AI said:${modelInfo}`;
+                const modelInfo = entry.model ? ` — ${entry.model}` : '';
+                headerLabel.textContent = `Turn ${turnNumber} — AI said:${modelInfo}`;
+                header.appendChild(headerLabel);
+
+                // Delete-turn button (only when signed in — guests are read-only).
+                if (!isGuestMode) {
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'action-btn ml-auto';
+                    delBtn.textContent = '🗑 Delete turn';
+                    delBtn.title = `Delete turn ${turnNumber} (your prompt and this AI response)`;
+                    delBtn.setAttribute('aria-label', `Delete turn ${turnNumber}: removes your prompt and this AI response from the story`);
+                    delBtn.onclick = () => deleteTurn(turnNumber - 1);
+                    header.appendChild(delBtn);
+                }
+
                 block.appendChild(header);
 
                 const body = document.createElement('div');
@@ -2126,6 +2158,44 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
+        async function deleteTurn(turnIndex) {
+            const humanTurn = turnIndex + 1;
+            const ok = window.confirm(
+                `Delete turn ${humanTurn}? This permanently removes your prompt and the AI's response for that turn from this story.`
+            );
+            if (!ok) return;
+
+            try {
+                announceStatus(`Deleting turn ${humanTurn}...`);
+                const res = await authFetch(`/story/${currentStoryId}/delete-turn`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ turn_index: turnIndex }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `Delete failed (${res.status})`);
+                }
+                const data = await res.json();
+                await loadStory();
+                if (data.consistency_warning) {
+                    announceToScreenReader(
+                        `Turn ${humanTurn} deleted from history, but its text could not be located in the story body — the story may have been edited manually. Consider running the Consistency Checker.`
+                    );
+                    announceStatus('Turn deleted — consistency check recommended');
+                } else {
+                    announceToScreenReader(
+                        `Turn ${humanTurn} deleted. ${data.remaining_turns} ${data.remaining_turns === 1 ? 'turn' : 'turns'} remaining. Remaining turns have been renumbered.`
+                    );
+                    announceStatus('Turn deleted');
+                }
+            } catch (err) {
+                console.error('Delete turn failed:', err);
+                announceToScreenReader(`Could not delete turn ${humanTurn}: ${err.message}`);
+                announceStatus('Delete failed');
+            }
+        }
+
         async function copyResponse(btn) {
             const actionBar = btn.closest('.action-bar');
             if (!actionBar) return;
@@ -2895,7 +2965,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             overlay.innerHTML = `
                 <div style="background:#1c1917;border:1px solid #44403c;border-radius:16px;padding:32px;max-width:420px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
                     <div style="font-size:48px;margin-bottom:12px;">🔐</div>
-                    <h3 style="color:#fbbf24;font-size:20px;font-weight:700;margin-bottom:8px;">Unlock Full Access</h3>
+                    <h2 style="color:#fbbf24;font-size:20px;font-weight:700;margin-bottom:8px;">Unlock Full Access</h2>
                     <p style="color:#a8a29e;font-size:13px;line-height:1.6;margin-bottom:20px;">
                         You're using <strong style="color:#fbbf24;">Guest Mode</strong> with limited features.<br>
                         Sign in with Google to unlock:
@@ -3003,7 +3073,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         <div class="p-3 bg-stone-950 border-b border-stone-800 flex items-center justify-between">
             <div class="flex items-center gap-2">
                 <span class="text-amber-500">📜</span>
-                <h3 class="text-sm font-semibold text-stone-100">Live Server Logs</h3>
+                <h2 class="text-sm font-semibold text-stone-100">Live Server Logs</h2>
                 <span id="log-count-badge" class="text-[10px] bg-stone-800 text-stone-400 px-1.5 py-0.5 rounded">0 lines</span>
             </div>
             <div class="flex items-center gap-2">
@@ -3034,7 +3104,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         <div class="flex items-center justify-between border-b border-stone-800 pb-3">
             <div class="flex items-center gap-2">
                 <span class="text-xl">⚙️</span>
-                <h3 class="text-lg font-bold text-stone-100">Account & API Key Settings</h3>
+                <h2 class="text-lg font-bold text-stone-100">Account & API Key Settings</h2>
             </div>
             <button onclick="toggleSettingsModal()" class="text-stone-400 hover:text-stone-100 p-1 text-lg">✕</button>
         </div>
@@ -3101,7 +3171,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             <!-- Local OpenAI-Compatible Server (browser-direct) -->
             <div class="border-t border-stone-800 pt-4 mt-2">
-                <h4 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span>🖥️</span> Local OpenAI-Compatible Server</h4>
+                <h3 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span aria-hidden="true">🖥️</span> Local OpenAI-Compatible Server</h3>
                 <p class="text-[10px] text-stone-500 mb-3">Connect any OpenAI-compatible endpoint running on <strong>your machine</strong> (Ollama, LM Studio, vLLM, a custom proxy...). Your browser talks to it directly, so <code>localhost</code> means <em>your</em> computer. The server must send CORS headers (Ollama: set <code>OLLAMA_ORIGINS=*</code>; LM Studio: CORS on by default).</p>
                 <div class="flex items-center gap-2 mb-3">
                     <input type="checkbox" id="input-local-enabled" class="w-4 h-4 accent-amber-500">
@@ -3156,7 +3226,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             <!-- Pipeline Model Overrides -->
             <div class="border-t border-stone-800 pt-4 mt-2">
-                <h4 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span>🔧</span> Pipeline Model Overrides</h4>
+                <h3 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span aria-hidden="true">🔧</span> Pipeline Model Overrides</h3>
                 <p class="text-[10px] text-stone-500 mb-3">Override which AI model is used for each pipeline task. Leave as "Default" to use the system's automatic selection.</p>
                 <div class="grid grid-cols-2 gap-3">
                     <div>
@@ -3206,7 +3276,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
     <div class="bg-stone-900 border border-stone-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-stone-200">
         <div class="flex items-center gap-3 text-amber-500 border-b border-stone-800 pb-3">
             <span class="text-2xl">⚠️</span>
-            <h3 class="text-lg font-bold">API Key & Override Check</h3>
+            <h2 class="text-lg font-bold">API Key & Override Check</h2>
         </div>
         <p class="text-sm text-stone-300 leading-relaxed">
             You have not selected a <strong>Story Model override</strong> in Settings (⚙️). 
