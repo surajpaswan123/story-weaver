@@ -1194,66 +1194,76 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
     elif label == "Audio":
         target_model = user_keys.get("audio_model", "").strip()
 
-    # If specific model configured by user/admin, try target_model FIRST across providers
+    # If specific model configured by user/admin, try target_model FIRST across providers.
+    # Route by ID SHAPE instead of blind-firing every provider: 'org/model' ids
+    # (deepseek-ai/..., moonshotai/..., google/gemma-...) are OpenAI-compatible
+    # catalog names that can NEVER exist on Google GenAI (which uses bare
+    # gemini-*/gemma-* ids), and vice versa. This kills the guaranteed-404
+    # 'GenAI/deepseek-ai/...' attempt (plus its AFC SDK warning) on every call.
     if target_model:
-        # 1. Try with OpenAI client if matches
-        if active_clients.get("openai_client"):
-            try:
-                print(f"  [{label}] Trying user configured target OpenAI/{target_model}...")
-                kwargs = {"model": target_model, "messages": messages}
-                if not target_model.startswith("o"):
-                    kwargs["temperature"] = temperature
-                resp = active_clients["openai_client"].chat.completions.create(**kwargs)
-                res = resp.choices[0].message.content or ""
-                if res.strip():
-                    return res, f"Configured/{target_model}"
-            except Exception as e:
-                print(f"  [{label}] Configured OpenAI/{target_model} note: {e}")
+        _t = target_model.strip()
+        _tl = _t.lower()
+        _google_style = _tl.startswith(("gemini", "gemma", "learnlm", "imagen")) and "/" not in _t
+        _catalog_style = "/" in _t  # NVIDIA NIM / OpenRouter org-prefixed ids
 
-        # 2. Try with GenAI client if matches
-        if active_clients.get("genai_clients"):
-            for c in active_clients["genai_clients"]:
+        if _google_style:
+            # 1. Google GenAI owns bare gemini-*/gemma-* ids
+            if active_clients.get("genai_clients"):
+                for c in active_clients["genai_clients"]:
+                    try:
+                        print(f"  [{label}] Trying user configured target GenAI/{_t}...")
+                        base_m = _t.replace(":search", "")
+                        resp = c.models.generate_content(
+                            model=base_m,
+                            contents=f"{system_prompt}\n\n{user_prompt}",
+                            config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                        )
+                        if resp.text and resp.text.strip():
+                            return resp.text, f"Configured/{_t}"
+                    except Exception as e:
+                        print(f"  [{label}] Configured GenAI/{_t} note: {e}")
+        else:
+            # 2. OpenAI-compatible providers. Catalog-style ids live on
+            #    NVIDIA/OpenRouter/Groq; bare ids are classic OpenAI/Groq names.
+            if active_clients.get("openai_client") and not _catalog_style:
                 try:
-                    print(f"  [{label}] Trying user configured target GenAI/{target_model}...")
-                    base_m = target_model.replace(":search", "")
-                    resp = c.models.generate_content(
-                        model=base_m,
-                        contents=f"{system_prompt}\n\n{user_prompt}",
-                        config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
-                    )
-                    if resp.text and resp.text.strip():
-                        return resp.text, f"Configured/{target_model}"
+                    print(f"  [{label}] Trying user configured target OpenAI/{_t}...")
+                    kwargs = {"model": _t, "messages": messages}
+                    if not _tl.startswith("o"):
+                        kwargs["temperature"] = temperature
+                    resp = active_clients["openai_client"].chat.completions.create(**kwargs)
+                    res = resp.choices[0].message.content or ""
+                    if res.strip():
+                        return res, f"Configured/{_t}"
                 except Exception as e:
-                    print(f"  [{label}] Configured GenAI/{target_model} note: {e}")
+                    print(f"  [{label}] Configured OpenAI/{_t} note: {e}")
 
-        # 3. Try with NVIDIA client if matches
-        if active_clients.get("nvidia_client"):
-            try:
-                print(f"  [{label}] Trying user configured target NVIDIA/{target_model}...")
-                resp = active_clients["nvidia_client"].chat.completions.create(
-                    model=target_model, messages=messages, temperature=temperature
-                )
-                res = resp.choices[0].message.content or ""
-                if res.strip():
-                    return res, f"Configured/{target_model}"
-            except Exception as e:
-                print(f"  [{label}] Configured NVIDIA/{target_model} note: {e}")
+            if active_clients.get("nvidia_client") and _catalog_style:
+                try:
+                    print(f"  [{label}] Trying user configured target NVIDIA/{_t}...")
+                    resp = active_clients["nvidia_client"].chat.completions.create(
+                        model=_t, messages=messages, temperature=temperature
+                    )
+                    res = resp.choices[0].message.content or ""
+                    if res.strip():
+                        return res, f"Configured/{_t}"
+                except Exception as e:
+                    print(f"  [{label}] Configured NVIDIA/{_t} note: {e}")
 
-        # 4. OpenAI-compatible providers with the same configured model name.
-        for provider_name, client_key in (("Groq", "groq_client"), ("OpenRouter", "openrouter_client")):
-            provider_client = active_clients.get(client_key)
-            if not provider_client:
-                continue
-            try:
-                print(f"  [{label}] Trying user configured target {provider_name}/{target_model}...")
-                resp = provider_client.chat.completions.create(
-                    model=target_model, messages=messages, temperature=temperature
-                )
-                res = resp.choices[0].message.content or ""
-                if res.strip():
-                    return res, f"Configured/{provider_name}/{target_model}"
-            except Exception as e:
-                print(f"  [{label}] Configured {provider_name}/{target_model} note: {e}")
+            for provider_name, client_key in (("Groq", "groq_client"), ("OpenRouter", "openrouter_client")):
+                provider_client = active_clients.get(client_key)
+                if not provider_client:
+                    continue
+                try:
+                    print(f"  [{label}] Trying user configured target {provider_name}/{_t}...")
+                    resp = provider_client.chat.completions.create(
+                        model=_t, messages=messages, temperature=temperature
+                    )
+                    res = resp.choices[0].message.content or ""
+                    if res.strip():
+                        return res, f"Configured/{provider_name}/{_t}"
+                except Exception as e:
+                    print(f"  [{label}] Configured {provider_name}/{_t} note: {e}")
 
     # Fallback to Super Admin system chain or Standard User available keys
     if user_info.get("is_super_admin"):
