@@ -5674,6 +5674,44 @@ async def trigger_analysis(story_id: str, user_info: dict = Depends(require_auth
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/story/{story_id}/delete-dangling")
+async def delete_dangling_prompts(story_id: str, user_info: dict = Depends(require_authenticated_user)):
+    """Remove ALL trailing user prompts that never received an AI response.
+
+    These appear when the server dies mid-generation (deploy restart, crash,
+    network cut before the provider answered): graceful failures clean up after
+    themselves via remove_last_user_entry + write_pending_retry, but a hard
+    death leaves the 'You said:' entry stranded in chat_log.json with no banner
+    and no retry marker. This endpoint discards every such stranded prompt.
+    Story text is untouched - nothing was ever committed to story.md for a turn
+    that produced no response."""
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(status_code=409, detail="A generation is currently running - wait for it to finish")
+    restore_story_directory_from_firestore(user_id, story_id)
+    chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
+    if not os.path.exists(chat_path):
+        return {"removed": 0}
+
+    try:
+        with open(chat_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        if not isinstance(entries, list):
+            entries = []
+    except (json.JSONDecodeError, OSError):
+        entries = []
+
+    removed = 0
+    while entries and entries[-1].get("role") == "user":
+        entries.pop()
+        removed += 1
+
+    if removed:
+        _atomic_write_json(chat_path, entries)
+        sync_story_directory_to_firestore(user_id, story_id)
+
+    return {"removed": removed}
+
 @app.post("/story/{story_id}/delete-turn")
 async def delete_turn(story_id: str, body: dict, user_info: dict = Depends(require_authenticated_user)):
     """Delete an arbitrary turn pair (user prompt + its AI response) from the middle

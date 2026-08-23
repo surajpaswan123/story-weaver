@@ -1289,6 +1289,24 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 headerLabel.textContent = `Turn ${turnNumber} — You said:`;
                 header.appendChild(headerLabel);
 
+                // Dangling prompt: a user entry that is the LAST entry in the chat
+                // log (no AI response ever followed). Happens when the server died
+                // mid-generation (deploy restart, crash) - graceful failures clean
+                // up after themselves, hard deaths leave this stranded. Offer a
+                // discard button instead of leaving a permanent broken turn.
+                const isDangling = isLast && entry.role === 'user';
+                if (isDangling && !isGuestMode) {
+                    headerLabel.textContent = `Turn ${turnNumber} — You said: (no reply — generation was interrupted)`;
+                    header.className += ' text-red-700 italic';
+                    const discardBtn = document.createElement('button');
+                    discardBtn.className = 'action-btn ml-auto';
+                    discardBtn.textContent = '🗑 Discard prompt';
+                    discardBtn.title = 'Remove this prompt that never got an AI response';
+                    discardBtn.setAttribute('aria-label', `Discard turn ${turnNumber} prompt: it never received an AI response because the generation was interrupted`);
+                    discardBtn.onclick = deleteDanglingPrompts;
+                    header.appendChild(discardBtn);
+                }
+
                 block.appendChild(header);
                 const fullText = entry.text || '';
                 block.appendChild(createExpandablePrompt(fullText));
@@ -2162,6 +2180,33 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 console.error('Regenerate failed:', err);
                 alert('Regenerate failed: ' + err.message);
                 announceStatus('Ready');
+            }
+        }
+
+        async function deleteDanglingPrompts() {
+            const ok = window.confirm(
+                'Discard this unanswered prompt? It never received an AI response (generation was interrupted), so no story text is lost.'
+            );
+            if (!ok) return;
+            try {
+                announceStatus('Discarding interrupted prompt...');
+                const res = await authFetch(`/story/${currentStoryId}/delete-dangling`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `Discard failed (${res.status})`);
+                }
+                const data = await res.json();
+                await loadStory();
+                announceToScreenReader(
+                    data.removed > 1
+                        ? `${data.removed} unanswered prompts discarded.`
+                        : 'Unanswered prompt discarded.'
+                );
+                announceStatus('Interrupted prompt discarded');
+            } catch (err) {
+                console.error('Discard dangling failed:', err);
+                announceToScreenReader(`Could not discard: ${err.message}`);
+                announceStatus('Discard failed');
             }
         }
 
