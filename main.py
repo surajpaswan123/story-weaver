@@ -526,16 +526,18 @@ def _split_keys(raw) -> list:
 
 
 class FailoverClient:
-    """Wraps several API clients for one provider and rotates on failures.
+    """Wraps several API clients for one provider and rotates across them.
 
     Callers keep using it exactly like a plain OpenAI-compatible client
-    (.chat.completions.create / .models.list ...). When a call raises an
-    auth/quota/rate-limit style error, the SAME call is retried on the next
-    key's client; the last-good key is remembered ('sticky') so healthy
-    requests never pay the failure cost again. Non-failure exceptions
-    (network blips on an otherwise-good key, bad-model errors, safety
-    refusals) propagate unchanged - only credential-shaped errors trigger
-    rotation."""
+    (.chat.completions.create / .models.list ...). Every call starts at the
+    NEXT key in the ring (round-robin), so traffic and quota burn spread
+    evenly across all keys instead of hammering one until it dies. Within a
+    single call, credential-shaped errors (401/403/429/quota/rate-limit)
+    make the SAME call continue around the ring on the next key; healthy
+    keys therefore absorb a dead neighbor's request transparently.
+    Non-failure exceptions (bad-model errors, safety refusals, network
+    blips on an otherwise-good key) propagate unchanged - only
+    credential-shaped errors trigger rotation."""
 
     _FAILOVER_MARKERS = (
         "401", "403", "429", "unauthorized", "forbidden", "invalid api key",
@@ -565,6 +567,9 @@ class FailoverClient:
         def wrapper(*args, **kwargs):
             n = len(clients)
             base = object.__getattribute__(self, "_idx")
+            # Advance the ring BEFORE dispatching so consecutive calls land
+            # on different keys (round-robin load/quota spreading).
+            object.__setattr__(self, "_idx", (base + 1) % n)
             last_exc = None
             for off in range(n):
                 idx = (base + off) % n
@@ -573,8 +578,7 @@ class FailoverClient:
                 try:
                     result = fn(*args, **kwargs)
                     if off:
-                        object.__setattr__(self, "_idx", idx)  # stick to the winner
-                        print(f"[{label}] failed over to key #{idx + 1}")
+                        print(f"[{label}] key #{idx + 1} served after failover")
                     return result
                 except Exception as exc:
                     last_exc = exc
