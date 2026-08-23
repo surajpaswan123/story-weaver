@@ -508,6 +508,85 @@ def validate_openai_base_url(value: str) -> str:
 _USER_CLIENT_CACHE = {}
 
 
+def _split_keys(raw) -> list:
+    """Split a multi-key blob (comma / semicolon / whitespace / newline separated)
+    into a deduped, order-preserved list of non-empty key strings."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        parts = [str(x).strip() for x in raw]
+    else:
+        parts = re.split(r"[,\s;]+", str(raw))
+    seen, out = set(), []
+    for p in parts:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+class FailoverClient:
+    """Wraps several API clients for one provider and rotates on failures.
+
+    Callers keep using it exactly like a plain OpenAI-compatible client
+    (.chat.completions.create / .models.list ...). When a call raises an
+    auth/quota/rate-limit style error, the SAME call is retried on the next
+    key's client; the last-good key is remembered ('sticky') so healthy
+    requests never pay the failure cost again. Non-failure exceptions
+    (network blips on an otherwise-good key, bad-model errors, safety
+    refusals) propagate unchanged - only credential-shaped errors trigger
+    rotation."""
+
+    _FAILOVER_MARKERS = (
+        "401", "403", "429", "unauthorized", "forbidden", "invalid api key",
+        "invalid_api_key", "api key not valid", "quota", "rate limit",
+        "rate_limit", "too many requests", "billing", "exceeded",
+        "insufficient", "permission denied", "token expired",
+    )
+
+    def __init__(self, clients: list, label: str):
+        object.__setattr__(self, "_clients", [c for c in clients if c is not None])
+        object.__setattr__(self, "_label", label)
+        object.__setattr__(self, "_idx", 0)
+
+    def __len__(self):
+        return len(object.__getattribute__(self, "_clients"))
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        clients = object.__getattribute__(self, "_clients")
+        label = object.__getattribute__(self, "_label")
+
+        attr0 = getattr(clients[0], name, None)
+        if not callable(attr0):
+            return attr0  # plain property/value from the current primary
+
+        def wrapper(*args, **kwargs):
+            n = len(clients)
+            base = object.__getattribute__(self, "_idx")
+            last_exc = None
+            for off in range(n):
+                idx = (base + off) % n
+                client = clients[idx]
+                fn = getattr(client, name)
+                try:
+                    result = fn(*args, **kwargs)
+                    if off:
+                        object.__setattr__(self, "_idx", idx)  # stick to the winner
+                        print(f"[{label}] failed over to key #{idx + 1}")
+                    return result
+                except Exception as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if any(m in msg for m in FailoverClient._FAILOVER_MARKERS):
+                        print(f"[{label}] key #{idx + 1} rejected ({str(exc)[:100]}) - rotating")
+                        continue
+                    raise  # non-credential error: let normal fallback chains handle it
+            raise last_exc
+        return wrapper
+
+
 def _clients_from_keys(user_keys: dict) -> dict:
     """Build AI client instances from a user's configured Settings keys.
 
@@ -553,36 +632,51 @@ def _clients_from_keys(user_keys: dict) -> dict:
 
     if user_keys.get("gemini_api_key"):
         try:
-            user_clients["genai_clients"].append(_cached_genai(user_keys["gemini_api_key"]))
+            g_clients = [_cached_genai(k) for k in _split_keys(user_keys["gemini_api_key"])]
+            if len(g_clients) == 1:
+                user_clients["genai_clients"] = g_clients
+            else:
+                user_clients["genai_clients"] = [FailoverClient(g_clients, "Gemini")]
         except Exception as e:
             print(f"[UserClient] Failed to create Gemini client: {e}")
+
+    def _openai_compatible_field(field: str, kind: str, base_url: str):
+        keys = _split_keys(user_keys.get(field))
+        clients = []
+        for k in keys:
+            try:
+                clients.append(_cached_openai_compatible(kind, k, base_url))
+            except Exception as e:
+                print(f"[UserClient] Failed to create {kind} client for a key: {e}")
+        if not clients:
+            return None
+        return clients[0] if len(clients) == 1 else FailoverClient(clients, kind.title())
 
     if user_keys.get("openai_api_key"):
         try:
             base_url = validate_openai_base_url(user_keys.get("openai_base_url") or "https://api.openai.com/v1")
-            user_clients["openai_client"] = _cached_openai_compatible(
-                "openai", user_keys["openai_api_key"], base_url)
+            user_clients["openai_client"] = _openai_compatible_field("openai_api_key", "openai", base_url)
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client: {e}")
 
     if user_keys.get("openrouter_api_key"):
         try:
-            user_clients["openrouter_client"] = _cached_openai_compatible(
-                "openrouter", user_keys["openrouter_api_key"], "https://openrouter.ai/api/v1")
+            user_clients["openrouter_client"] = _openai_compatible_field(
+                "openrouter_api_key", "openrouter", "https://openrouter.ai/api/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create OpenRouter client: {e}")
 
     if user_keys.get("groq_api_key"):
         try:
-            user_clients["groq_client"] = _cached_openai_compatible(
-                "groq", user_keys["groq_api_key"], "https://api.groq.com/openai/v1")
+            user_clients["groq_client"] = _openai_compatible_field(
+                "groq_api_key", "groq", "https://api.groq.com/openai/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create Groq client: {e}")
 
     if user_keys.get("nvidia_api_key"):
         try:
-            user_clients["nvidia_client"] = _cached_openai_compatible(
-                "nvidia", user_keys["nvidia_api_key"], "https://integrate.api.nvidia.com/v1")
+            user_clients["nvidia_client"] = _openai_compatible_field(
+                "nvidia_api_key", "nvidia", "https://integrate.api.nvidia.com/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create NVIDIA client: {e}")
 
@@ -7884,6 +7978,19 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
     for k, v in keys.items():
         if k in NON_SECRET_FIELDS:
             masked_keys[k] = v or ""
+        elif v and k.endswith("_api_key"):
+            # Multi-key aware: value may be a newline/comma-separated set of
+            # keys. Mask EACH key and join with newlines so the UI can count
+            # and display them ("Saved 3 keys (AIzaS...wXyZ +2 more)").
+            parts = _split_keys(v)
+            if len(parts) > 1:
+                masked = [p[:4] + "..." + p[-4:] if len(p) > 8 else "••••••••" for p in parts]
+                masked_keys[k] = "\n".join(masked)
+            elif parts:
+                p = parts[0]
+                masked_keys[k] = p[:4] + "..." + p[-4:] if len(p) > 8 else "••••••••"
+            else:
+                masked_keys[k] = ""
         elif v and len(v) > 8:
             masked_keys[k] = v[:4] + "..." + v[-4:]
         elif v:

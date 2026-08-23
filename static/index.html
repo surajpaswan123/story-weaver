@@ -71,6 +71,102 @@ async function populatePipelineModelDropdowns() {
 }
 
 
+// ===== MULTI-KEY LIST MANAGEMENT (Supabase-URI style: add / remove fields) =====
+const KEY_PLACEHOLDERS = {
+    gemini: 'AIzaSy...',
+    openai: 'sk-proj-... or custom key',
+    openrouter: 'sk-or-...',
+    groq: 'gsk_...',
+    nvidia: 'nvapi-...'
+};
+
+function keyRowTemplate(placeholder, index, total) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2';
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.autocomplete = 'new-password';
+    input.placeholder = placeholder;
+    input.className = 'key-input flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs';
+    input.setAttribute('aria-label', `API key ${index + 1} of ${total || '?'}`);
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'remove-key-btn text-stone-500 hover:text-red-400 px-1.5 py-1 text-sm font-bold transition-colors';
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove this key before saving';
+    removeBtn.setAttribute('aria-label', `Remove API key ${index + 1}`);
+    removeBtn.addEventListener('click', () => {
+        row.remove();
+        renumberKeyRows(row.closest('.keylist'));
+    });
+    row.appendChild(input);
+    row.appendChild(removeBtn);
+    return row;
+}
+
+function renumberKeyRows(listEl) {
+    if (!listEl) return;
+    const rows = [...listEl.querySelectorAll('.flex')];
+    rows.forEach((r, i) => {
+        const inp = r.querySelector('.key-input');
+        const btn = r.querySelector('.remove-key-btn');
+        if (inp) inp.setAttribute('aria-label', `API key ${i + 1} of ${rows.length}`);
+        if (btn) btn.setAttribute('aria-label', `Remove API key ${i + 1}`);
+    });
+}
+
+function renderKeyList(listId, maskedKeys, defaultPlaceholder) {
+    const listEl = document.getElementById(listId);
+    if (!listEl) return;
+    const provider = listEl.dataset.provider;
+    const ph = KEY_PLACEHOLDERS[provider] || defaultPlaceholder || '';
+    listEl.innerHTML = '';
+    // One EMPTY field always present for a new entry; saved keys show as
+    // disabled masked rows (values never come back to the browser).
+    const existingCount = (maskedKeys || []).length;
+    if (existingCount > 0) {
+        const info = document.createElement('div');
+        info.className = 'text-[10px] text-emerald-400 font-medium';
+        info.textContent = `${existingCount} saved ${existingCount === 1 ? 'key' : 'keys'}: ${maskedKeys.join(', ')}`;
+        listEl.appendChild(info);
+        const hint = document.createElement('div');
+        hint.className = 'text-[10px] text-stone-500 italic';
+        hint.textContent = 'Type in a new field below to replace all saved keys, or leave empty to keep them.';
+        listEl.appendChild(hint);
+    }
+    const row = keyRowTemplate(ph, existingCount, existingCount + 1);
+    listEl.appendChild(row);
+    listEl.classList.add('keylist');
+}
+
+function getKeyListValues(provider) {
+    const listEl = document.getElementById(`keylist-${provider}`);
+    if (!listEl) return '';
+    const vals = [...listEl.querySelectorAll('.key-input')]
+        .map(i => i.value.trim())
+        .filter(Boolean);
+    return vals.join('\n');
+}
+
+function clearKeyListInputs(provider) {
+    const listEl = document.getElementById(`keylist-${provider}`);
+    if (!listEl) return;
+    listEl.querySelectorAll('.key-input').forEach(i => { i.value = ''; });
+}
+
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.add-key-btn');
+    if (!btn) return;
+    const provider = btn.dataset.provider;
+    const listEl = document.getElementById(`keylist-${provider}`);
+    if (!listEl) return;
+    const count = listEl.querySelectorAll('.key-input').length;
+    if (count >= 10) return;  // sanity cap
+    listEl.appendChild(keyRowTemplate(KEY_PLACEHOLDERS[provider] || '', count, count + 1));
+    const inputs = listEl.querySelectorAll('.key-input');
+    inputs[inputs.length - 1]?.focus();
+});
+
 async function fetchUserSettings() {
     try {
         const res = await authFetch('/api/user/settings');
@@ -121,29 +217,29 @@ function renderUserSettingsUI() {
     const masked = currentUserSettings.masked_keys || {};
     
     const updateKeyStatus = (inputId, statusId, keyVal, defaultPlaceholder) => {
-        const input = document.getElementById(inputId);
+        // Multi-key aware: keyVal is a newline-joined blob of masked keys
+        // ("AIzaS...wXyZ" per saved key), one per provider entry.
         const status = document.getElementById(statusId);
-        if (!input) return;
-        if (keyVal) {
-            input.placeholder = `Current: ${keyVal}`;
-            if (status) {
-                status.textContent = `Saved (${keyVal})`;
-                status.className = 'text-[10px] font-semibold text-emerald-400';
-            }
+        const list = keyVal ? String(keyVal).split('\n').filter(Boolean) : [];
+        if (!status) return;
+        if (list.length === 1) {
+            status.textContent = `Saved (${list[0]})`;
+            status.className = 'text-[10px] font-semibold text-emerald-400';
+        } else if (list.length > 1) {
+            status.textContent = `Saved ${list.length} keys (${list[0]} +${list.length - 1} more)`;
+            status.className = 'text-[10px] font-semibold text-emerald-400';
         } else {
-            input.placeholder = defaultPlaceholder;
-            if (status) {
-                status.textContent = 'Not Configured';
-                status.className = 'text-[10px] font-medium text-stone-500';
-            }
+            status.textContent = 'Not Configured';
+            status.className = 'text-[10px] font-medium text-stone-500';
         }
+        renderKeyList(inputId, list, defaultPlaceholder);
     };
 
-    updateKeyStatus('input-gemini-key', 'status-gemini-key', masked.gemini_api_key, 'AIzaSy...');
-    updateKeyStatus('input-openai-key', 'status-openai-key', masked.openai_api_key, 'sk-proj-... or custom key');
-    updateKeyStatus('input-openrouter-key', 'status-openrouter-key', masked.openrouter_api_key, 'sk-or-...');
-    updateKeyStatus('input-groq-key', 'status-groq-key', masked.groq_api_key, 'gsk_...');
-    updateKeyStatus('input-nvidia-key', 'status-nvidia-key', masked.nvidia_api_key, 'nvapi-...');
+    updateKeyStatus('keylist-gemini', 'status-gemini-key', masked.gemini_api_key, 'AIzaSy...');
+    updateKeyStatus('keylist-openai', 'status-openai-key', masked.openai_api_key, 'sk-proj-... or custom key');
+    updateKeyStatus('keylist-openrouter', 'status-openrouter-key', masked.openrouter_api_key, 'sk-or-...');
+    updateKeyStatus('keylist-groq', 'status-groq-key', masked.groq_api_key, 'gsk_...');
+    updateKeyStatus('keylist-nvidia', 'status-nvidia-key', masked.nvidia_api_key, 'nvapi-...');
 
     if (document.getElementById('input-openai-base-url')) {
         document.getElementById('input-openai-base-url').value = masked.openai_base_url || 'https://api.openai.com/v1';
@@ -187,12 +283,12 @@ async function saveUserSettings(e) {
     if (btn) btn.disabled = true;
 
     const payload = {
-        gemini_api_key: document.getElementById('input-gemini-key').value.trim(),
-        openai_api_key: document.getElementById('input-openai-key').value.trim(),
+        gemini_api_key: getKeyListValues('gemini'),
+        openai_api_key: getKeyListValues('openai'),
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
-        openrouter_api_key: document.getElementById('input-openrouter-key').value.trim(),
-        groq_api_key: document.getElementById('input-groq-key').value.trim(),
-        nvidia_api_key: document.getElementById('input-nvidia-key')?.value?.trim() || '',
+        openrouter_api_key: getKeyListValues('openrouter'),
+        groq_api_key: getKeyListValues('groq'),
+        nvidia_api_key: getKeyListValues('nvidia'),
         story_model: document.getElementById('input-story-model').value.trim(),
         background_model: document.getElementById('input-background-model').value.trim(),
         rules_model: document.getElementById('input-rules-model').value.trim(),
@@ -226,11 +322,7 @@ async function saveUserSettings(e) {
         }
 
         // Clear input boxes after saving for safety
-        document.getElementById('input-gemini-key').value = '';
-        document.getElementById('input-openai-key').value = '';
-        document.getElementById('input-openrouter-key').value = '';
-        document.getElementById('input-groq-key').value = '';
-        if (document.getElementById('input-nvidia-key')) document.getElementById('input-nvidia-key').value = '';
+        ['gemini','openai','openrouter','groq','nvidia'].forEach(p => clearKeyListInputs(p));
         if (document.getElementById('input-local-key')) document.getElementById('input-local-key').value = '';
         if (document.getElementById('input-local-base-url')) document.getElementById('input-local-base-url').value = '';
         if (document.getElementById('input-local-name')) document.getElementById('input-local-name').value = '';
@@ -3177,12 +3269,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         <!-- API Key Form -->
         <form onsubmit="saveUserSettings(event)" class="space-y-4 text-xs">
+            <p class="text-[10px] text-stone-500 leading-relaxed">You can save <strong>multiple keys per provider</strong> — press “+ Add key”, paste another key, remove any with its ✕ button. If one key hits a quota or dies, Story Weaver automatically fails over to the next.</p>
             <div>
                 <div class="flex justify-between items-center mb-1">
-                    <label class="block font-medium text-stone-300">Google GenAI API Key (Gemini SDK)</label>
+                    <label class="block font-medium text-stone-300">Google GenAI API Keys (Gemini SDK)</label>
                     <span id="status-gemini-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
-                <input type="password" id="input-gemini-key" autocomplete="new-password" placeholder="AIzaSy..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <div id="keylist-gemini" class="space-y-2" data-provider="gemini"></div>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="gemini" aria-label="Add another Google GenAI API key">＋ Add key</button>
             </div>
 
             <div>
@@ -3190,7 +3284,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <label class="block font-medium text-stone-300">OpenAI API Key (OpenAI-Style API)</label>
                     <span id="status-openai-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
-                <input type="password" id="input-openai-key" autocomplete="new-password" placeholder="sk-proj-... or custom key" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <div id="keylist-openai" class="space-y-2" data-provider="openai"></div>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="openai" aria-label="Add another OpenAI API key">＋ Add key</button>
             </div>
 
             <div>
@@ -3203,7 +3298,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <label class="block font-medium text-stone-300">OpenRouter API Key (Optional)</label>
                     <span id="status-openrouter-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
-                <input type="password" id="input-openrouter-key" autocomplete="new-password" placeholder="sk-or-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <div id="keylist-openrouter" class="space-y-2" data-provider="openrouter"></div>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="openrouter" aria-label="Add another OpenRouter API key">＋ Add key</button>
             </div>
 
             <div>
@@ -3211,7 +3307,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <label class="block font-medium text-stone-300">Groq API Key (Optional)</label>
                     <span id="status-groq-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
-                <input type="password" id="input-groq-key" autocomplete="new-password" placeholder="gsk_..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <div id="keylist-groq" class="space-y-2" data-provider="groq"></div>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="groq" aria-label="Add another Groq API key">＋ Add key</button>
             </div>
 
             <div>
@@ -3219,7 +3316,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <label class="block font-medium text-stone-300">NVIDIA NIM API Key (Optional)</label>
                     <span id="status-nvidia-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
-                <input type="password" id="input-nvidia-key" autocomplete="new-password" placeholder="nvapi-..." class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <div id="keylist-nvidia" class="space-y-2" data-provider="nvidia"></div>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="nvidia" aria-label="Add another NVIDIA NIM API key">＋ Add key</button>
             </div>
 
             <!-- Local OpenAI-Compatible Server (browser-direct) -->
