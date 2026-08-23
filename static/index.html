@@ -271,6 +271,7 @@ let logsPollingInterval = null;
                 const data = await res.json();
                 const logs = data.logs || [];
                 const autoscroll = document.getElementById('autoscroll-logs')?.checked;
+                const isSuperAdmin = !!(data.is_super_admin);
 
                 if (!logsContent) return;
                 if (logCountBadge) logCountBadge.textContent = `${logs.length} lines`;
@@ -278,6 +279,12 @@ let logsPollingInterval = null;
                 if (logs.length === 0) {
                     logsContent.innerHTML = '<div class="text-stone-500 italic text-center py-4">No server logs captured yet</div>';
                     return;
+                }
+                if (!isSuperAdmin) {
+                    const notice = document.createElement('div');
+                    notice.className = 'text-[10px] text-stone-500 italic text-center py-1 border-b border-stone-800 mb-1';
+                    notice.textContent = '🔑 Secrets are redacted — sign in as the owner to see raw logs';
+                    logsContent.appendChild(notice);
                 }
 
                 logsContent.innerHTML = logs.map(line => {
@@ -3005,8 +3012,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
             const logsBtn = document.getElementById('toggle-logs-btn');
             if (logsBtn) {
-                logsBtn.title = 'Server logs are restricted to the super admin';
-                logsBtn.onclick = (e) => { e.preventDefault(); showGuestNagDialog(); };
+                // Logs are public now (secrets redacted server-side for non-admins)
+                logsBtn.title = 'Toggle server logs';
+                logsBtn.onclick = toggleLogsSidebar;
             }
             const lockedEditors = [
                 ['summary', 'Sign in with Google to edit the story summary.'],

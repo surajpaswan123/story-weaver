@@ -503,8 +503,41 @@ def validate_openai_base_url(value: str) -> str:
     return raw.rstrip("/")
 
 
+# Module-level cache of AI client instances keyed by (kind, base_url?, api_key).
+# Strong references here prevent GC from closing httpx pools mid-stream.
+_USER_CLIENT_CACHE = {}
+
+
 def _clients_from_keys(user_keys: dict) -> dict:
-    """Build AI client instances from a user's configured Settings keys."""
+    """Build AI client instances from a user's configured Settings keys.
+
+    Clients are CACHED per key at module level. This is essential for
+    streaming: story generation returns an open SSE stream to the caller while
+    the local client variable goes out of scope. If clients were created fresh
+    per request (no cache), Python would garbage-collect the google-genai /
+    httpx client mid-stream and every subsequent chunk read would fail with
+    "Cannot send a request, as the client has been closed." Keeping a strong
+    module-level reference per API key keeps the underlying connection pool
+    alive for as long as any stream from it is running.
+    """
+    cache = _USER_CLIENT_CACHE
+
+    def _cached_genai(key: str):
+        c = cache.get(("genai", key))
+        if c is None:
+            c = genai.Client(api_key=key)
+            cache[("genai", key)] = c
+        return c
+
+    def _cached_openai_compatible(kind: str, key: str, base_url: str):
+        ck = (kind, base_url, key)
+        c = cache.get(ck)
+        if c is None:
+            extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
+            c = OpenAI(base_url=base_url, api_key=key, **extra)
+            cache[ck] = c
+        return c
+
     user_clients = {
         "genai_clients": [],
         "nvidia_client": None,
@@ -520,36 +553,36 @@ def _clients_from_keys(user_keys: dict) -> dict:
 
     if user_keys.get("gemini_api_key"):
         try:
-            user_clients["genai_clients"].append(genai.Client(api_key=user_keys["gemini_api_key"]))
+            user_clients["genai_clients"].append(_cached_genai(user_keys["gemini_api_key"]))
         except Exception as e:
             print(f"[UserClient] Failed to create Gemini client: {e}")
 
     if user_keys.get("openai_api_key"):
         try:
             base_url = validate_openai_base_url(user_keys.get("openai_base_url") or "https://api.openai.com/v1")
-            user_clients["openai_client"] = OpenAI(
-                base_url=base_url,
-                api_key=user_keys["openai_api_key"],
-                http_client=DefaultHttpxClient(follow_redirects=False),
-            )
+            user_clients["openai_client"] = _cached_openai_compatible(
+                "openai", user_keys["openai_api_key"], base_url)
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client: {e}")
 
     if user_keys.get("openrouter_api_key"):
         try:
-            user_clients["openrouter_client"] = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=user_keys["openrouter_api_key"])
+            user_clients["openrouter_client"] = _cached_openai_compatible(
+                "openrouter", user_keys["openrouter_api_key"], "https://openrouter.ai/api/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create OpenRouter client: {e}")
 
     if user_keys.get("groq_api_key"):
         try:
-            user_clients["groq_client"] = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=user_keys["groq_api_key"])
+            user_clients["groq_client"] = _cached_openai_compatible(
+                "groq", user_keys["groq_api_key"], "https://api.groq.com/openai/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create Groq client: {e}")
 
     if user_keys.get("nvidia_api_key"):
         try:
-            user_clients["nvidia_client"] = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=user_keys["nvidia_api_key"])
+            user_clients["nvidia_client"] = _cached_openai_compatible(
+                "nvidia", user_keys["nvidia_api_key"], "https://integrate.api.nvidia.com/v1")
         except Exception as e:
             print(f"[UserClient] Failed to create NVIDIA client: {e}")
 
@@ -7849,11 +7882,13 @@ def _sanitize_log_line(line: str) -> str:
 
 @app.get("/api/logs")
 async def get_server_logs(user_info: dict = Depends(get_current_user_info)):
-    """Return server logs to the super admin (or to an explicitly local server)."""
-    if firebase_initialized and not user_info.get("is_super_admin"):
-        raise HTTPException(status_code=403, detail="Server logs are restricted to the super admin")
+    """Server logs are readable by everyone (owner's choice), but secret-shaped
+    values (API keys, bearer tokens) are ALWAYS redacted for non-super-admin
+    viewers. The super admin sees the raw lines."""
     logs = list(SERVER_LOGS)
-    return {"logs": logs}
+    if user_info.get("is_super_admin"):
+        return {"logs": logs, "is_super_admin": True}
+    return {"logs": [_sanitize_log_line(l) for l in logs], "is_super_admin": False}
 
 
 if __name__ == "__main__":
