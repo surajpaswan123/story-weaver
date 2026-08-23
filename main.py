@@ -972,6 +972,7 @@ NON_CHAT_MODEL_HINTS = (
     "audio", "image", "imagen", "dall-e", "moderation", "realtime",
     "vision", "segmentation", "video", "robotics", "ocr", "vila",
     "cosmos", "playground", "sdxl", "diffusion",
+    "translate", "riva", "reward",  # NVIDIA speech/translation/reward models
 )
 
 
@@ -993,28 +994,29 @@ def _model_version_tuple(name: str) -> tuple:
     return (major, minor, 0)
 
 
-def _live_models(provider_key: str, static_fallback: list, prefer_suffix: str = None) -> list:
-    """Resolve the live model list for a provider.
+def _live_models(provider_key: str, static_fallback: list = None, prefer_suffix: str = None) -> list:
+    """Resolve the live model list for a provider, 100% dynamically.
 
-    The static list is used ONLY as a cold-start fallback until the live fetch
-    populates (or if the provider API is down). Once live data exists, nothing
-    hardcoded drives selection: the list is filtered to chat-capable models,
-    deduped, and sorted newest-first by registration date (with the version
-    heuristic as a fallback when a provider doesn't report one). If
-    prefer_suffix is set, only models ending with that suffix are kept
-    (e.g. ":free" for OpenRouter). The cache is populated only from user
-    Settings-configured providers (see /api/providers-models) - never from
-    random server .env keys."""
+    NO static/hardcoded fallback: models come exclusively from the live
+    provider fetch (DYNAMIC_PROVIDER_MODELS) so new models appear the moment
+    the provider ships them, and removed models vanish. If no live data is
+    available yet (cold start before the first fetch completes, or the
+    provider API is down) this returns an EMPTY list — callers surface a clear
+    error instead of silently using stale baked-in IDs.
+
+    static_fallback is accepted only for backwards-compatible signatures and
+    is IGNORED. prefer_suffix (e.g. ":free") filters live results by suffix.
+    """
     live = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}).get("models", []) or []
     if not live:
-        return list(static_fallback)
+        return []
     usable = [m for m in live if not any(h in m.lower() for h in NON_CHAT_MODEL_HINTS)]
     if not usable:
-        return list(static_fallback)
+        return []
     if prefer_suffix:
         usable = [m for m in usable if m.endswith(prefer_suffix)]
         if not usable:
-            return list(static_fallback)
+            return []
     usable = list(dict.fromkeys(usable))  # dedupe, keep first occurrence
     created = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}).get("created", {}) or {}
 
@@ -1030,18 +1032,17 @@ def _live_models(provider_key: str, static_fallback: list, prefer_suffix: str = 
 
 class LiveModelList(list):
     """A list that resolves its contents from the live provider model fetch at
-    iteration/index time, so new models appear automatically without code
-    changes. Falls back to the static list until the live fetch populates.
-    Behaves like a plain list everywhere else (truthiness, len, indexing)."""
+    iteration/index time. No static fallback: empty until the live fetch
+    populates. Behaves like a plain list everywhere else (truthiness, len,
+    indexing)."""
 
-    def __init__(self, provider_key: str, static: list, prefer_suffix: str = None):
-        super().__init__(static)
+    def __init__(self, provider_key: str, static: list = None, prefer_suffix: str = None):
+        super().__init__(static or [])
         self._provider_key = provider_key
-        self._static = list(static)
         self._prefer_suffix = prefer_suffix
 
     def _resolved(self) -> list:
-        return _live_models(self._provider_key, self._static, prefer_suffix=self._prefer_suffix)
+        return _live_models(self._provider_key, prefer_suffix=self._prefer_suffix)
 
     def __iter__(self):
         return iter(self._resolved())
@@ -1056,35 +1057,15 @@ class LiveModelList(list):
         return item in self._resolved()
 
 
-# Fallback models - Gemini + Gemma
-FALLBACK_MODELS = LiveModelList("google", [
-    "gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview:search",
-    "gemini-2.5-pro",
-    "gemini-2.5-pro:search",
-    "gemini-3-flash-preview",
-    "gemini-3-flash-preview:search",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash:search",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-lite-preview:search",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-lite:search",
-])
+# Fallback models — no static IDs. Resolved 100% dynamically from the live
+# Google fetch so a new model (e.g. gemini-3.6-flash) appears the moment
+# Google lists it, and a removed model vanishes.
+FALLBACK_MODELS = LiveModelList("google")
 
-# Static fallback for story generation via native API keys (high thinking).
-# Only used when the live Google model list hasn't been fetched yet - see
-# get_dynamic_gemini_story_models() which drives the real list.
-GEMINI_STORY_MODELS = [
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-2.5-flash",
-    "gemini-3.1-flash-lite-preview",  # 500 RPD fallback when Flash quota exhausted
-]
-
-# Google model IDs that can't be used for text-chat story generation (image-gen,
-# TTS, audio, embeddings, etc.) - filtered out of both the live dropdown and the
-# dynamic story-model list.
+# Google model IDs that can't be used for text-chat story generation
+# (image-gen, TTS, audio, embeddings, etc.) — filtered out of both the live
+# dropdown and the dynamic story-model list. This is a capability filter, not
+# a model ID list, so it stays.
 NON_CHAT_GOOGLE_MODEL_HINTS = (
     "image", "imagen", "tts", "audio", "embedding", "rerank",
     "robotics", "computer-use", "-live", "live-preview", "bidi",
@@ -1092,17 +1073,16 @@ NON_CHAT_GOOGLE_MODEL_HINTS = (
 
 
 def get_dynamic_gemini_story_models():
-    """Live Google story model list instead of the hardcoded GEMINI_STORY_MODELS.
+    """Live Google story model list, fully dynamic (no static fallback).
 
     Picks chat-capable Gemini models from the freshly-fetched provider list
-    (DYNAMIC_PROVIDER_MODELS), so new GA models like gemini-3.6-flash appear
-    automatically without a code change. Sorted newest-first by registration
-    date (createTime), with the version heuristic as fallback. Falls back to
-    the static list only if the cache (populated from user Settings keys)
-    hasn't been filled yet."""
+    (DYNAMIC_PROVIDER_MODELS), sorted newest-first by registration date
+    (createTime) with the version heuristic as fallback. Returns an empty list
+    if the live fetch hasn't populated yet so callers surface a clear error
+    instead of silently using stale baked-in IDs."""
     live = DYNAMIC_PROVIDER_MODELS.get("google", {}).get("models", []) or []
     if not live:
-        return list(GEMINI_STORY_MODELS)
+        return []
 
     def _usable(name):
         n = name.lower()
@@ -1249,7 +1229,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
     # Standard User Fallback
     if active_clients.get("genai_clients"):
         for c in active_clients["genai_clients"]:
-            for m in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]:
+            for m in get_dynamic_gemini_story_models():
                 try:
                     resp = c.models.generate_content(
                         model=m, contents=f"{system_prompt}\n\n{user_prompt}",
@@ -1647,126 +1627,42 @@ NOKEY_SAFETY_OFF = {
 # Official OpenAI Client - built per-user from Settings keys only
 official_openai_client = None
 
-OPENAI_MODELS = LiveModelList("openai", [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o3-mini",
-    "o1",
-    "o1-mini",
-    "gpt-4-turbo",
-])
+OPENAI_MODELS = LiveModelList("openai")
 
 
 # Cerebras - built per-user from Settings keys only
 cerebras_client = None
 
-GROQ_MODELS = LiveModelList("groq", [
-    # Tier 1: High Quality & Context (70B)
-    "llama-3.3-70b-versatile",    # 6k TPM / 100k TPD
-    # Tier 2: Speed (8B) - "instant" models often have lower limits
-    "llama-3.1-8b-instant",       # 20k TPM (Very Fast)
-    "deepseek-r1-distill-llama-70b", # New 2026 Reasoning Model
-])
+GROQ_MODELS = LiveModelList("groq")
 
-MISTRAL_MODELS = LiveModelList("mistral", [
-    "open-mistral-nemo",      # Standard Free
-    "ministral-8b-latest",    # New 2026 Edge Model
-    "mistral-small-latest",   # Reliable
-])
+MISTRAL_MODELS = LiveModelList("mistral")
 
-HF_MODELS = LiveModelList("hf", [
-    "meta-llama/Meta-Llama-3-8B-Instruct", 
-    "mistralai/Mistral-7B-Instruct-v0.3",
-    "microsoft/Phi-3-mini-4k-instruct"
-])
+HF_MODELS = LiveModelList("hf")
 
-CEREBRAS_MODELS = LiveModelList("cerebras", [
-    "llama3.1-8b",   # 1M Tokens/Day Free
-])
+CEREBRAS_MODELS = LiveModelList("cerebras")
 
-NVIDIA_MODELS = LiveModelList("nvidia", [
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "qwen/qwen3-coder-480b-a35b-instruct",
-    "qwen/qwen3.5-397b-a17b",
-    "qwen/qwen3-5-122b-a10b",
-    "qwen/qwen3-next-80b-a3b-thinking",
-    "qwen/qwen3-next-80b-a3b-instruct",
-])
+NVIDIA_MODELS = LiveModelList("nvidia")
 
-# Rules/background tasks: 1M-context NVIDIA models (cold-start fallback only)
-NVIDIA_RULES_MODELS = LiveModelList("nvidia", [
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "qwen/qwen3-coder-480b-a35b-instruct",
-    "qwen/qwen3.5-397b-a17b",
-    "qwen/qwen3-5-122b-a10b",
-    "qwen/qwen3-next-80b-a3b-thinking",
-    "qwen/qwen3-next-80b-a3b-instruct",
-])
+# Rules/background tasks: NVIDIA models (dynamic, no static fallback)
+NVIDIA_RULES_MODELS = LiveModelList("nvidia")
 
-# Story generation: 1M-context NVIDIA models (cold-start fallback only)
-NVIDIA_STORY_STREAM_MODELS = LiveModelList("nvidia", [
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "qwen/qwen3-coder-480b-a35b-instruct",
-    "qwen/qwen3.5-397b-a17b",
-    "qwen/qwen3-5-122b-a10b",
-    "qwen/qwen3-next-80b-a3b-thinking",
-    "qwen/qwen3-next-80b-a3b-instruct",
-])
+# Story generation: NVIDIA models (dynamic, no static fallback)
+NVIDIA_STORY_STREAM_MODELS = LiveModelList("nvidia")
 
-# Background tasks: Flash then 1M-context NVIDIA models (cold-start fallback only)
-NVIDIA_BACKGROUND_MODELS = LiveModelList("nvidia", [
-    "deepseek-ai/deepseek-v4-flash",        # Fast
-    "nvidia/nemotron-3-super-120b-a12b",    # Fallback
-    "nvidia/nemotron-3-nano-30b-a3b",       # Fallback
-])
+# Background tasks: NVIDIA models (dynamic, no static fallback)
+NVIDIA_BACKGROUND_MODELS = LiveModelList("nvidia")
 
-NOKEY_MODELS = LiveModelList("nokey", [
-    "gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview:search",
-    "gemini-2.5-pro",
-    "gemini-2.5-pro:search",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3-flash-preview:search",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash:search",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-lite-preview:search",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-lite:search",
-])
+NOKEY_MODELS = LiveModelList("nokey")
 
-# Dedicated nokey model lists per component
-NOKEY_STORY_MODELS = LiveModelList("nokey", [
-    "gemini-3.1-pro-preview",             # Primary story generator
-    "gemini-3.5-flash",       # Fallback
-    "gemini-2.5-pro",               # Fallback
-    "gemini-2.5-flash",
-])
+# Dedicated nokey model lists per component (all dynamic, no static fallback)
+NOKEY_STORY_MODELS = LiveModelList("nokey")
 
-NOKEY_BACKGROUND_MODELS = LiveModelList("nokey", [
-    "gemini-3.5-flash",             # Primary background analyzer + auto .md files
-    "gemini-3.1-pro-preview",
-    "gemini-2.5-flash",
-])
+NOKEY_BACKGROUND_MODELS = LiveModelList("nokey")
 
-NOKEY_TASK_MODELS = LiveModelList("nokey", [
-    "gemini-3.5-flash",             # Primary for rules, inventory, media, misc tasks
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-])
+NOKEY_TASK_MODELS = LiveModelList("nokey")
 
-# Free models to rotate through (20 RPM, 50-1000 RPD)
-OPENROUTER_FREE_MODELS = LiveModelList("openrouter", [
-    "google/gemini-2.0-flash-exp:free", # Revert to known working exp
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-nemo:free",
-    "microsoft/phi-3-medium-128k-instruct:free",
-], prefer_suffix=":free")
+# Free models to rotate through (dynamic; kept to :free suffix)
+OPENROUTER_FREE_MODELS = LiveModelList("openrouter", prefer_suffix=":free")
 
 # ...
 
@@ -2826,7 +2722,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
     
     # 0. Try Google GenAI native keys FIRST
     for client in active_genai_clients:
-        for model_name in ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"]:
+        for model_name in get_dynamic_gemini_story_models():
             try:
                 print(f"  [MediaAnalyzer] Trying {model_name} via native API...")
                 media_part_native = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
@@ -2853,7 +2749,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
 
     # 1. Fallback to Nokey
     if active_nokey_client:
-        for model in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash", "gemini-3-flash-preview"]:
+        for model in NOKEY_TASK_MODELS:
             try:
                 print(f"  [MediaAnalyzer] Trying {model} via nokey...")
                 audio_format = mime_type.split("/")[-1] if "/" in mime_type else "mp3"
@@ -3020,10 +2916,10 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                 except Exception as e:
                     print(f"  [RulesEditor] Configured GenAI/{base_m} failed: {e}")
 
-    # 0. PRIMARY: Google GenAI gemini-3.5-flash-lite (fastest ~300 TPS)
+    # 0. PRIMARY: fastest dynamic Google model (newest chat-capable from live fetch)
     for c in active_genai_clients:
         try:
-            primary_model = "gemini-3.5-flash-lite"
+            primary_model = (get_dynamic_gemini_story_models() or ["gemini-flash-latest"])[0]
             print(f"  [RulesEditor] Streaming with GenAI/{primary_model} (primary - 300 TPS)...")
             stream = c.models.generate_content_stream(
                 model=primary_model,
@@ -3079,7 +2975,7 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
 
     # 2. Fallback to Nokey, streamed live
     if active_nokey_client:
-        for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview"]:
+        for model_name in NOKEY_TASK_MODELS:
             try:
                 extra = NOKEY_SAFETY_OFF.copy()
                 if is_thinking_model(model_name):
@@ -3114,7 +3010,7 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
 
     # 3. Fallback to other GenAI models, streamed live
     for c in active_genai_clients:
-        for model_name in ["gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"]:
+        for model_name in get_dynamic_gemini_story_models():
             try:
                 print(f"  [RulesEditor] Streaming with GenAI/{model_name}...")
                 stream = c.models.generate_content_stream(
@@ -7743,27 +7639,29 @@ def fetch_google_live_models(api_key: str = None):
 
 
 def refresh_live_provider_models():
+    """Refresh the live model cache from PUBLIC, keyless catalogs only.
+
+    Fetching here can never touch a user's private API keys: NVIDIA's model
+    catalog and the public 'nokey' (Gemini proxy) list are open endpoints.
+    Key-gated providers (Gemini-with-your-key, OpenAI, Groq, OpenRouter,
+    Cerebras, Mistral, HF) are populated on demand, per user, from each user's
+    own Settings keys inside /api/providers-models — never here, so no secret
+    is pulled into this refresh path or into logs at boot.
+    """
     global DYNAMIC_PROVIDER_MODELS, LAST_DYNAMIC_FETCH
     try:
         print("[Live Fetch] Fetching real-time online AI model lists...")
         updated = {}
-
-        with ThreadPoolExecutor(max_workers=9) as executor:
-            futures = [
-                executor.submit(fetch_openai_live_models),
-                executor.submit(fetch_openrouter_live_models),
-                executor.submit(fetch_nvidia_live_models),
-                executor.submit(fetch_groq_live_models),
-                executor.submit(fetch_google_live_models),
-                executor.submit(fetch_cerebras_live_models),
-                executor.submit(fetch_mistral_live_models),
-                executor.submit(fetch_hf_live_models),
-                executor.submit(fetch_nokey_live_models),
-            ]
-            for f in futures:
+        fetched = [
+            ("nvidia", lambda: fetch_nvidia_live_models()),
+            ("nokey", lambda: fetch_nokey_live_models()),
+        ]
+        with ThreadPoolExecutor(max_workers=len(fetched)) as executor:
+            futures = {executor.submit(cb): pk for pk, cb in fetched}
+            for f, provider_key in futures.items():
                 res = f.result()
                 if res:
-                    provider_key, live_models = res
+                    _provider_key, live_models = res
                     ids = [item["id"] for item in live_models if item.get("id")]
                     deduped = list(dict.fromkeys(ids))
                     if deduped:
@@ -7799,8 +7697,8 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     is_super_admin = user_info.get("is_super_admin", False)
 
     # Providers are driven by the user's Settings keys only (gemini, nvidia,
-    # openai, openrouter, groq). If the Super Admin has configured NO Settings
-    # keys, fall back to the server .env providers so a fresh deployment works.
+    # openai, openrouter, groq). Always refresh the keyless public catalogs so
+    # the shared cache is warm, then surface whatever providers are usable.
     provider_defs = (
         ("google", "gemini_api_key", "Google GenAI (Gemini)", fetch_google_live_models),
         ("nvidia", "nvidia_api_key", "NVIDIA NIM", fetch_nvidia_live_models),
@@ -7810,19 +7708,23 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     )
     configured = [(p, k, d, f) for p, k, d, f in provider_defs if user_keys.get(k)]
 
-    if not configured and is_super_admin:
-        # Admin configured nothing in Settings -> lazily fetch server .env
-        # providers (cached 30 min) so a fresh deployment still works.
+    if not configured:
+        # No Settings keys for this user. NVIDIA's catalog and the public nokey
+        # (Gemini proxy) are refreshable without any secret — warm them so the
+        # keyless fallback is current, then surface the cached keyless providers.
+        # (No server .env is consulted anywhere; providers come strictly from
+        # each user's own Settings keys + the public keyless catalogs.)
         if time.time() - LAST_DYNAMIC_FETCH > 1800:
             threading.Thread(target=refresh_live_provider_models, daemon=True).start()
         providers = {}
         for pkey, pinfo in (DYNAMIC_PROVIDER_MODELS or {}).items():
-            providers[pkey] = {
-                "name": pinfo.get("name", pkey.title()),
-                "models": _dropdown_models(pkey),
-            }
+            models = _dropdown_models(pkey)
+            if models:
+                providers[pkey] = {
+                    "name": pinfo.get("name", pkey.title()),
+                    "models": models,
+                }
         return {"providers": providers}
-
     # Only fetch/list models for providers the user actually configured in
     # Settings, and seed the shared cache with those same providers.
     allowed_providers = {}
@@ -7956,6 +7858,34 @@ async def get_server_logs(user_info: dict = Depends(get_current_user_info)):
 
 if __name__ == "__main__":
     import uvicorn
+
+    # Warm the live model cache so no provider list is ever empty post-boot.
+    # NVIDIA's model catalog and the public 'nokey' (Gemini proxy) list are
+    # public, keyless endpoints — fetch them at startup, then refresh every 15
+    # minutes so generation always sees a fresh catalog (new models appear
+    # automatically; removed ones vanish). Key-gated providers (OpenAI, Groq,
+    # Gemini-with-your-key, OpenRouter, Cerebras, Mistral, HF) still populate
+    # on demand from each signed-in user's Settings keys via
+    # /api/providers-models — never at boot, so no secret is ever touched here.
+    def _warm_cache():
+        try:
+            refresh_live_provider_models()
+        except Exception as _e:
+            print(f"[Live Fetch] Startup warm-up error: {_e}")
+
+    def _periodic_refresh():
+        # Refresh the keyless public catalogs every 15 minutes so the live list
+        # stays fresh (new NVIDIA models appear, removed ones vanish). Keyed
+        # providers refresh per-user on demand via /api/providers-models.
+        while True:
+            time.sleep(15 * 60)
+            try:
+                refresh_live_provider_models()
+            except Exception as _e:
+                print(f"[Live Fetch] Periodic refresh error: {_e}")
+
+    threading.Thread(target=_warm_cache, name="model-cache-warmup", daemon=True).start()
+    threading.Thread(target=_periodic_refresh, name="model-cache-refresh", daemon=True).start()
 
     project_dir = os.path.dirname(os.path.abspath(__file__))
     port = int(os.getenv("PORT", 8000))
