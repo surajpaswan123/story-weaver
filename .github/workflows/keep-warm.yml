@@ -1,0 +1,47 @@
+# Keeps the free-tier Render service awake by pinging it every 5 minutes.
+#
+# Why: Render free instances sleep after ~15 idle minutes, and waking costs a
+# ~50s cold start. This workflow hits the app often enough that it never idles
+# out. Runs on GitHub's infra, so it works even when your PC is off.
+#
+# Notes:
+# - Repo must be PUBLIC for unlimited Actions minutes (private repos bill
+#   2000 min/month and 5-min cron would need ~8640).
+# - GitHub may delay scheduled runs by a few minutes under load; that's fine -
+#   we only need a hit roughly every <14 minutes to stay ahead of sleep.
+# - Scheduled workflows auto-disable after 60 days with NO repo activity;
+#   any commit resets the clock.
+# - Tune cadence/cancel behavior below if you add more scheduled workflows.
+
+name: Keep Render warm
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch: {}      # allows manual "Run workflow" for testing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-render-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Story Weaver
+        env:
+          URL: https://story-weaver-m47x.onrender.com/
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$URL")
+            echo "attempt $i -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "Warm âœ“"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::warning::Story Weaver did not return HTTP 200 after 3 attempts"
