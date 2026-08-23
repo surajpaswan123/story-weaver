@@ -526,18 +526,19 @@ def _split_keys(raw) -> list:
 
 
 class FailoverClient:
-    """Wraps several API clients for one provider and rotates across them.
+    """Wraps several API clients for one provider with circuit-breaker failover.
 
     Callers keep using it exactly like a plain OpenAI-compatible client
-    (.chat.completions.create / .models.list ...). Every call starts at the
-    NEXT key in the ring (round-robin), so traffic and quota burn spread
-    evenly across all keys instead of hammering one until it dies. Within a
-    single call, credential-shaped errors (401/403/429/quota/rate-limit)
-    make the SAME call continue around the ring on the next key; healthy
-    keys therefore absorb a dead neighbor's request transparently.
+    (.chat.completions.create / .models.list ...). One key serves as PRIMARY
+    for all traffic. The moment a key raises a credential-shaped error
+    (401/403/429/quota/rate-limit/billing/expired) it is BENCHED — removed
+    from rotation entirely — and the same call continues on the next key,
+    which becomes the new primary. Benched keys are NEVER retried again, so
+    a dead key costs exactly one failed request, total. When EVERY key ends
+    up benched (e.g. all quotas exhausted simultaneously), the bench list
+    clears so all keys get one more chance (they may have recovered).
     Non-failure exceptions (bad-model errors, safety refusals, network
-    blips on an otherwise-good key) propagate unchanged - only
-    credential-shaped errors trigger rotation."""
+    blips) propagate unchanged — only credential-shaped errors bench."""
 
     _FAILOVER_MARKERS = (
         "401", "403", "429", "unauthorized", "forbidden", "invalid api key",
@@ -550,6 +551,7 @@ class FailoverClient:
         object.__setattr__(self, "_clients", [c for c in clients if c is not None])
         object.__setattr__(self, "_label", label)
         object.__setattr__(self, "_idx", 0)
+        object.__setattr__(self, "_benched", set())
 
     def __len__(self):
         return len(object.__getattribute__(self, "_clients"))
@@ -566,25 +568,32 @@ class FailoverClient:
 
         def wrapper(*args, **kwargs):
             n = len(clients)
+            benched = object.__getattribute__(self, "_benched")
+            if len(benched) >= n:
+                print(f"[{label}] all {n} keys were benched - giving every key a fresh chance")
+                object.__setattr__(self, "_benched", set())
+                benched = object.__getattribute__(self, "_benched")
             base = object.__getattribute__(self, "_idx")
-            # Advance the ring BEFORE dispatching so consecutive calls land
-            # on different keys (round-robin load/quota spreading).
-            object.__setattr__(self, "_idx", (base + 1) % n)
             last_exc = None
             for off in range(n):
                 idx = (base + off) % n
+                if idx in benched:
+                    continue
                 client = clients[idx]
                 fn = getattr(client, name)
                 try:
                     result = fn(*args, **kwargs)
                     if off:
-                        print(f"[{label}] key #{idx + 1} served after failover")
+                        object.__setattr__(self, "_idx", idx)  # new primary
                     return result
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
                     if any(m in msg for m in FailoverClient._FAILOVER_MARKERS):
-                        print(f"[{label}] key #{idx + 1} rejected ({str(exc)[:100]}) - rotating")
+                        benched.add(idx)
+                        remaining = n - len(benched)
+                        print(f"[{label}] key #{idx + 1} FAILED ({str(exc)[:80]}) - benched; "
+                              f"switching to key #{(idx + 1) % n + 1} ({remaining} key{'s' if remaining != 1 else ''} left)")
                         continue
                     raise  # non-credential error: let normal fallback chains handle it
             raise last_exc
