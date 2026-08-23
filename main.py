@@ -1473,7 +1473,7 @@ def _call_with_full_fallback(
                 print(f"  [{label}] Trying GenAI/{model_name}...")
                 cfg_kwargs = dict(temperature=temperature, safety_settings=SAFETY_SETTINGS)
                 if is_thinking_model(model_name):
-                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)
+                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)
                 tools_list = []
                 if model_name.endswith(":search"):
                     tools_list = [types.Tool(google_search=types.GoogleSearch())]
@@ -1525,10 +1525,20 @@ def is_audio_capable_model(model_name: str, model_info: dict = None) -> bool:
 
 def is_thinking_model(model: str) -> bool:
     """Check if a Gemini model supports thinking - dynamic name-pattern check
-    (thinking_config is a 2.5+/3.x feature), so newly-listed models work too."""
+    (thinking_config is a 2.5+/3.x feature), so newly-listed models work too.
+    Unversioned '-latest' aliases (gemini-flash-latest, gemini-pro-latest,
+    gemini-flash-lite-latest) always point at the CURRENT generation, which
+    thinks — so they count too. Versioned old aliases (gemini-1.5-*-latest)
+    still fall through and are correctly excluded."""
     base_model = model.replace(":search", "").lower()
-    return ("gemini-2.5" in base_model or "gemini-3" in base_model
-            or "thinking" in base_model)
+    if ("gemini-2.5" in base_model or "gemini-3" in base_model
+            or "thinking" in base_model):
+        return True
+    # Pure latest aliases (no version digits) alias today's thinking models
+    if base_model.startswith("gemini") and base_model.endswith("-latest") \
+            and not any(v in base_model for v in ("-1.", "-2.", "2.0")):
+        return True
+    return False
 
 def nvidia_model_context_mode(model: str) -> str:
     """Classify whether NVIDIA hosts the model with native 1M context or documents it as extendable to ~1M."""
@@ -2781,7 +2791,7 @@ Just describe the raw media file objectively, like a music reviewer or art criti
                         system_instruction=system_prompt,
                         temperature=0.3,
                         safety_settings=SAFETY_SETTINGS,
-                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if is_thinking_model(model_name) else {})
+                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if is_thinking_model(model_name) else {})
                     )
                 )
                 result = response.text
@@ -3062,7 +3072,7 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                     config=types.GenerateContentConfig(
                         temperature=0.1,
                         safety_settings=SAFETY_SETTINGS,
-                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if is_thinking_model(model_name) else {})
+                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if is_thinking_model(model_name) else {})
                     ),
                 )
                 got_any = False
@@ -3802,7 +3812,7 @@ def generate_with_fallback(prompt: str, nvidia_models: list = None, nvidia_use_t
                     gen_config = types.GenerateContentConfig(
                         safety_settings=SAFETY_SETTINGS,
                         temperature=1.0,
-                        thinking_config=types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)
+                        thinking_config=types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)
                     )
                     print(f"  -> Thinking budget: dynamic/unlimited for {model_name}")
                 response = c.models.generate_content(
@@ -4328,7 +4338,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                                 safety_settings=SAFETY_SETTINGS,
                                 system_instruction=system_msg,
                                 temperature=1.0,
-                                **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
+                                **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if _thinks else {})
                             )
                         )
                         if _thinks:
@@ -4447,7 +4457,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                             safety_settings=SAFETY_SETTINGS,
                             system_instruction=system_msg,
                             temperature=1.0,
-                            **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
+                            **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if _thinks else {})
                         )
                     )
                     if _thinks:
@@ -4621,7 +4631,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                             system_instruction=system_msg,
                             temperature=1.0,
                             **({
-                                "thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if _thinks else {})
+                                "thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if _thinks else {})
                         )
                     )
                     if _thinks:
@@ -4906,7 +4916,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                         safety_settings=SAFETY_SETTINGS,
                         system_instruction=system_msg,
                         temperature=1.0,
-                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET)} if is_thinking_model(model_name) else {})
+                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if is_thinking_model(model_name) else {})
                     )
                 )
                 _thinks = is_thinking_model(model_name)
