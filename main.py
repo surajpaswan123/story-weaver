@@ -526,19 +526,18 @@ def _split_keys(raw) -> list:
 
 
 class FailoverClient:
-    """Wraps several API clients for one provider with circuit-breaker failover.
+    """Wraps several API clients for one provider in strict priority order.
 
     Callers keep using it exactly like a plain OpenAI-compatible client
-    (.chat.completions.create / .models.list ...). One key serves as PRIMARY
-    for all traffic. The moment a key raises a credential-shaped error
-    (401/403/429/quota/rate-limit/billing/expired) it is BENCHED — removed
-    from rotation entirely — and the same call continues on the next key,
-    which becomes the new primary. Benched keys are NEVER retried again, so
-    a dead key costs exactly one failed request, total. When EVERY key ends
-    up benched (e.g. all quotas exhausted simultaneously), the bench list
-    clears so all keys get one more chance (they may have recovered).
-    Non-failure exceptions (bad-model errors, safety refusals, network
-    blips) propagate unchanged — only credential-shaped errors bench."""
+    (.chat.completions.create / .models.list ...). EVERY call starts at
+    key #1, always - no memory between calls, no benching, no rotation.
+    If a key raises a credential-shaped error (401/403/429/quota/rate-
+    limit/billing/expired) the SAME call continues down the list to the
+    next key, and so on until one succeeds or all fail. Key order is the
+    user's declared preference; managing which keys are good is the
+    user's responsibility. Non-failure exceptions (bad-model errors,
+    safety refusals, network blips) propagate unchanged - only
+    credential-shaped errors continue down the list."""
 
     _FAILOVER_MARKERS = (
         "401", "403", "429", "unauthorized", "forbidden", "invalid api key",
@@ -550,8 +549,6 @@ class FailoverClient:
     def __init__(self, clients: list, label: str):
         object.__setattr__(self, "_clients", [c for c in clients if c is not None])
         object.__setattr__(self, "_label", label)
-        object.__setattr__(self, "_idx", 0)
-        object.__setattr__(self, "_benched", set())
 
     def __len__(self):
         return len(object.__getattribute__(self, "_clients"))
@@ -564,36 +561,19 @@ class FailoverClient:
 
         attr0 = getattr(clients[0], name, None)
         if not callable(attr0):
-            return attr0  # plain property/value from the current primary
+            return attr0  # plain property/value from the primary
 
         def wrapper(*args, **kwargs):
-            n = len(clients)
-            benched = object.__getattribute__(self, "_benched")
-            if len(benched) >= n:
-                print(f"[{label}] all {n} keys were benched - giving every key a fresh chance")
-                object.__setattr__(self, "_benched", set())
-                benched = object.__getattribute__(self, "_benched")
-            base = object.__getattribute__(self, "_idx")
             last_exc = None
-            for off in range(n):
-                idx = (base + off) % n
-                if idx in benched:
-                    continue
-                client = clients[idx]
+            for idx, client in enumerate(clients):
                 fn = getattr(client, name)
                 try:
-                    result = fn(*args, **kwargs)
-                    if off:
-                        object.__setattr__(self, "_idx", idx)  # new primary
-                    return result
+                    return fn(*args, **kwargs)
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
                     if any(m in msg for m in FailoverClient._FAILOVER_MARKERS):
-                        benched.add(idx)
-                        remaining = n - len(benched)
-                        print(f"[{label}] key #{idx + 1} FAILED ({str(exc)[:80]}) - benched; "
-                              f"switching to key #{(idx + 1) % n + 1} ({remaining} key{'s' if remaining != 1 else ''} left)")
+                        print(f"[{label}] key #{idx + 1} failed ({str(exc)[:80]}) - trying key #{idx + 2}")
                         continue
                     raise  # non-credential error: let normal fallback chains handle it
             raise last_exc
