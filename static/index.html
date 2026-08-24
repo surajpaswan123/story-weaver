@@ -31,36 +31,57 @@ async function populatePipelineModelDropdowns() {
         if (!res.ok) return;
         const data = await res.json();
         const providers = data.providers || {};
-        
-        let allModels = [];
+
+        // Build provider-grouped options. Value carries the provider tag
+        // ('nvidia::deepseek-ai/deepseek-v4-flash-0731') so the backend routes
+        // DIRECTLY to that provider instead of blind-firing every client.
+        // Same model id from two providers appears once per group.
+        const groups = [];  // [{provider, label, models:[...]}]
         for (const pKey in providers) {
             const p = providers[pKey];
-            if (p.models && Array.isArray(p.models)) {
-                p.models.forEach(m => {
-                    if (!allModels.includes(m)) allModels.push(m);
-                });
-            }
+            if (!p || !p.models || !Array.isArray(p.models) || p.models.length === 0) continue;
+            if (pKey === 'notice') continue;
+            groups.push({ provider: pKey, label: p.name || pKey.toUpperCase(), models: p.models.slice() });
         }
 
         const ids = ['input-story-model', 'input-background-model', 'input-rules-model', 'input-audio-model'];
         ids.forEach(id => {
             const sel = document.getElementById(id);
             if (!sel) return;
-            const currentVal = sel.dataset.val || sel.value || '';
+            let currentVal = sel.dataset.val || sel.value || '';
+            // Normalize legacy bare values to their tagged form when unambiguous:
+            // a bare id that exists under exactly one provider group gets tagged.
+            const findOwners = (bareId) => {
+                const owners = [];
+                for (const g of groups) {
+                    if (g.models.some(m => m.replace('models/', '') === bareId)) owners.push(g.provider);
+                }
+                return owners;
+            };
+            if (currentVal && !currentVal.includes('::')) {
+                const owners = findOwners(currentVal);
+                if (owners.length === 1) currentVal = `${owners[0]}::${currentVal}`;
+            }
             sel.innerHTML = '<option value="">Default (Auto / System Recommended)</option>';
-            
-            allModels.forEach(m => {
-                const opt = document.createElement('option');
-                opt.value = m;
-                opt.textContent = m;
-                if (m === currentVal) opt.selected = true;
-                sel.appendChild(opt);
+
+            groups.forEach(g => {
+                const og = document.createElement('optgroup');
+                og.label = g.label;
+                g.models.forEach(m => {
+                    const clean = m.replace('models/', '');
+                    const opt = document.createElement('option');
+                    opt.value = `${g.provider}::${clean}`;
+                    opt.textContent = clean;
+                    if (`${g.provider}::${clean}` === currentVal) opt.selected = true;
+                    og.appendChild(opt);
+                });
+                sel.appendChild(og);
             });
 
-            if (currentVal && !allModels.includes(currentVal)) {
+            if (currentVal && !sel.querySelector(`option[value="${CSS.escape(currentVal)}"]`)) {
                 const opt = document.createElement('option');
                 opt.value = currentVal;
-                opt.textContent = `${currentVal} (Custom)`;
+                opt.textContent = currentVal.includes('::') ? currentVal : `${currentVal} (Custom)`;
                 opt.selected = true;
                 sel.appendChild(opt);
             }

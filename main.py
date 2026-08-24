@@ -525,6 +525,20 @@ def _split_keys(raw) -> list:
     return out
 
 
+def parse_model_override(raw: str):
+    """Parse a pipeline model override saved from the provider-grouped dropdowns.
+
+    New format: 'provider_key::model_id' (e.g. 'nvidia::deepseek-ai/deepseek-v4-flash-0731',
+    'google::gemini-flash-latest'). Returns (provider_key_or_None, clean_model_id).
+    Legacy bare IDs ('deepseek-ai/...', 'gemini-flash-latest') return (None, id) and
+    callers fall back to ID-shape heuristics."""
+    s = (raw or "").strip()
+    if "::" in s:
+        prov, model = s.split("::", 1)
+        return prov.strip().lower() or None, model.strip()
+    return None, s
+
+
 class FailoverClient:
     """Wraps several API clients for one provider in strict priority order.
 
@@ -1281,17 +1295,21 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
     elif label == "Audio":
         target_model = user_keys.get("audio_model", "").strip()
 
-    # If specific model configured by user/admin, try target_model FIRST across providers.
-    # Route by ID SHAPE instead of blind-firing every provider: 'org/model' ids
-    # (deepseek-ai/..., moonshotai/..., google/gemma-...) are OpenAI-compatible
-    # catalog names that can NEVER exist on Google GenAI (which uses bare
-    # gemini-*/gemma-* ids), and vice versa. This kills the guaranteed-404
-    # 'GenAI/deepseek-ai/...' attempt (plus its AFC SDK warning) on every call.
+    # If specific model configured by user/admin, try target_model FIRST.
+    # New-format overrides carry their provider tag ('nvidia::model-id') from the
+    # provider-grouped dropdowns, so we route DIRECTLY to that provider — no blind
+    # firing at every client (which burned 404s on NVIDIA/Groq before reaching
+    # OpenRouter). Legacy bare IDs fall back to ID-shape heuristics below.
+    _ov_prov, target_model = parse_model_override(target_model)
     if target_model:
         _t = target_model.strip()
         _tl = _t.lower()
-        _google_style = _tl.startswith(("gemini", "gemma", "learnlm", "imagen")) and "/" not in _t
-        _catalog_style = "/" in _t  # NVIDIA NIM / OpenRouter org-prefixed ids
+        if _ov_prov:
+            _google_style = _ov_prov in ("google", "genai")
+            _catalog_style = not _google_style  # nvidia/openrouter/groq/openai take any id
+        else:
+            _google_style = _tl.startswith(("gemini", "gemma", "learnlm", "imagen")) and "/" not in _t
+            _catalog_style = "/" in _t  # NVIDIA NIM / OpenRouter org-prefixed ids
 
         if _google_style:
             # 1. Google GenAI owns bare gemini-*/gemma-* ids
@@ -4507,8 +4525,15 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
     
     # Try user-configured Story Model override FIRST across providers if provider is auto/None
     if story_model_override and (not selected_provider or selected_provider == "auto"):
-        # 1. Try NVIDIA client
-        if active_nvidia_client:
+        # Provider-grouped dropdowns save 'nvidia::model-id' style tags; route
+        # directly to the tagged provider instead of blind-firing every client.
+        _ov_prov, _ov_model = parse_model_override(story_model_override)
+        if _ov_prov:
+            story_model_override = _ov_model
+
+        # 1. Try NVIDIA client (only when tagged nvidia, untagged catalog-style,
+        #    or untagged bare id — NVIDIA accepts both shapes)
+        if active_nvidia_client and (_ov_prov in (None, "nvidia")):
             try:
                 print(f"=== Streaming Configured Story Model NVIDIA ({story_model_override}) ===")
                 _thinks = nvidia_model_thinks(story_model_override)
@@ -4530,8 +4555,8 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
             except Exception as err:
                 print(f"  Configured NVIDIA {story_model_override} failed: {err}")
 
-        # 2. Try Google GenAI clients
-        if active_genai_clients:
+        # 2. Try Google GenAI clients (skip when override is tagged for another provider)
+        if active_genai_clients and (_ov_prov in (None, "google", "genai")):
             for key_idx, c in enumerate(active_genai_clients):
                 try:
                     base_m = story_model_override.replace("models/", "")
@@ -4555,8 +4580,8 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 except Exception as err:
                     print(f"  Configured Google {story_model_override} failed: {err}")
 
-        # 3. Try OpenAI client
-        if active_openai_client:
+        # 3. Try OpenAI client (skip when override is tagged for another provider)
+        if active_openai_client and (_ov_prov in (None, "openai")):
             try:
                 print(f"=== Streaming Configured Story Model OpenAI ({story_model_override}) ===")
                 stream = active_openai_client.chat.completions.create(
@@ -4573,7 +4598,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 print(f"  Configured OpenAI {story_model_override} failed: {err}")
 
         # 4. Try Groq
-        if active_groq_client:
+        if active_groq_client and (_ov_prov in (None, "groq")):
             try:
                 print(f"=== Streaming Configured Story Model Groq ({story_model_override}) ===")
                 stream = active_groq_client.chat.completions.create(
@@ -4590,7 +4615,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 print(f"  Configured Groq {story_model_override} failed: {err}")
 
         # 5. Try OpenRouter
-        if active_openrouter_client:
+        if active_openrouter_client and (_ov_prov in (None, "openrouter")):
             try:
                 print(f"=== Streaming Configured Story Model OpenRouter ({story_model_override}) ===")
                 stream = active_openrouter_client.chat.completions.create(
