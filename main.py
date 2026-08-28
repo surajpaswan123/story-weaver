@@ -3015,10 +3015,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
 
     check_prompt = _build_rules_check_prefix(rules_text, style_text) + f"=== GENERATED TEXT ===\n{generated_text}"
 
-    # Try configured Rules Model override first if set
+    # Try configured Rules Model override first if set (tag-aware: 'nvidia::x'
+    # routes straight to NVIDIA, 'google::x' to GenAI, etc. -- no blind firing).
+    _rules_prov, _rules_model = parse_model_override(rules_model_override)
+    if _rules_prov:
+        rules_model_override = _rules_model
+
     if rules_model_override:
-        # 1. Try with active_nvidia_client
-        if active_nvidia_client:
+        # 1. Try with active_nvidia_client (only untagged or tagged nvidia)
+        if active_nvidia_client and (_rules_prov in (None, "nvidia")):
             try:
                 print(f"  [RulesEditor] Trying configured Rules Model NVIDIA/{rules_model_override}...")
                 request_kwargs = build_nvidia_request_kwargs(rules_model_override, 0.1, stream=True, use_thinking=False)
@@ -3046,8 +3051,8 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
             except Exception as e:
                 print(f"  [RulesEditor] Configured NVIDIA/{rules_model_override} failed: {e}")
 
-        # 2. Try with active_genai_clients
-        if active_genai_clients:
+        # 2. Try with active_genai_clients (only untagged or tagged google/genai)
+        if active_genai_clients and (_rules_prov in (None, "google", "genai")):
             for c in active_genai_clients:
                 try:
                     base_m = rules_model_override.replace("models/", "")
