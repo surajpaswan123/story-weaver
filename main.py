@@ -4537,6 +4537,83 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 except Exception as err:
                     print(f"  OpenRouter {m_name} failed: {err}")
 
+        # 5. User selected OpenAI / custom OpenAI-compatible endpoint
+        elif selected_provider == "openai" and active_openai_client:
+            oa_models = [target_model] if target_model else OPENAI_MODELS
+            for m_name in oa_models:
+                try:
+                    print(f"=== Streaming User Selected OpenAI ({m_name}) ===")
+                    stream = active_openai_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, stream=True
+                    )
+                    def oa_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = oa_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{m_name}", False
+                except Exception as err:
+                    print(f"  OpenAI {m_name} failed: {err}")
+
+        # 6. User selected Mistral
+        elif selected_provider == "mistral" and active_mistral_client:
+            ms_models = [target_model] if target_model else MISTRAL_MODELS
+            for m_name in ms_models:
+                try:
+                    print(f"=== Streaming User Selected Mistral ({m_name}) ===")
+                    stream = active_mistral_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, stream=True
+                    )
+                    def ms_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = ms_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"Mistral/{m_name}", False
+                except Exception as err:
+                    print(f"  Mistral {m_name} failed: {err}")
+
+        # 7. User selected HuggingFace
+        elif selected_provider == "hf" and active_hf_client:
+            hf_models = [target_model] if target_model else HF_MODELS
+            for m_name in hf_models:
+                try:
+                    print(f"=== Streaming User Selected HuggingFace ({m_name}) ===")
+                    stream = active_hf_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, stream=True
+                    )
+                    def hf_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = hf_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"HuggingFace/{m_name}", False
+                except Exception as err:
+                    print(f"  HuggingFace {m_name} failed: {err}")
+
+        # 8. User selected Cerebras
+        elif selected_provider == "cerebras" and active_cerebras_client:
+            cb_models = [target_model] if target_model else CEREBRAS_MODELS
+            for m_name in cb_models:
+                try:
+                    print(f"=== Streaming User Selected Cerebras ({m_name}) ===")
+                    stream = active_cerebras_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, stream=True
+                    )
+                    def cb_adapter():
+                        for chunk in stream:
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                yield GenericChunk(chunk.choices[0].delta.content)
+                    gen = cb_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"Cerebras/{m_name}", False
+                except Exception as err:
+                    print(f"  Cerebras {m_name} failed: {err}")
+
+
         # STRICT MODE end: the user explicitly picked this provider. If none
         # of the branches above returned, fail HARD - never fall through to
         # the silent cross-provider chain below.
