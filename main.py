@@ -4426,11 +4426,20 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
     user_keys = load_user_keys(uid)
     story_model_override = user_keys.get("story_model", "").strip()
 
+    # STRICT MODE: no silent cross-provider fallback. If the user picked an
+    # explicit provider/model, use ONLY that and fail hard if it's down.
+    # (Walking multiple API keys WITHIN the chosen provider is still allowed
+    #  via the FailoverClient wrappers — that is not a "provider" fallback.)
+    _strict = bool(selected_provider and selected_provider != "auto")
+
     # USER SELECTED SPECIFIC PROVIDER ATTEMPT
-    if selected_provider and selected_provider != "auto":
+    if _strict:
         target_model = selected_model if (selected_model and selected_model != "auto") else None
         if not target_model and story_model_override:
-            target_model = story_model_override
+            # only adopt the story override if it's tagged for THIS provider
+            _ovp, _ovm = parse_model_override(story_model_override)
+            if not _ovp or _ovp == selected_provider:
+                target_model = _ovm or story_model_override
         
         # 1. User selected Google GenAI
         if selected_provider == "google" and active_genai_clients:
@@ -4527,7 +4536,17 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     return StreamWithFirstChunk(gen, first_chunk), f"OpenRouter/{m_name}", False
                 except Exception as err:
                     print(f"  OpenRouter {m_name} failed: {err}")
-    
+
+        # STRICT MODE end: the user explicitly picked this provider. If none
+        # of the branches above returned, fail HARD - never fall through to
+        # the silent cross-provider chain below.
+        if _strict:
+            _detail = f"provider={selected_provider}"
+            if target_model:
+                _detail += f", model={target_model}"
+            raise Exception(f"Selected {_detail} failed or is not available for your account. "
+                            f"Choose another provider/model in the generation controls.")
+
     # Try user-configured Story Model override FIRST across providers if provider is auto/None
     if story_model_override and (not selected_provider or selected_provider == "auto"):
         # Provider-grouped dropdowns save 'nvidia::model-id' style tags; route
