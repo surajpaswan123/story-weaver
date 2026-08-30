@@ -28,6 +28,20 @@ class LogInterceptor:
         except Exception:
             pass
 
+    def isatty(self):
+        # uvicorn (>=0.52) calls sys.stdout.isatty() during logging setup. Forward
+        # to the wrapped stream so the interceptor behaves like a faithful stream.
+        try:
+            return self.original_stream.isatty()
+        except Exception:
+            return False
+
+    def fileno(self):
+        try:
+            return self.original_stream.fileno()
+        except Exception:
+            return -1
+
 sys.stdout = LogInterceptor(sys.stdout)
 sys.stderr = LogInterceptor(sys.stderr)
 
