@@ -1055,6 +1055,44 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         const srAnnouncer = document.getElementById('sr-announcer');
         const srStatus = document.getElementById('sr-status');
 
+        // ===== GENERATION STOP SUPPORT (Send <-> Stop button) =====
+        let isGenerating = false;
+        let activeReader = null;   // the current SSE reader (cancel to abort)
+        let activeStoryId = null;  // story being generated, for the /stop call
+        const SEND_SVG = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>';
+        const STOP_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>';
+
+        function setGenerating(bool) {
+            isGenerating = bool;
+            if (bool) {
+                sendBtn.innerHTML = STOP_SVG;
+                sendBtn.setAttribute('aria-label', 'Stop generation');
+                sendBtn.classList.remove('text-stone-400', 'hover:text-stone-800');
+                sendBtn.classList.add('text-red-500', 'hover:text-red-700');
+            } else {
+                sendBtn.innerHTML = SEND_SVG;
+                sendBtn.setAttribute('aria-label', 'Send to AI');
+                sendBtn.classList.remove('text-red-500', 'hover:text-red-700');
+                sendBtn.classList.add('text-stone-400', 'hover:text-stone-800');
+            }
+        }
+
+        async function stopGeneration() {
+            if (!isGenerating) return;
+            announceStatus('Stopping generation...');
+            // Tell the server to cancel + clean up the partial turn.
+            const sid = activeStoryId || currentStoryId;
+            try {
+                await authFetch(`/story/${encodeURIComponent(sid)}/stop`, { method: 'POST' });
+            } catch (e) {
+                console.warn('Stop request failed:', e);
+            }
+            // Abort the local read loop; the 'finally' path re-enables the button.
+            if (activeReader) {
+                try { activeReader.cancel(); } catch (e) {}
+            }
+        }
+
         // ===== SCREEN READER HELPERS =====
         function announceToScreenReader(text) {
             // Clear then set to force re-announcement
@@ -1827,7 +1865,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             lastUserPrompt = text;
             input.value = '';
             input.disabled = true;
-            sendBtn.disabled = true;
+            sendBtn.disabled = false;
+            activeStoryId = currentStoryId;
+            setGenerating(true);
             announceStatus('Generating response...');
 
             // Show user prompt block
@@ -1983,6 +2023,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
 
                 const reader = response.body.getReader();
+                activeReader = reader;
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let lastChunkPayload = '';
@@ -2003,6 +2044,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                     modelBadge.textContent = payload.model;
                                     modelBadge.style.opacity = '1';
                                     aiHeader.textContent = 'AI said: - ' + payload.model;
+                                } else if (payload.type === 'stopped') {
+                                    // Server confirmed the abort and cleaned up the
+                                    // partial turn. Remove the dangling 'You said:' +
+                                    // empty 'AI said:' blocks we added for this attempt.
+                                    if (userBlock && userBlock.parentNode) userBlock.remove();
+                                    if (aiHeader && aiHeader.parentNode) aiHeader.remove();
+                                    if (statusDiv && statusDiv.parentNode) statusDiv.remove();
+                                    if (thinkingPanel && thinkingPanel.parentNode) thinkingPanel.remove();
+                                    announceStatus('Generation stopped.');
+                                    announceToScreenReader('Generation stopped. No new text was saved.');
+                                    loadStoryList();
                                 } else if (payload.type === 'thinking') {
                                     statusDiv.textContent = 'thinking...';
                                     if (!thinkingAnnounced) {
@@ -2224,6 +2276,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 input.value = text;
             } finally {
                 input.disabled = false;
+                activeReader = null;
+                activeStoryId = null;
+                setGenerating(false);
                 updateSendButtonState();
                 announceStatus('Ready');
             }
@@ -3231,17 +3286,23 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         // loadProvidersAndModels() is called after login via onAuthStateChanged or handleGuestLogin
 
         document.getElementById('new-story-btn').addEventListener('click', createNewStory);
-        sendBtn.addEventListener('click', () => submitStory());
+        sendBtn.addEventListener('click', () => {
+            if (isGenerating) { stopGeneration(); }
+            else { submitStory(); }
+        });
         input.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                submitStory();
+                if (isGenerating) { stopGeneration(); }
+                else { submitStory(); }
             }
         });
 
         // Keep Send disabled whenever the textbox is empty, so there's nothing to accidentally submit.
         function updateSendButtonState() {
-            sendBtn.disabled = input.disabled || input.value.trim().length === 0;
+            // During generation the button becomes Stop and must stay enabled
+            // regardless of the (cleared) text box.
+            sendBtn.disabled = isGenerating ? false : (input.disabled || input.value.trim().length === 0);
         }
         input.addEventListener('input', updateSendButtonState);
         updateSendButtonState();

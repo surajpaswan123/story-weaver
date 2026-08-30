@@ -436,6 +436,38 @@ def end_story_turn(story_id: str, uid: str, token: str) -> None:
             _active_story_turns.pop(key, None)
 
 
+# --- Generation stop/cancel support -------------------------------------------------
+# A per-(user,story) flag the streaming worker polls so the user can abort a
+# long-running generation from the UI. Setting it makes the worker tear down
+# without committing the partial turn; the /stop endpoint also removes the
+# dangling "You said:" entry and releases the turn reservation.
+_stop_requests: dict[tuple[str, str], bool] = {}
+_stop_requests_guard = threading.Lock()
+
+
+class _StopRequested(Exception):
+    """Internal control-flow exception to unwind an in-flight stream on stop."""
+
+
+def _stop_key(story_id: str, uid: str) -> tuple[str, str]:
+    return (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+
+
+def request_stop(story_id: str, uid: str) -> None:
+    with _stop_requests_guard:
+        _stop_requests[_stop_key(story_id, uid)] = True
+
+
+def clear_stop_request(story_id: str, uid: str) -> None:
+    with _stop_requests_guard:
+        _stop_requests.pop(_stop_key(story_id, uid), None)
+
+
+def stop_requested(story_id: str, uid: str) -> bool:
+    with _stop_requests_guard:
+        return bool(_stop_requests.get(_stop_key(story_id, uid)))
+
+
 def story_turn_is_active(story_id: str, uid: str = "default_user") -> bool:
     key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
     with _active_story_turns_guard:
@@ -7057,6 +7089,60 @@ async def local_audio_begin(story_id: str, user_input: str = Form("", max_length
         raise HTTPException(status_code=500, detail=f"Failed to start local audio generation: {_friendly_api_error(e)}")
 
 
+@app.post("/story/{story_id}/stop")
+async def stop_generation(story_id: str, user_info: dict = Depends(require_authenticated_user)):
+    """Cancel an in-flight generation for this story and remove its partial turn.
+
+    Sets the stop flag the streaming worker polls, removes the dangling
+    'You said:' entry the worker logged before generation began, clears any
+    pending-retry marker, and releases the turn reservation so the user can
+    immediately start a new turn. The worker path also checks the flag and,
+    if it sees it after committing partial text, rolls the partial back by
+    dropping the last user entry + not persisting the AI text.
+    """
+    user_id = user_info["uid"]
+    request_stop(story_id, user_id)
+    restored = False
+    try:
+        restore_story_directory_from_firestore(user_id, story_id)
+        restored = True
+    except Exception as e:
+        print(f"[Stop] Firestore restore skipped: {e}")
+
+    removed = 0
+    if restored:
+        # Remove trailing user prompt(s) that never got an AI reply (the partial turn).
+        # This mirrors delete-dangling but tolerates an in-flight state.
+        try:
+            chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
+            if os.path.exists(chat_path):
+                with open(chat_path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+                if not isinstance(entries, list):
+                    entries = []
+                while entries and entries[-1].get("role") == "user":
+                    entries.pop()
+                    removed += 1
+                if removed:
+                    _atomic_write_json(chat_path, entries)
+                    sync_story_directory_to_firestore(user_id, story_id)
+        except Exception as e:
+            print(f"[Stop] Dangling clean failed: {e}")
+
+    # Clear the retry marker (a cancelled turn is not a "failed" one).
+    try:
+        clear_pending_retry(story_id, uid=user_id)
+    except Exception:
+        pass
+
+    # Release the active-turn reservation immediately regardless of token.
+    key = (sanitize_id(user_id or "default_user"), sanitize_id(story_id or "untitled"))
+    with _active_story_turns_guard:
+        _active_story_turns.pop(key, None)
+
+    return {"stopped": True, "removed_dangling": removed}
+
+
 @app.post("/generate")
 async def generate_story(input_data: StoryInput, background_tasks: BackgroundTasks, user_info: dict = Depends(require_authenticated_user)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
@@ -7274,6 +7360,12 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 if chunk is _HEARTBEAT:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     continue
+                # Stop requested from the UI: abort WITHOUT committing the partial
+                # turn. Raise inside the try so the except path cleans up the
+                # dangling user entry and does not write response text.
+                if stop_requested(input_data.story_id, user_id):
+                    print(f"[Stop] Stop requested mid-stream for {input_data.story_id}; aborting turn.")
+                    raise _STOP_REQUESTED_EXCEPTION
                 text_content = _safe_chunk_text(chunk)
 
                 if text_content:
@@ -7512,6 +7604,23 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             clear_pending_retry(input_data.story_id, uid=user_id)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
+        except _StopRequested:
+            # User pressed Stop: drop the dangling "You said:" entry, do NOT
+            # commit partial text, and do NOT surface an error. The /stop
+            # endpoint already removed the dangling entry and released the
+            # reservation, but the worker may have logged the user prompt
+            # again or partially persisted — clean defensively here too.
+            print(f"[Stop] Turn aborted by user for {input_data.story_id}.")
+            if response_persisted:
+                try:
+                    remove_last_user_entry(input_data.story_id, uid=user_id)
+                    sync_story_directory_to_firestore(user_id, input_data.story_id)
+                except Exception as rollback_err:
+                    print(f"[Stop] Rollback failed: {rollback_err}")
+            clear_pending_retry(input_data.story_id, uid=user_id)
+            full_response = ""
+            yield f"data: {json.dumps({'type': 'stopped', 'message': 'Generation stopped.'})}\n\n"
+
         except OSError as e:
             # errno 22 (EINVAL) and errno 9 (EBADF) are both "socket/stream died" on
             # Windows - either the client disconnected or the provider connection
@@ -7549,6 +7658,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 sync_story_directory_to_firestore(user_id, input_data.story_id)
             except Exception as sync_err:
                 print(f"  Final Firestore sync failed: {sync_err}")
+            clear_stop_request(input_data.story_id, user_id)
             end_story_turn(input_data.story_id, user_id, turn_token)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
