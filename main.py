@@ -4594,8 +4594,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     )
                     def oa_adapter():
                         for chunk in stream:
-                            if chunk.choices and chunk.choices[0].delta.content:
-                                yield GenericChunk(chunk.choices[0].delta.content)
+                            delta = chunk.choices[0].delta if chunk.choices else None
+                            if delta:
+                                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                    yield GenericChunk(delta.reasoning_content, is_thinking=True)
+                                if delta.content:
+                                    yield GenericChunk(delta.content)
                     gen = oa_adapter()
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{m_name}", False
@@ -4736,8 +4740,12 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 )
                 def oa_adapter():
                     for chunk in stream:
-                        if chunk.choices and chunk.choices[0].delta.content:
-                            yield GenericChunk(chunk.choices[0].delta.content)
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        if delta:
+                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                yield GenericChunk(delta.reasoning_content, is_thinking=True)
+                            if delta.content:
+                                yield GenericChunk(delta.content)
                 gen = oa_adapter()
                 first_chunk = next(gen)
                 return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{story_model_override}", False
