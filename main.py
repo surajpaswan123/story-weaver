@@ -1350,6 +1350,65 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
     if target_model:
         _t = target_model.strip()
         _tl = _t.lower()
+
+        # Explicit provider-tagged override: route DIRECTLY to that provider.
+        if _ov_prov:
+            if _ov_prov in ("google", "genai"):
+                if active_clients.get("genai_clients"):
+                    for c in active_clients["genai_clients"]:
+                        try:
+                            print(f"  [{label}] Trying user configured target GenAI/{_t}...")
+                            base_m = _t.replace(":search", "")
+                            resp = c.models.generate_content(
+                                model=base_m,
+                                contents=f"{system_prompt}\n\n{user_prompt}",
+                                config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                            )
+                            if resp.text and resp.text.strip():
+                                return resp.text, f"Configured/{_t}"
+                        except Exception as e:
+                            print(f"  [{label}] Configured GenAI/{_t} note: {e}")
+            elif _ov_prov == "openai":
+                oa = active_clients.get("openai_client")
+                if oa:
+                    try:
+                        print(f"  [{label}] Trying user configured target OpenAI/{_t}...")
+                        kwargs = {"model": _t, "messages": messages}
+                        if not _tl.startswith("o"):
+                            kwargs["temperature"] = temperature
+                        resp = oa.chat.completions.create(**kwargs)
+                        res = resp.choices[0].message.content or ""
+                        if res.strip():
+                            return res, f"Configured/{_t}"
+                    except Exception as e:
+                        print(f"  [{label}] Configured OpenAI/{_t} note: {e}")
+            else:
+                # nvidia / openrouter / groq / hf / cerebras / mistral — OpenAI-compatible
+                _cmap = {
+                    "nvidia": "nvidia_client",
+                    "openrouter": "openrouter_client",
+                    "groq": "groq_client",
+                    "mistral": "mistral_client",
+                    "hf": "hf_client",
+                    "cerebras": "cerebras_client",
+                }
+                _ck = _cmap.get(_ov_prov)
+                _pc = active_clients.get(_ck) if _ck else None
+                if _pc:
+                    try:
+                        print(f"  [{label}] Trying user configured target {_ov_prov}/{_t}...")
+                        resp = _pc.chat.completions.create(
+                            model=_t, messages=messages, temperature=temperature
+                        )
+                        res = resp.choices[0].message.content or ""
+                        if res.strip():
+                            return res, f"Configured/{_t}"
+                    except Exception as e:
+                        print(f"  [{label}] Configured {_ov_prov}/{_t} note: {e}")
+            # fell through (no client / all failed): continue to heuristics below,
+            # but clear the tag so the ID-shaped fallback can still try.
+            _ov_prov = None
+
         if _ov_prov:
             _google_style = _ov_prov in ("google", "genai")
             _catalog_style = not _google_style  # nvidia/openrouter/groq/openai take any id
@@ -3049,10 +3108,15 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
             active_nokey_client = nokey_client
             
         uid = user_info.get("uid")
+        active_openai_client = eff.get("openai_client")
+        if not active_openai_client and is_admin:
+            active_openai_client = official_openai_client
+            
         if uid:
             user_keys = load_user_keys(uid)
             rules_model_override = user_keys.get("rules_model", "").strip()
     else:
+        active_openai_client = official_openai_client
         active_genai_clients = clients
         active_nvidia_client = nvidia_client
         active_nokey_client = nokey_client
@@ -3124,6 +3188,36 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                         return
                 except Exception as e:
                     print(f"  [RulesEditor] Configured GenAI/{base_m} failed: {e}")
+
+        # 3. Try OpenAI-compatible providers when tagged accordingly
+        if active_openai_client and (_rules_prov == "openai"):
+            try:
+                print(f"  [RulesEditor] Trying configured Rules Model OpenAI/{rules_model_override}...")
+                _oa_kwargs = {"model": rules_model_override, "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": check_prompt},
+                ]}
+                if not rules_model_override.lower().startswith("o"):
+                    _oa_kwargs["temperature"] = 0.1
+                stream = _retry_on_429(
+                    lambda m=rules_model_override: active_openai_client.chat.completions.create(
+                        **_oa_kwargs, stream=True,
+                    ),
+                    label=f"RulesEditor/Configured/OpenAI/{rules_model_override}",
+                )
+                got_any = False
+                pieces = []
+                for chunk in stream:
+                    text = _safe_chunk_text(chunk)
+                    if text:
+                        got_any = True
+                        pieces.append(text)
+                if got_any:
+                    print(f"  [RulesEditor] Streamed successfully via configured OpenAI/{rules_model_override}")
+                    yield from pieces
+                    return
+            except Exception as e:
+                print(f"  [RulesEditor] Configured OpenAI/{rules_model_override} failed: {e}")
 
     # 0. PRIMARY: fastest dynamic Google model (newest chat-capable from live fetch)
     for c in active_genai_clients:
