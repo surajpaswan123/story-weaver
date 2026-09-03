@@ -2575,7 +2575,9 @@ def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "defaul
     recent = ai_turns[-num_turns:] if num_turns > 0 else ai_turns
     return "\n\n".join(t.strip() for t in recent if t.strip())
 
-RECENT_STORY_TURNS = 10  # How many recent AI-generated turns to send as full-text context
+RECENT_STORY_TURNS = 50  # How many recent AI-generated turns to send as full-text context
+                         # (get_recent_story_text slices ai_turns[-N:] — the LAST N turns,
+                         #  verbatim, never the opening ones and never summarized)
 
 from fastapi.responses import FileResponse
 
