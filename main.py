@@ -2575,9 +2575,112 @@ def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "defaul
     recent = ai_turns[-num_turns:] if num_turns > 0 else ai_turns
     return "\n\n".join(t.strip() for t in recent if t.strip())
 
-RECENT_STORY_TURNS = 50  # How many recent AI-generated turns to send as full-text context
-                         # (get_recent_story_text slices ai_turns[-N:] — the LAST N turns,
-                         #  verbatim, never the opening ones and never summarized)
+RECENT_STORY_TURNS = 50  # Retained for get_recent_story_text callers that still want a
+                         # window (background analysis uses BATCH_SIZE). The STORY model
+                         # now receives the WHOLE story.md every turn - see the
+                         # "FULL STORY SO FAR" section built in each generation path.
+
+
+# Explains the story folder to the STORY model: what each file is, who owns it,
+# how much authority it carries, and what the model is expected to do with it.
+# Injected between the master instructions and the assembled file dump, so the
+# model reads the map before it reads the territory.
+STORY_FILES_MANIFEST = """[Your Story Files - What Each Section Is And How To Use It]
+Everything after this section is reference material read fresh from this story's
+folder on every turn. Each "=== HEADER ===" block is a separate file with one
+specific job. Read all of them before you write a single word.
+
+You do NOT write, edit, summarise, or mention these files. A separate automated
+pass maintains them after your turn finishes. Your entire output is story prose -
+never a file update, never a status line, never a list of changes.
+
+AUTHORITY ORDER - when two sources disagree, the higher one wins:
+  1. MANDATORY WORLD RULES      (absolute law, never negotiable)
+  2. CURRENT POSITIONS + STORY TIMELINE  (the live "right now" state)
+  3. The other reference files  (established facts)
+  4. Older passages of the story prose  (may have been superseded)
+
+- MANDATORY WORLD RULES (rules.md)
+  Written by the user. Hard law for this world: what exists, what cannot exist,
+  power limits, physics, disabilities, hard bans. It is repeated at the very end
+  of your instructions because it outranks everything else, including your own
+  sense of what would make a better scene. A vivid line that breaks a rule is a
+  failed line - rewrite it before you output it.
+
+- STYLE GUIDE (style.md)
+  Written by the user. Governs voice, not facts: sentence rhythm, tense, person,
+  vocabulary, pacing, formatting habits, tone. Obey it even when your instinct
+  suggests otherwise. A second editor pass also enforces this file, so fighting
+  it only produces churn.
+
+- CHARACTERS (characters.md)
+  The cast with their physical descriptions and defining traits. Use it to keep
+  bodies, faces, heights, voices, ages, and abilities consistent. Never silently
+  redesign someone. If a character is disabled, that shapes every sentence they
+  perceive the world in - think through how they would actually experience the
+  scene before writing it.
+
+- CURRENT POSITIONS (positions.md)
+  Where every character physically is RIGHT NOW, at this exact moment. This is
+  live state and it OVERRIDES anything older in the story prose. If the story
+  text has someone in the kitchen but this file puts them on the roof, they are
+  on the roof. Start your scene from these positions.
+
+- LOCATIONS (locations.md)
+  Places already established: layout, atmosphere, contents, how they connect.
+  Reuse these details instead of reinventing a room the reader has already been
+  in. Do not relocate or rebuild a place that is already described here.
+
+- ITEMS (items.md)
+  Every object the characters actually possess, and where it is. This is what
+  enforces the no-materializing-items rule: if you want a character to use
+  something that is not in this file and was never acquired on the page, you
+  must first show them getting it. Check here before anyone picks anything up.
+
+- VILLAINS (villains.md)
+  Antagonists and threats: motives, capabilities, current standing, what they
+  know. Keep their competence and their information consistent - a villain
+  cannot suddenly know something they were never shown learning.
+
+- KEY INCIDENTS (incidents.md)
+  The major events that have already happened and still matter. Treat these as
+  fixed history. Reference them for emotional weight and consequence; never
+  contradict them or quietly undo them.
+
+- STORY TIMELINE (time.md)
+  Authoritative for day, clock time, and the order events occurred in. Continue
+  forward from the latest point reached. Never jump backward unless the user
+  explicitly asks for a flashback, and never re-anchor to a morning or a meal
+  the story has already moved past. Let hours pass when the action would take
+  hours.
+
+- CONSISTENCY NOTES (consistency.md)
+  Contradictions a previous automated check flagged. Treat each entry as a
+  correction you must respect going forward - resolve it in the prose naturally
+  rather than repeating the mistake or writing a note about it.
+
+- AUDIO LOG (audio_log.md)
+  Songs and music the user has shared, with what each one evoked. Remember them
+  as shared history between you and the user; the mood of a track can inform a
+  scene when it is relevant.
+
+- STORY SUMMARY SO FAR (summary.md)
+  A condensed account of the whole story. Use it for long-range arc awareness
+  and callbacks. It is lower resolution than the actual prose, so when the full
+  story text covers something, the prose wins.
+
+- FULL STORY SO FAR (story.md)
+  The complete story text, every word written so far, in order. This is the
+  ground truth for what has actually happened, how the voice sounds, and where
+  the narrative currently stands. Your job is to continue seamlessly from its
+  final sentence - match the established voice exactly, and do not restate,
+  recap, or summarise what it already contains.
+
+- ADDITIONAL CONTEXT - <NAME>
+  Any other file in the folder, including categories that were auto-created for
+  this story (factions, artifacts, technology, politics, and similar). Treat
+  each as established canon for its subject and keep it consistent, exactly as
+  you would the named files above."""
 
 from fastapi.responses import FileResponse
 
@@ -6394,12 +6497,12 @@ async def generate_with_audio(
         "summary.md": "STORY SUMMARY SO FAR",
     }
     # Deliberate reading order: lore/reference material first, then style/timeline/summary,
-    # so the recent-story window (added last, below) sits closest to where generation begins -
+    # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
                           "incidents.md", "consistency.md", "audio_log.md", "style.md",
                           "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # story.md replaced by recent-turns window below
+    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
 
     story_context_parts = []
     rules_text = ""
@@ -6433,12 +6536,13 @@ async def generate_with_audio(
         except Exception as e:
             print(f"  Warning: Could not read {md_file}: {e}")
 
-    # Recent narrative window - last N AI-generated turns, in place of the full story.md dump.
-    # Placed last so it sits closest to the generation point (strongest attention, and it's
-    # literally where continuation needs to happen).
-    recent_story_text = get_recent_story_text(story_id, RECENT_STORY_TURNS, uid=user_id)
-    if recent_story_text:
-        story_context_parts.append(f"=== RECENT STORY (continue from the end of this) ===\n{recent_story_text}")
+    # FULL story text - the entire story.md, every turn. Placed last so it sits closest
+    # to the generation point (strongest attention, and it's literally where the
+    # continuation has to happen).
+    if full_story_text.strip():
+        story_context_parts.append(
+            f"=== FULL STORY SO FAR (continue seamlessly from its final sentence) ===\n{full_story_text.strip()}"
+        )
 
     story_context = "\n\n".join(story_context_parts)
 
@@ -6466,7 +6570,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     # Inject current time state so the story generator knows what day/time it is
     time_state = parse_current_time_state(story_id, uid=user_id)
     time_anchor = f"\n\n⏰ {time_state}" if time_state else ""
-    system_msg = f"{system_instruction}\n\n{story_context}{time_anchor}{rules_reminder}"
+    system_msg = f"{system_instruction}\n\n{STORY_FILES_MANIFEST}\n\n{story_context}{time_anchor}{rules_reminder}"
     user_msg = f"<user_input>\n{user_input}\n</user_input>\n\nThe user has attached an audio file. Listen to it and follow the instructions in <user_input>."
 
     print(f"DEBUG: Audio generate system len: {len(system_msg)}, user len: {len(user_msg)}")
@@ -6802,17 +6906,19 @@ def _build_generate_messages(story_id: str, uid: str, user_input: str) -> dict:
         "items.md": "ITEMS",
         "villains.md": "VILLAINS",
         "incidents.md": "KEY INCIDENTS",
+        "consistency.md": "CONSISTENCY NOTES",
         "audio_log.md": "AUDIO LOG (songs/music the user has shared — remember these)",
         "style.md": "STYLE GUIDE (follow these writing rules)",
         "time.md": "STORY TIMELINE (day, time, and event order)",
         "summary.md": "STORY SUMMARY SO FAR",
     }
     # Deliberate reading order: lore/reference material first, then style/timeline/summary,
-    # so the recent-story window (added last, below) sits closest to where generation begins -
+    # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
-                          "incidents.md", "audio_log.md", "style.md", "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # story.md replaced by recent-turns window below
+                          "incidents.md", "consistency.md", "audio_log.md", "style.md",
+                          "time.md", "summary.md"]
+    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
 
     story_context_parts = []
     rules_text = ""
@@ -6843,12 +6949,13 @@ def _build_generate_messages(story_id: str, uid: str, user_input: str) -> dict:
         except Exception as e:
             print(f"  Warning: Could not read {md_file}: {e}")
 
-    # Recent narrative window - last N AI-generated turns, in place of the full story.md dump
-    # and the retired context.md anchor. Placed last so it sits closest to the generation
-    # point (strongest attention, and it's literally where continuation needs to happen).
-    recent_story_text = get_recent_story_text(story_id, RECENT_STORY_TURNS)
-    if recent_story_text:
-        story_context_parts.append(f"=== RECENT STORY (continue from the end of this) ===\n{recent_story_text}")
+    # FULL story text - the entire story.md, every turn. Placed last so it sits closest
+    # to the generation point (strongest attention, and it's literally where the
+    # continuation has to happen).
+    if full_story_text.strip():
+        story_context_parts.append(
+            f"=== FULL STORY SO FAR (continue seamlessly from its final sentence) ===\n{full_story_text.strip()}"
+        )
 
     # Build context without chat log first
     story_context = "\n\n".join(story_context_parts)
@@ -6930,7 +7037,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     if rules_text:
         rules_reminder = f"\n\n[WARNING] MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
 
-    system_msg = f"{system_instruction}\n\n{story_context}{rules_reminder}"
+    system_msg = f"{system_instruction}\n\n{STORY_FILES_MANIFEST}\n\n{story_context}{rules_reminder}"
 
     user_msg = f"<user_input>\n{user_input}\n</user_input>\n\nBased on your instructions, refine and expand the <user_input> above, then seamlessly continue the story."
 
@@ -7296,17 +7403,19 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
         "items.md": "ITEMS",
         "villains.md": "VILLAINS",
         "incidents.md": "KEY INCIDENTS",
+        "consistency.md": "CONSISTENCY NOTES",
         "audio_log.md": "AUDIO LOG (songs/music the user has shared — remember these)",
         "style.md": "STYLE GUIDE (follow these writing rules)",
         "time.md": "STORY TIMELINE (day, time, and event order)",
         "summary.md": "STORY SUMMARY SO FAR",
     }
     # Deliberate reading order: lore/reference material first, then style/timeline/summary,
-    # so the recent-story window (added last, below) sits closest to where generation begins -
+    # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
-                          "incidents.md", "audio_log.md", "style.md", "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # story.md replaced by recent-turns window below
+                          "incidents.md", "consistency.md", "audio_log.md", "style.md",
+                          "time.md", "summary.md"]
+    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
 
     story_context_parts = []
     rules_text = ""
@@ -7337,12 +7446,13 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
         except Exception as e:
             print(f"  Warning: Could not read {md_file}: {e}")
 
-    # Recent narrative window - last N AI-generated turns, in place of the full story.md dump
-    # and the retired context.md anchor. Placed last so it sits closest to the generation
-    # point (strongest attention, and it's literally where continuation needs to happen).
-    recent_story_text = get_recent_story_text(input_data.story_id, RECENT_STORY_TURNS)
-    if recent_story_text:
-        story_context_parts.append(f"=== RECENT STORY (continue from the end of this) ===\n{recent_story_text}")
+    # FULL story text - the entire story.md, every turn. Placed last so it sits closest
+    # to the generation point (strongest attention, and it's literally where the
+    # continuation has to happen).
+    if full_story_text.strip():
+        story_context_parts.append(
+            f"=== FULL STORY SO FAR (continue seamlessly from its final sentence) ===\n{full_story_text.strip()}"
+        )
 
     # Build context without chat log first
     story_context = "\n\n".join(story_context_parts)
@@ -7424,7 +7534,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     if rules_text:
         rules_reminder = f"\n\n[WARNING] MANDATORY WORLD RULES — NEVER BREAK THESE:\n{rules_text}"
     
-    system_msg = f"{system_instruction}\n\n{story_context}{rules_reminder}"
+    system_msg = f"{system_instruction}\n\n{STORY_FILES_MANIFEST}\n\n{story_context}{rules_reminder}"
 
     user_msg = f"<user_input>\n{input_data.user_input}\n</user_input>\n\nBased on your instructions, refine and expand the <user_input> above, then seamlessly continue the story."
     print(f"DEBUG: Generating for {input_data.story_id}, system len: {len(system_msg)}, user len: {len(user_msg)}")
