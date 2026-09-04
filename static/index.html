@@ -1329,35 +1329,88 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
+        let _analysisPollTimer = null;
+
         async function triggerAnalysis() {
             if (!currentStoryId || currentStoryId === 'default') return;
             const btn = document.getElementById('analyze-btn');
-            const originalText = btn.textContent;
+            const originalHTML = btn.innerHTML;
+            const originalLabel = btn.getAttribute('aria-label');
+
+            // A full catch-up pass re-reads the whole manuscript and can take a few
+            // minutes on a long story, so confirm before starting.
+            if (!confirm('Analyze the whole story and update every reference file?\n\n' +
+                         'This re-reads the entire manuscript, so it may take a few minutes. ' +
+                         'You cannot generate a new turn while it runs.')) {
+                announceStatus('Analysis cancelled.');
+                return;
+            }
+
+            if (_analysisPollTimer) { clearInterval(_analysisPollTimer); _analysisPollTimer = null; }
 
             try {
                 btn.disabled = true;
-                btn.textContent = '⏳ Analyzing...';
-                announceStatus('Starting background analysis...');
+                btn.innerHTML = '<span aria-hidden="true">⏳</span> Analyzing...';
+                btn.setAttribute('aria-label', 'Analysis in progress');
+                announceStatus('Starting full story analysis...');
 
-                const res = await authFetch(`/analyze/${currentStoryId}`, { method: 'POST' });
-                if (!res.ok) throw new Error(await res.text());
+                const res = await authFetch(`/analyze/${encodeURIComponent(currentStoryId)}`, { method: 'POST' });
+                if (!res.ok) {
+                    let detail = await res.text();
+                    try { detail = (JSON.parse(detail).detail) || detail; } catch (e) {}
+                    throw new Error(detail);
+                }
+                const started = await res.json().catch(() => ({}));
+                announceToScreenReader(started.message || 'Analysis started.');
 
-                announceStatus('Analysis started in background.');
-                setTimeout(() => {
-                    announceStatus('Analysis running...');
-                    // Poll for a bit to see if files update? 
-                    // For now just restore button after a delay
-                }, 2000);
+                // Poll the status endpoint so the user actually learns the outcome
+                // instead of a fire-and-forget "started" with no follow-up.
+                let lastSpoken = '';
+                _analysisPollTimer = setInterval(async () => {
+                    let st;
+                    try {
+                        const sres = await authFetch(`/analyze/${encodeURIComponent(currentStoryId)}/status`);
+                        if (!sres.ok) return;
+                        st = await sres.json();
+                    } catch (e) { return; }
+
+                    if (st.state === 'running') {
+                        const stages = st.stages || [];
+                        const latest = stages.length ? stages[stages.length - 1].message : 'working';
+                        if (latest !== lastSpoken) {
+                            lastSpoken = latest;
+                            announceStatus('Analyzing: ' + latest);
+                        }
+                        return;
+                    }
+
+                    clearInterval(_analysisPollTimer);
+                    _analysisPollTimer = null;
+                    btn.disabled = false;
+                    btn.innerHTML = originalHTML;
+                    btn.setAttribute('aria-label', originalLabel);
+
+                    if (st.state === 'done' || st.state === 'partial') {
+                        announceToScreenReader(st.summary);
+                        announceStatus(st.state === 'partial' ? 'Analysis finished with problems.' : 'Analysis complete.');
+                        // Refresh whatever the user is currently looking at.
+                        if (typeof refreshOpenPanels === 'function') refreshOpenPanels();
+                    } else if (st.state === 'failed') {
+                        announceToScreenReader('Analysis failed. ' + (st.errors && st.errors[0] ? st.errors[0] : ''));
+                        announceStatus('Analysis failed.');
+                    } else {
+                        announceStatus('Ready');
+                    }
+                }, 3000);
 
             } catch (err) {
                 console.error('Analysis trigger failed:', err);
+                if (_analysisPollTimer) { clearInterval(_analysisPollTimer); _analysisPollTimer = null; }
+                btn.disabled = false;
+                btn.innerHTML = originalHTML;
+                btn.setAttribute('aria-label', originalLabel);
                 announceStatus('Analysis failed to start.');
-                alert('Failed to trigger analysis: ' + err.message);
-            } finally {
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.textContent = originalText;
-                }, 5000);
+                announceToScreenReader('Could not start analysis. ' + err.message);
             }
         }
 
@@ -1406,6 +1459,19 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             // Move the reading position into the panel itself, not just the live-region status
             const panel = document.getElementById(`tab-${tab}`);
             if (panel) panel.focus({ preventScroll: true });
+        }
+
+        // Re-load whichever tab is currently visible. Called after an analysis run so
+        // the user does not have to switch tabs to see freshly written files.
+        function refreshOpenPanels() {
+            const activeBtn = document.querySelector('.tab-btn.active');
+            const tab = activeBtn ? activeBtn.dataset.tab : null;
+            if (tab === 'elements') loadElements();
+            else if (tab === 'summary') loadSummary();
+            else if (tab === 'style') loadStyle();
+            else if (tab === 'rules') loadRules();
+            else if (tab === 'consistency') loadConsistency();
+            else if (tab === 'files') loadFileList();
         }
 
         // Standard tablist keyboard pattern: Left/Right/Home/End move focus between tabs,
@@ -2449,6 +2515,16 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                     // actually arrives, so the next turn never reads stale memory files.
                                     statusDiv.textContent = 'finalizing...';
                                     announceStatus(payload.message || 'Updating story memory...');
+                                } else if (payload.type === 'retrying') {
+                                    // Provider returned 503/429. The server is waiting and will
+                                    // retry the SAME model - tell the user instead of leaving
+                                    // them staring at a silent spinner.
+                                    const att = payload.attempt || 1;
+                                    const max = payload.max || 20;
+                                    const wait = payload.wait != null ? payload.wait : '';
+                                    statusDiv.textContent = `provider busy — retry ${att}/${max}...`;
+                                    announceStatus(`Provider busy. Retry ${att} of ${max}` +
+                                                   (wait !== '' ? ` in ${wait} seconds.` : '.'));
                                 } else if (payload.type === 'heartbeat') {
                                     // Keeps the connection alive during a long finalizing phase - no UI change needed.
                                 } else if (payload.type === 'done') {

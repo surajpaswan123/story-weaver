@@ -55,6 +55,7 @@ import json
 import time
 import threading
 import queue
+import random
 import ipaddress
 import socket
 import tempfile
@@ -461,6 +462,14 @@ _stop_requests_guard = threading.Lock()
 
 class _StopRequested(Exception):
     """Internal control-flow exception to unwind an in-flight stream on stop."""
+
+
+# Pre-built sentinel raised from inside the streaming loops. This was referenced by
+# the mid-stream stop poll but never defined, so pressing Stop raised a NameError
+# that fell through to the generic 'except Exception' handler: the user saw a stream
+# ERROR instead of a clean 'stopped' event, and the dangling prompt cleanup in
+# 'except _StopRequested' never ran.
+_STOP_REQUESTED_EXCEPTION = _StopRequested("Generation stopped by user")
 
 
 def _stop_key(story_id: str, uid: str) -> tuple[str, str]:
@@ -1293,28 +1302,107 @@ def get_dynamic_gemini_story_models():
 
     return sorted(models, key=_sort_key, reverse=True)
 
-# 429 retry config — wait and retry the same model instead of falling back
-MAX_429_RETRIES = 3
-RETRY_429_DELAYS = [2, 4, 8]  # seconds — exponential backoff
+# --- Transient-error retry config ------------------------------------------------------
+# Provider overload (503) and rate limits (429) are TEMPORARY. Retry the SAME model many
+# times rather than walking to a different one: the user picked their model deliberately,
+# and a fallback silently produces worse prose. Only permanently-broken calls (bad key,
+# unknown model, oversized context) skip the retry loop.
+MAX_TRANSIENT_RETRIES = 20
+TRANSIENT_RETRY_DELAYS = [2, 3, 5, 8, 12, 18, 25, 30, 30, 30, 30, 45, 45, 45, 60, 60, 60, 60, 60, 60]
 
-def _retry_on_429(fn, label="API", max_retries=MAX_429_RETRIES, delays=RETRY_429_DELAYS):
-    """Retry a callable on 429 rate-limit errors with exponential backoff.
-    Usage: result = _retry_on_429(lambda: client.chat.completions.create(...), label="INVENTORY")
-    Raises the last exception if all retries fail."""
+# Back-compat aliases: older call sites still reference these names.
+MAX_429_RETRIES = MAX_TRANSIENT_RETRIES
+RETRY_429_DELAYS = TRANSIENT_RETRY_DELAYS
+
+# Retry these: the provider is busy, throttling, or the connection broke mid-flight.
+_TRANSIENT_MARKERS = (
+    "429", "500", "502", "503", "504",
+    "rate limit", "ratelimit", "rate_limit",
+    "quota", "resource exhausted", "resource_exhausted",
+    "too many requests", "overloaded", "over capacity", "high demand",
+    "unavailable", "service unavailable", "temporarily",
+    "internal server error", "internal error", "bad gateway", "gateway timeout",
+    "timeout", "timed out", "deadline exceeded", "deadline_exceeded",
+    "service_unavailable", "server_error", "temporarily_unavailable",
+    "connection reset", "connection aborted", "connection error", "connection refused",
+    "remote end closed", "server disconnected", "broken pipe",
+    "eof occurred", "incomplete read", "read error",
+    "try again", "retry", "please wait", "busy",
+    "model is loading", "currently loading", "warming up",
+)
+
+# Never retry these: retrying cannot change the outcome, so fall through immediately.
+_PERMANENT_MARKERS = (
+    "401", "403", "404",
+    "invalid api key", "api key not valid", "api_key_invalid", "incorrect api key",
+    "unauthorized", "permission denied", "forbidden",
+    "authentication", "expired", "revoked", "suspended",
+    "insufficient_quota", "billing", "payment", "credit",
+    "model not found", "does not exist", "no such model", "unknown model",
+    "unsupported", "not supported", "invalid model",
+    "context length", "context_length", "too long", "maximum context",
+    "content filter", "safety", "blocked", "prohibited",
+    "invalid request", "invalid_request_error", "bad request", "validation",
+)
+
+
+def is_transient_error(e) -> bool:
+    """True when an exception looks worth retrying against the SAME model.
+
+    Permanent markers win: '404 model not found' contains no transient marker, and a
+    message that somehow carries both (e.g. a 403 quota wall) is treated as permanent
+    so we do not burn 20 sleeps on a call that can never succeed.
+    """
+    msg = str(e).lower()
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    if isinstance(status, int):
+        if status in (408, 409, 425, 429, 500, 502, 503, 504, 522, 524):
+            return True
+        if status in (400, 401, 403, 404, 405, 413, 422):
+            return False
+    for marker in _PERMANENT_MARKERS:
+        if marker in msg:
+            return False
+    return any(marker in msg for marker in _TRANSIENT_MARKERS)
+
+
+def _transient_delay(attempt: int) -> float:
+    """Backoff for retry #attempt (1-based), with jitter so parallel workers desync."""
+    base = TRANSIENT_RETRY_DELAYS[min(attempt - 1, len(TRANSIENT_RETRY_DELAYS) - 1)]
+    return base + random.uniform(0, min(base * 0.25, 5.0))
+
+
+def _retry_transient(fn, label="API", max_retries=MAX_TRANSIENT_RETRIES, delays=None,
+                     on_retry=None):
+    """Call fn(), retrying on transient provider errors with capped exponential backoff.
+
+    Retries up to max_retries times (default 20) on 429/503/timeouts/etc. Permanent
+    errors raise immediately. `on_retry(attempt, delay, err)` is invoked before each
+    sleep so long-running paths can emit a heartbeat.
+    """
     last_err = None
     for attempt in range(max_retries + 1):
         try:
-            if attempt > 0:
-                delay = delays[min(attempt - 1, len(delays) - 1)]
-                print(f"  [{label}] 429 retry #{attempt}, waiting {delay}s...")
-                time.sleep(delay)
             return fn()
         except Exception as e:
             last_err = e
-            if "429" in str(e) and attempt < max_retries:
-                continue
-            raise
+            if attempt >= max_retries or not is_transient_error(e):
+                raise
+            delay = _transient_delay(attempt + 1)
+            short = str(e).replace("\n", " ")[:110]
+            print(f"  [{label}] transient error, retry {attempt + 1}/{max_retries} "
+                  f"in {delay:.1f}s: {short}", flush=True)
+            if on_retry:
+                try:
+                    on_retry(attempt + 1, delay, e)
+                except Exception:
+                    pass
+            time.sleep(delay)
     raise last_err
+
+
+# Back-compat alias: _retry_on_429 now retries every transient error, not just 429.
+_retry_on_429 = _retry_transient
 
 
 
@@ -1359,10 +1447,15 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
                         try:
                             print(f"  [{label}] Trying user configured target GenAI/{_t}...")
                             base_m = _t.replace(":search", "")
-                            resp = c.models.generate_content(
-                                model=base_m,
-                                contents=f"{system_prompt}\n\n{user_prompt}",
-                                config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                            # Retry the SAME model on 503/429/timeout instead of
+                            # abandoning the user's configured choice.
+                            resp = _retry_transient(
+                                lambda: c.models.generate_content(
+                                    model=base_m,
+                                    contents=f"{system_prompt}\n\n{user_prompt}",
+                                    config=types.GenerateContentConfig(temperature=temperature, safety_settings=SAFETY_SETTINGS),
+                                ),
+                                label=f"{label}/GenAI/{base_m}",
                             )
                             if resp.text and resp.text.strip():
                                 return resp.text, f"Configured/{_t}"
@@ -1376,7 +1469,10 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
                         kwargs = {"model": _t, "messages": messages}
                         if not _tl.startswith("o"):
                             kwargs["temperature"] = temperature
-                        resp = oa.chat.completions.create(**kwargs)
+                        resp = _retry_transient(
+                            lambda: oa.chat.completions.create(**kwargs),
+                            label=f"{label}/OpenAI/{_t}",
+                        )
                         res = resp.choices[0].message.content or ""
                         if res.strip():
                             return res, f"Configured/{_t}"
@@ -1397,8 +1493,11 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
                 if _pc:
                     try:
                         print(f"  [{label}] Trying user configured target {_ov_prov}/{_t}...")
-                        resp = _pc.chat.completions.create(
-                            model=_t, messages=messages, temperature=temperature
+                        resp = _retry_transient(
+                            lambda: _pc.chat.completions.create(
+                                model=_t, messages=messages, temperature=temperature
+                            ),
+                            label=f"{label}/{_ov_prov}/{_t}",
                         )
                         res = resp.choices[0].message.content or ""
                         if res.strip():
@@ -3871,22 +3970,28 @@ What inventory changes occurred? Return JSON array only."""
     # Use user-specific AI clients when available
     try:
         if user_info:
-            result, model_used = run_user_task_completion(
-                system_prompt=system_prompt,
-                user_prompt=check_prompt,
-                user_info=user_info,
+            result, model_used = _retry_transient(
+                lambda: run_user_task_completion(
+                    system_prompt=system_prompt,
+                    user_prompt=check_prompt,
+                    user_info=user_info,
+                    label="BA/Inventory",
+                    temperature=0.1,
+                ),
                 label="BA/Inventory",
-                temperature=0.1,
             )
         else:
-            result, model_used = _call_with_full_fallback(
-                system_prompt=system_prompt,
-                user_prompt=check_prompt,
-                temperature=0.1,
+            result, model_used = _retry_transient(
+                lambda: _call_with_full_fallback(
+                    system_prompt=system_prompt,
+                    user_prompt=check_prompt,
+                    temperature=0.1,
+                    label="INVENTORY",
+                    nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                    nvidia_use_thinking=False,
+                    nokey_models=NOKEY_TASK_MODELS,
+                ),
                 label="INVENTORY",
-                nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                nvidia_use_thinking=False,
-                nokey_models=NOKEY_TASK_MODELS,
             )
         result = result.strip()
         print(f"  [INVENTORY] Got response from {model_used}")
@@ -4274,22 +4379,28 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
             # Use user-specific AI clients when available
             try:
                 if user_info:
-                    result, model_used = run_user_task_completion(
-                        system_prompt=system_prompt,
-                        user_prompt=check_prompt,
-                        user_info=user_info,
-                        label="BA/Verify",
-                        temperature=0.1,
+                    result, model_used = _retry_transient(
+                        lambda: run_user_task_completion(
+                            system_prompt=system_prompt,
+                            user_prompt=check_prompt,
+                            user_info=user_info,
+                            label="BA/Verify",
+                            temperature=0.1,
+                        ),
+                        label=f"BA/Verify/{filename}",
                     )
                 else:
-                    result, model_used = _call_with_full_fallback(
-                        system_prompt=system_prompt,
-                        user_prompt=check_prompt,
-                        temperature=0.1,
+                    result, model_used = _retry_transient(
+                        lambda: _call_with_full_fallback(
+                            system_prompt=system_prompt,
+                            user_prompt=check_prompt,
+                            temperature=0.1,
+                            label=f"VERIFY/{filename}",
+                            nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                            nvidia_use_thinking=False,
+                            nokey_models=NOKEY_TASK_MODELS,
+                        ),
                         label=f"VERIFY/{filename}",
-                        nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                        nvidia_use_thinking=False,
-                        nokey_models=NOKEY_TASK_MODELS,
                     )
                 result = result.strip()
                 print(f"  [VERIFY] {filename} checked via {model_used}")
@@ -4307,22 +4418,28 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
                             f"Preserve everything that's already accurate - only fix what's actually wrong."
                         )
                         if user_info:
-                            retry_result, retry_model = run_user_task_completion(
-                                system_prompt=system_prompt,
-                                user_prompt=retry_prompt,
-                                user_info=user_info,
-                                label="BA/Verify",
-                                temperature=0.1,
+                            retry_result, retry_model = _retry_transient(
+                                lambda: run_user_task_completion(
+                                    system_prompt=system_prompt,
+                                    user_prompt=retry_prompt,
+                                    user_info=user_info,
+                                    label="BA/Verify",
+                                    temperature=0.1,
+                                ),
+                                label=f"BA/Verify/{filename}/rewrite",
                             )
                         else:
-                            retry_result, retry_model = _call_with_full_fallback(
-                                system_prompt=system_prompt,
-                                user_prompt=retry_prompt,
-                                temperature=0.1,
-                                label=f"VERIFY/{filename}/retry",
-                                nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                                nvidia_use_thinking=False,
-                                nokey_models=NOKEY_TASK_MODELS,
+                            retry_result, retry_model = _retry_transient(
+                                lambda: _call_with_full_fallback(
+                                    system_prompt=system_prompt,
+                                    user_prompt=retry_prompt,
+                                    temperature=0.1,
+                                    label=f"VERIFY/{filename}/retry",
+                                    nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                                    nvidia_use_thinking=False,
+                                    nokey_models=NOKEY_TASK_MODELS,
+                                ),
+                                label=f"VERIFY/{filename}/rewrite",
                             )
                         retry_result = strip_thought_tags(retry_result.strip())
                         retry_result = _strip_markdown_fences(retry_result)
@@ -6040,13 +6157,93 @@ def _build_background_analysis_prompt(story_id: str, uid: str, full_story: str, 
     # Send the FULL story — gemini-nokey uses models with 1M+ context window
     combined_prompt += f"FULL STORY TEXT:\n{full_story}\n\n"
 
-    combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
+    # Full-story catch-up pass: reference the manuscript above instead of repeating it.
+    if new_text and new_text.strip() == (full_story or "").strip():
+        combined_prompt += (
+            "NEW TEXT: treat the ENTIRE story above as the material to extract from. "
+            "This is a full catch-up pass — reference files may have missed earlier "
+            "turns, so check the whole manuscript, not just the ending. Still obey each "
+            "file's append-only or full-snapshot rule, and still skip anything already "
+            "present in PREVIOUS ELEMENTS."
+        )
+    else:
+        combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
 
     return combined_prompt
 
 
-def background_analysis(story_id: str, full_story: str, new_text: str, user_id: str = "default_user", user_info: dict = None, local_output: str = None):
-    """Single background task: extract elements, update summary, and check consistency in ONE API call."""
+# --- Background-analysis progress tracking -------------------------------------------
+# Force-analysis used to be fire-and-forget: the endpoint returned "started" and the
+# caller never learned whether the model 503'd, which files were written, or when it
+# finished. Track per-story stage results so /analyze/{id}/status can report it.
+_analysis_status: dict = {}
+_analysis_status_guard = threading.Lock()
+
+
+def _analysis_key(story_id: str, uid: str) -> tuple:
+    return (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
+
+
+def _analysis_begin(story_id: str, uid: str, mode: str = "auto") -> None:
+    with _analysis_status_guard:
+        _analysis_status[_analysis_key(story_id, uid)] = {
+            "state": "running",
+            "mode": mode,
+            "started_at": time.time(),
+            "finished_at": None,
+            "stages": [],
+            "files_written": [],
+            "errors": [],
+            "model": None,
+        }
+
+
+def _analysis_note(story_id: str, uid: str, kind: str, message: str) -> None:
+    """Record one stage outcome. kind: 'ok' | 'skip' | 'error' | 'model' | 'file'."""
+    with _analysis_status_guard:
+        rec = _analysis_status.get(_analysis_key(story_id, uid))
+        if not rec:
+            return
+        if kind == "model":
+            rec["model"] = message
+        elif kind == "file":
+            if message not in rec["files_written"]:
+                rec["files_written"].append(message)
+        elif kind == "error":
+            rec["errors"].append(message)
+            rec["stages"].append({"kind": "error", "message": message})
+        else:
+            rec["stages"].append({"kind": kind, "message": message})
+
+
+def _analysis_finish(story_id: str, uid: str) -> None:
+    with _analysis_status_guard:
+        rec = _analysis_status.get(_analysis_key(story_id, uid))
+        if not rec:
+            return
+        rec["finished_at"] = time.time()
+        if rec["errors"] and not rec["files_written"]:
+            rec["state"] = "failed"
+        elif rec["errors"]:
+            rec["state"] = "partial"
+        else:
+            rec["state"] = "done"
+
+
+def get_analysis_status(story_id: str, uid: str) -> dict:
+    with _analysis_status_guard:
+        rec = _analysis_status.get(_analysis_key(story_id, uid))
+        return dict(rec) if rec else {"state": "idle"}
+
+
+def background_analysis(story_id: str, full_story: str, new_text: str, user_id: str = "default_user", user_info: dict = None, local_output: str = None, analysis_mode: str = "auto"):
+    """Single background task: extract elements, update summary, and check consistency in ONE API call.
+
+    Every stage is isolated: a provider 503 in one stage must not silently skip the
+    stages after it. Each stage records its outcome so /analyze/{id}/status can tell
+    the user exactly which files were updated and which failed.
+    """
+    _analysis_begin(story_id, user_id, mode=analysis_mode)
     try:
         story_dir = get_story_dir(story_id, uid=user_id)
         custom_categories = _discover_custom_categories(story_id, user_id)
@@ -6054,15 +6251,24 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         # Run Auto-Spawner to see if the AI wants to invent a new category file based on the text.
         # Skipped when a local (browser-direct) analysis result is supplied - the browser
         # already ran the analysis against the live files.
+        # Isolated: inventing new categories is a nice-to-have. If this model call fails,
+        # the real analysis below must still run against the categories we already have.
         if local_output is None:
-            newly_spawned = auto_spawn_categories(
-                story_dir,
-                new_text,
-                set(custom_categories),
-                nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                user_info=user_info,
-            )
-            custom_categories.extend(newly_spawned)
+            try:
+                newly_spawned = auto_spawn_categories(
+                    story_dir,
+                    new_text,
+                    set(custom_categories),
+                    nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                    user_info=user_info,
+                )
+                custom_categories.extend(newly_spawned)
+                if newly_spawned:
+                    _analysis_note(story_id, user_id, "ok",
+                                   f"Auto-spawned new categories: {', '.join(newly_spawned)}")
+            except Exception as spawn_err:
+                print(f"  [BA/Auto-Spawn] Failed (non-critical): {spawn_err}")
+                _analysis_note(story_id, user_id, "error", f"Auto-spawn failed: {spawn_err}")
 
         summary_path = get_summary_path(story_id, uid=user_id)
         rules_path = get_rules_path(story_id, uid=user_id)
@@ -6251,7 +6457,19 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         # Send the FULL story — gemini-nokey uses models with 1M+ context window
         combined_prompt += f"FULL STORY TEXT:\n{full_story}\n\n"
 
-        combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
+        # A forced full-story analysis passes new_text == full_story. Sending the
+        # manuscript twice would double the prompt for zero extra information, so
+        # reference it instead.
+        if new_text and new_text.strip() == (full_story or "").strip():
+            combined_prompt += (
+                "NEW TEXT: treat the ENTIRE story above as the material to extract from. "
+                "This is a full catch-up pass — reference files may have missed earlier "
+                "turns, so check the whole manuscript, not just the ending. Still obey each "
+                "file's append-only or full-snapshot rule, and still skip anything already "
+                "present in PREVIOUS ELEMENTS."
+            )
+        else:
+            combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
 
         # Use user-specific AI clients when user_info is available. With a local
         # (browser-direct) result the model was already called in the browser.
@@ -6259,21 +6477,36 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
             text, model_used = local_output, "local"
         elif user_info:
             bg_system = "You are an expert story continuity manager."
-            text, model_used = run_user_task_completion(
-                system_prompt=bg_system,
-                user_prompt=combined_prompt,
-                user_info=user_info,
+            # Retry the whole task-completion call on transient provider failures.
+            # run_user_task_completion already retries the configured model internally;
+            # this outer loop covers a provider that is down long enough to exhaust the
+            # inner attempts, and connection errors raised outside the model call.
+            text, model_used = _retry_transient(
+                lambda: run_user_task_completion(
+                    system_prompt=bg_system,
+                    user_prompt=combined_prompt,
+                    user_info=user_info,
+                    label="BA/Analysis",
+                    temperature=0.7,
+                ),
                 label="BA/Analysis",
-                temperature=0.7,
+                on_retry=lambda a, d, e: _analysis_note(
+                    story_id, user_id, "skip",
+                    f"Analysis model busy, retry {a}/{MAX_TRANSIENT_RETRIES} in {d:.0f}s"
+                ),
             )
         else:
-            text, model_used = generate_with_fallback(
-                combined_prompt,
-                nvidia_models=NVIDIA_BACKGROUND_MODELS,
-                nvidia_use_thinking=False,
-                nokey_models=NOKEY_BACKGROUND_MODELS,
+            text, model_used = _retry_transient(
+                lambda: generate_with_fallback(
+                    combined_prompt,
+                    nvidia_models=NVIDIA_BACKGROUND_MODELS,
+                    nvidia_use_thinking=False,
+                    nokey_models=NOKEY_BACKGROUND_MODELS,
+                ),
+                label="BA/Analysis",
             )
         print(f"Background analysis done with {model_used}")
+        _analysis_note(story_id, user_id, "model", str(model_used))
 
         # Strip model thinking/reasoning before parsing into sections
         text = strip_thought_tags(text)
@@ -6357,8 +6590,12 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                     if len(new_content) > 20:  # Sanity check: don't overwrite with tiny output
                         _atomic_write_text(path, clean_text(f"## {cat.title()}\n\n{new_content}"))
                         print(f"  Rewrote {cat}.md (structured, {len(new_content)} chars)")
+                        _analysis_note(story_id, user_id, "file", f"{cat}.md")
+                        _analysis_note(story_id, user_id, "ok", f"Rewrote {cat}.md")
                     else:
                         print(f"  Skipped {cat}.md rewrite (AI output too small: {len(new_content)} chars)")
+                        _analysis_note(story_id, user_id, "skip",
+                                       f"Skipped {cat}.md (model returned only {len(new_content)} chars)")
                     continue
 
                 # --- APPEND categories (everything else) ---
@@ -6392,6 +6629,9 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                         canonical_characters = compact_character_content(merged_text)
                         _atomic_write_text(path, clean_text(canonical_characters or "## Characters"))
                         print(f"  Rebuilt characters.md with {len(new_lines)} new cast-sheet entries")
+                        _analysis_note(story_id, user_id, "file", "characters.md")
+                        _analysis_note(story_id, user_id, "ok",
+                                       f"Added {len(new_lines)} cast entries to characters.md")
                     else:
                         updated = existing
                         if not updated.strip():  # File empty or new
@@ -6399,8 +6639,12 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                         updated += "".join(f"\n{line}" for line in new_lines)
                         _atomic_write_text(path, clean_text(updated))
                         print(f"  Appended {len(new_lines)} new entries to {cat}.md")
+                        _analysis_note(story_id, user_id, "file", f"{cat}.md")
+                        _analysis_note(story_id, user_id, "ok",
+                                       f"Appended {len(new_lines)} entries to {cat}.md")
                 else:
                     print(f"  No new entries for {cat}.md")
+                    _analysis_note(story_id, user_id, "skip", f"No new entries for {cat}.md")
 
         # Save summary (APPEND new paragraphs, never overwrite)
         if "summary" in sections:
@@ -6426,8 +6670,12 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                     updated_summary += "".join(f"\n\n{line}" for line in new_lines)
                     _atomic_write_text(summary_path, clean_text(updated_summary))
                     print(f"  Appended {len(new_lines)} new paragraphs to summary.md")
+                    _analysis_note(story_id, user_id, "file", "summary.md")
+                    _analysis_note(story_id, user_id, "ok",
+                                   f"Appended {len(new_lines)} paragraphs to summary.md")
                 else:
                     print(f"  No new summary content to append")
+                    _analysis_note(story_id, user_id, "skip", "No new summary content")
 
         # Append consistency check
         if "consistency" in sections:
@@ -6440,6 +6688,8 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                     existing_consistency = handle.read()
             _atomic_write_text(consistency_path, existing_consistency + clean_text(entry))
             print(f"  Updated consistency.md")
+            _analysis_note(story_id, user_id, "file", "consistency.md")
+            _analysis_note(story_id, user_id, "ok", "Updated consistency.md")
 
         # === Model 4: Inventory Tracker — update item status/quantities ===
         # (Skipped for local browser-direct analysis - these extra passes need
@@ -6447,44 +6697,150 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         if local_output is None:
             try:
                 update_inventory(story_id, new_text, user_id=user_id, user_info=user_info)
+                _analysis_note(story_id, user_id, "ok", "Inventory pass complete")
             except Exception as inv_err:
                 print(f"  [INVENTORY] Error (non-critical): {inv_err}")
+                _analysis_note(story_id, user_id, "error", f"Inventory pass failed: {inv_err}")
 
             # === Phase 2: Verification Layer — cross-check all reference files ===
             try:
                 verify_reference_files(story_id, user_id=user_id, user_info=user_info)
+                _analysis_note(story_id, user_id, "ok", "Verification pass complete")
             except Exception as verify_err:
                 print(f"  [VERIFY] Error (non-critical): {verify_err}")
+                _analysis_note(story_id, user_id, "error", f"Verification pass failed: {verify_err}")
+
+        # Push every file this run touched to Firestore/Postgres. Without this, a
+        # forced analysis wrote to local disk only — and on Render's ephemeral disk
+        # those updates vanished on the next restart, which is why files looked
+        # "not attended to" even when the model had succeeded.
+        try:
+            sync_story_directory_to_firestore(user_id, story_id)
+        except Exception as sync_err:
+            print(f"  [BA/Sync] Failed to sync analysis results: {sync_err}")
+            _analysis_note(story_id, user_id, "error", f"Cloud sync failed: {sync_err}")
 
     except Exception as e:
         print(f"Background analysis failed (non-critical): {e}")
+        _analysis_note(story_id, user_id, "error", f"Analysis failed: {e}")
+    finally:
+        _analysis_finish(story_id, user_id)
 
 @app.post("/analyze/{story_id}")
-async def trigger_analysis(story_id: str, user_info: dict = Depends(require_authenticated_user)):
-    """Manually trigger background analysis for a story."""
+async def trigger_analysis(
+    story_id: str,
+    turns: int = 0,
+    user_info: dict = Depends(require_authenticated_user),
+):
+    """Manually trigger background analysis for a story.
+
+    `turns` selects how much recent story text is treated as NEW TEXT:
+      0 (default) -> the whole story. Use this to repair files that fell behind.
+      N > 0        -> the last N AI turns, matching what an automatic run does.
+
+    This previously passed an EMPTY new_text, which made a forced run do strictly
+    less work than an automatic one: update_inventory() returns immediately when
+    new_text is blank, and the prompt's "NEW TEXT" section was empty so the model
+    had nothing to extract from. Files that had fallen behind therefore stayed behind.
+    """
     user_id = user_info["uid"]
     if story_turn_is_active(story_id, user_id):
         raise HTTPException(status_code=409, detail="Wait for the current generation to finish before analyzing")
+
+    existing = get_analysis_status(story_id, user_id)
+    if existing.get("state") == "running":
+        raise HTTPException(status_code=409, detail="An analysis is already running for this story")
+
     try:
+        # Pull the newest cloud copy first: on a fresh instance (or after Render
+        # wiped its ephemeral disk) the local files are stale or missing entirely,
+        # and analysing them would overwrite good cloud data with nothing.
+        restore_story_directory_from_firestore(user_id, story_id)
+
         story_path = get_story_path(story_id, uid=user_id, create=False)
         if not os.path.exists(story_path):
             raise HTTPException(status_code=404, detail="Story not found")
-        
+
         with open(story_path, "r", encoding="utf-8") as f:
             full_story = f.read()
 
-        # Run in background
+        if not full_story.strip():
+            raise HTTPException(status_code=400, detail="Story is empty, nothing to analyze")
+
+        # Give the model real NEW TEXT to work from.
+        if turns and turns > 0:
+            new_text = get_recent_story_text(story_id, turns, uid=user_id) or full_story
+            scope = f"last {turns} turn(s)"
+        else:
+            new_text = full_story
+            scope = "whole story"
+
+        total_turns = get_turn_count(story_id, uid=user_id)
+
         def run_analysis():
             with get_story_lock(story_id, user_id):
-                background_analysis(story_id, full_story, "", user_id, user_info)
+                background_analysis(story_id, full_story, new_text, user_id, user_info,
+                                    analysis_mode="manual")
 
         thread = threading.Thread(target=run_analysis, daemon=True)
         thread.start()
-        return {"status": "analysis_started", "message": "Background analysis triggered."}
+        return {
+            "status": "analysis_started",
+            "message": f"Analyzing {scope}. Reference files will update as each stage finishes.",
+            "scope": scope,
+            "turns_in_story": total_turns,
+            "characters_analyzed": len(new_text),
+        }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analyze/{story_id}/status")
+async def analysis_status(story_id: str, user_info: dict = Depends(require_authenticated_user)):
+    """Report what the last/current analysis run actually did.
+
+    Force analysis used to be fire-and-forget: the UI said "started" and nothing
+    else, so a provider 503 looked identical to a successful run that found no
+    changes. This reports per-stage outcomes, the files written, and any errors.
+    """
+    user_id = user_info["uid"]
+    status = get_analysis_status(story_id, user_id)
+
+    state = status.get("state", "idle")
+    files = status.get("files_written", [])
+    errors = status.get("errors", [])
+
+    if state == "idle":
+        summary = "No analysis has run for this story yet."
+    elif state == "running":
+        stages = status.get("stages", [])
+        last = stages[-1]["message"] if stages else "starting"
+        summary = f"Analysis running. Latest: {last}"
+    elif state == "done":
+        summary = (f"Analysis complete. Updated {len(files)} file(s): {', '.join(files)}."
+                   if files else "Analysis complete. No files needed changes.")
+    elif state == "partial":
+        summary = (f"Analysis finished with {len(errors)} problem(s). "
+                   f"Updated {len(files)} file(s): {', '.join(files) or 'none'}.")
+    else:
+        summary = f"Analysis failed. {errors[0] if errors else 'Unknown error.'}"
+
+    elapsed = None
+    if status.get("started_at"):
+        end = status.get("finished_at") or time.time()
+        elapsed = round(end - status["started_at"], 1)
+
+    return {
+        "state": state,
+        "summary": summary,
+        "model": status.get("model"),
+        "files_written": files,
+        "errors": errors,
+        "stages": status.get("stages", []),
+        "elapsed_seconds": elapsed,
+    }
 
 @app.post("/story/{story_id}/delete-dangling")
 async def delete_dangling_prompts(story_id: str, user_info: dict = Depends(require_authenticated_user)):
@@ -6965,7 +7321,21 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             
             # Stream Model 3 (Story Generator) ??? NO audio bytes, just text
             try:
-                stream, model_name, is_thinking = stream_with_fallback(pipeline_system, pipeline_user, user_info=user_info)
+                # Retry the SAME model on provider overload / rate limits.
+                _a_attempt = 0
+                while True:
+                    try:
+                        stream, model_name, is_thinking = stream_with_fallback(pipeline_system, pipeline_user, user_info=user_info)
+                        break
+                    except Exception as _a_err:
+                        if _a_attempt >= MAX_TRANSIENT_RETRIES or not is_transient_error(_a_err):
+                            raise
+                        _a_attempt += 1
+                        _a_wait = _transient_delay(_a_attempt)
+                        print(f"[Retry] Audio-pipeline stream open failed ({_a_err}); "
+                              f"retry {_a_attempt}/{MAX_TRANSIENT_RETRIES} in {_a_wait:.1f}s", flush=True)
+                        yield f"data: {json.dumps({'type': 'retrying', 'attempt': _a_attempt, 'max': MAX_TRANSIENT_RETRIES, 'wait': round(_a_wait), 'message': _friendly_api_error(_a_err)})}\n\n"
+                        time.sleep(_a_wait)
                 model_used_ref = model_name
                 stream_model_name = model_name
                 stream_is_thinking = is_thinking
@@ -7887,14 +8257,44 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         response_persisted = False
         chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
         try:
-            stream, model_used, is_thinking = stream_with_fallback(
-                system_msg,
-                user_msg,
-                nvidia_models=NVIDIA_STORY_STREAM_MODELS,
-                selected_provider=input_data.provider,
-                selected_model=input_data.model,
-                user_info=user_info
-            )
+            # Opening the stream is the failure point for provider overload (503) and
+            # rate limits (429). Retry the SAME provider/model up to
+            # MAX_TRANSIENT_RETRIES times instead of failing the turn - the user picked
+            # this model deliberately. Heartbeats keep the SSE connection alive during
+            # the waits, and Stop stays responsive because we sleep in short slices.
+            _open_attempt = 0
+            while True:
+                try:
+                    stream, model_used, is_thinking = stream_with_fallback(
+                        system_msg,
+                        user_msg,
+                        nvidia_models=NVIDIA_STORY_STREAM_MODELS,
+                        selected_provider=input_data.provider,
+                        selected_model=input_data.model,
+                        user_info=user_info
+                    )
+                    break
+                except _StopRequested:
+                    raise
+                except Exception as _open_err:
+                    if (_open_attempt >= MAX_TRANSIENT_RETRIES
+                            or not is_transient_error(_open_err)):
+                        raise
+                    _open_attempt += 1
+                    _wait = _transient_delay(_open_attempt)
+                    print(f"[Retry] Story stream open failed ({_open_err}); "
+                          f"retry {_open_attempt}/{MAX_TRANSIENT_RETRIES} in {_wait:.1f}s",
+                          flush=True)
+                    yield f"data: {json.dumps({'type': 'retrying', 'attempt': _open_attempt, 'max': MAX_TRANSIENT_RETRIES, 'wait': round(_wait), 'message': _friendly_api_error(_open_err)})}\n\n"
+                    _waited = 0.0
+                    while _waited < _wait:
+                        if stop_requested(input_data.story_id, user_id):
+                            print("[Stop] Stop requested while waiting to retry; aborting turn.")
+                            raise _STOP_REQUESTED_EXCEPTION
+                        time.sleep(0.5)
+                        _waited += 0.5
+                        if _waited % 10 < 0.5:
+                            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
             print(f"DEBUG: Stream started, model: {model_used}, thinking: {is_thinking}")
             model_used_ref = model_used
             
