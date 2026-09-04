@@ -1949,6 +1949,77 @@ ELEMENT_CATEGORIES = ["characters", "positions", "villains", "locations", "incid
 # Keep this empty by default so reference files preserve earlier entries and only append new facts/events.
 FULL_REWRITE_CATEGORIES = {"positions", "villains"}  # both are current-state snapshots, never append-only
 
+
+# Instruction text the continuity model sometimes echoes back verbatim out of its
+# own prompt. Without this filter those lines get APPENDED into the reference
+# files as if they were story facts, and are then fed back as canon next turn.
+# (This actually happened: time.md and incidents.md ended up containing
+# "Return the COMPLETE updated timeline", "PREVIOUS ELEMENTS", the Rules: block...)
+_PROMPT_ECHO_SUBSTRINGS = (
+    "previous elements",
+    "new text",
+    "return the complete",
+    "return only new",
+    "you must use this exact structure",
+    "no new updates",
+    "no new events",
+    "this file is a",
+    "do not duplicate entries",
+    "do not add duplicate",
+    "copy all existing",
+    "then add new entries",
+    "count days carefully",
+    "multi-day spans",
+    "if no new",
+    "if nothing new",
+    "one line per character, always",
+    "cross-reference the",
+    "each entry should describe",
+    "do not log actions",
+    "belongs in incidents.md",
+    "worldbuilding reference file",
+    "current-state roster",
+    "current-state snapshot",
+    "plot event log",
+    "status must be one of",
+    "special rule for characters",
+    "format your output exactly",
+)
+
+# NOTE: deliberately does NOT list the files' own "## Category" headers. Those are
+# legitimate content written by this module; the append path already skips a repeated
+# header via its `line_stripped not in existing` dedup check.
+_PROMPT_ECHO_EXACT = (
+    "rules:",
+    "format:",
+)
+
+
+def _is_prompt_echo(line: str) -> bool:
+    """True when a line is instruction text from our own prompt, not story content.
+
+    Applied to every candidate line before it is appended to a reference file.
+    Deliberately conservative: it only matches phrasing that appears in the
+    continuity prompt and would never appear in a real story fact.
+    """
+    s = (line or "").strip()
+    if not s:
+        return True
+    low = s.lower().rstrip(":").strip()
+    if low in _PROMPT_ECHO_EXACT or (low + ":") in _PROMPT_ECHO_EXACT:
+        return True
+    low_full = s.lower()
+    for marker in _PROMPT_ECHO_SUBSTRINGS:
+        if marker in low_full:
+            return True
+    # Instruction lines that open with a directive label ("Format: '- Villain Name ...'")
+    if low_full.startswith(("format:", "rules:", "line formats", "append-only")):
+        return True
+    # A bullet that is pure meta-instruction ("- Do NOT ...", "- CRITICAL - ...")
+    if re.match(r'^[-*]\s*(do not|don\'t|never|always include|critical\b|skip\b|add new|include important|keep entries|write one bullet|prefer plural|only propose)', low_full):
+        return True
+    return False
+
 def parse_current_time_state(story_id: str, uid: str = "default_user") -> str:
     """Parse time.md to extract the current day/time position for injection into the story generator.
     Returns a string like 'Current story position: Day 15, Afternoon' or empty if no time.md."""
@@ -5636,19 +5707,22 @@ def _build_background_analysis_prompt(story_id: str, uid: str, full_story: str, 
         if cat.lower() == "time":
             combined_prompt += (
                 f"## {cat.title()}\n"
-                "Return the COMPLETE updated timeline, not just new entries.\n"
-                "You MUST use this exact structure:\n"
-                "### Day X\n"
-                "- Time: [Morning/Midday/Afternoon/Evening/Night/Late night]\n"
-                "- Event: [What happens, written in present tense, one sentence]\n\n"
+                "APPEND-ONLY. Output ONLY the new timeline lines for events in the NEW TEXT. "
+                "Never reprint existing entries - they are already saved and your output is "
+                "appended directly beneath them.\n"
+                "Line formats (use these exactly):\n"
+                "### Day X            <- ONLY when the NEW TEXT begins a day that has no header yet\n"
+                "- Time: Morning|Midday|Afternoon|Evening|Night|Late night\n"
+                "- Event: What happens, present tense, one sentence\n\n"
                 "Rules:\n"
-                "- Copy all existing Day entries from PREVIOUS ELEMENTS exactly as they are.\n"
-                "- Then ADD new entries from the NEW TEXT at the correct chronological position.\n"
-                "- If the new text continues the same day, add new Time/Event lines under the existing Day header.\n"
-                "- If the new text starts a new day (sleeping, waking up next morning), create a new ### Day header.\n"
-                "- Count days carefully. If the latest day in PREVIOUS ELEMENTS is Day 15, the next morning is Day 16.\n"
-                "- Multi-day spans like 'over four days' should be written as ### Days X-Y.\n"
-                "- If no new timeline events occur, return the previous timeline unchanged.\n\n"
+                "- Emit a new '### Day X' header ONLY if the story moved into a day later than the "
+                "last day already recorded. Continuing the same day means NO new header.\n"
+                "- Day numbers increment on sleep-then-wake. If the last recorded day is Day 15, "
+                "the next morning is Day 16.\n"
+                "- Emit a '- Time:' line only when the time of day actually changes.\n"
+                "- Multi-day spans are written '### Days X-Y'.\n"
+                "- Output nothing at all if the NEW TEXT contains no timeline movement.\n"
+                "- Never output prose, headings, commentary, or any of these instructions.\n\n"
             )
         elif cat.lower() == "villains":
             combined_prompt += (
@@ -5694,12 +5768,11 @@ def _build_background_analysis_prompt(story_id: str, uid: str, full_story: str, 
         elif cat.lower() == "items":
             combined_prompt += (
                 f"## {cat.title()}\n"
-                "Return the COMPLETE updated items list, not just new entries.\n"
-                "You MUST organize items under category headings using ### headers.\n"
+                "APPEND-ONLY. Output ONLY new items introduced in the NEW TEXT. Never reprint "
+                "existing items - they are already saved and your output is appended beneath them.\n"
+                "Organize items under '### ' category headings.\n"
                 "Rules:\n"
-                "- Copy all existing category headings and items from PREVIOUS ELEMENTS exactly, "
-                "EXCEPT update the '(Last: ...)' location/holder tag if the NEW TEXT shows the item moved.\n"
-                "- Add new items from the NEW TEXT under the most appropriate existing category heading.\n"
+                "- Emit a '### Category' heading only if no suitable heading exists yet.\n"
                 "- If no existing category fits, create a new ### heading for the new group.\n"
                 "- Each item should be one line: '- Item name: Brief description of what it is or its significance. (Last: where it currently is / who currently holds it)'\n"
                 "- CRITICAL - always include the '(Last: ...)' tag, even for items whose location didn't change this turn. "
@@ -5845,19 +5918,22 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
             if cat.lower() == "time":
                 combined_prompt += (
                     f"## {cat.title()}\n"
-                    "Return the COMPLETE updated timeline, not just new entries.\n"
-                    "You MUST use this exact structure:\n"
-                    "### Day X\n"
-                    "- Time: [Morning/Midday/Afternoon/Evening/Night/Late night]\n"
-                    "- Event: [What happens, written in present tense, one sentence]\n\n"
+                    "APPEND-ONLY. Output ONLY the new timeline lines for events in the NEW TEXT. "
+                    "Never reprint existing entries - they are already saved and your output is "
+                    "appended directly beneath them.\n"
+                    "Line formats (use these exactly):\n"
+                    "### Day X            <- ONLY when the NEW TEXT begins a day that has no header yet\n"
+                    "- Time: Morning|Midday|Afternoon|Evening|Night|Late night\n"
+                    "- Event: What happens, present tense, one sentence\n\n"
                     "Rules:\n"
-                    "- Copy all existing Day entries from PREVIOUS ELEMENTS exactly as they are.\n"
-                    "- Then ADD new entries from the NEW TEXT at the correct chronological position.\n"
-                    "- If the new text continues the same day, add new Time/Event lines under the existing Day header.\n"
-                    "- If the new text starts a new day (sleeping, waking up next morning), create a new ### Day header.\n"
-                    "- Count days carefully. If the latest day in PREVIOUS ELEMENTS is Day 15, the next morning is Day 16.\n"
-                    "- Multi-day spans like 'over four days' should be written as ### Days X-Y.\n"
-                    "- If no new timeline events occur, return the previous timeline unchanged.\n\n"
+                    "- Emit a new '### Day X' header ONLY if the story moved into a day later than the "
+                    "last day already recorded. Continuing the same day means NO new header.\n"
+                    "- Day numbers increment on sleep-then-wake. If the last recorded day is Day 15, "
+                    "the next morning is Day 16.\n"
+                    "- Emit a '- Time:' line only when the time of day actually changes.\n"
+                    "- Multi-day spans are written '### Days X-Y'.\n"
+                    "- Output nothing at all if the NEW TEXT contains no timeline movement.\n"
+                    "- Never output prose, headings, commentary, or any of these instructions.\n\n"
                 )
             elif cat.lower() == "villains":
                 combined_prompt += (
@@ -5903,12 +5979,11 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
             elif cat.lower() == "items":
                 combined_prompt += (
                     f"## {cat.title()}\n"
-                    "Return the COMPLETE updated items list, not just new entries.\n"
-                    "You MUST organize items under category headings using ### headers.\n"
+                    "APPEND-ONLY. Output ONLY new items introduced in the NEW TEXT. Never reprint "
+                    "existing items - they are already saved and your output is appended beneath them.\n"
+                    "Organize items under '### ' category headings.\n"
                     "Rules:\n"
-                    "- Copy all existing category headings and items from PREVIOUS ELEMENTS exactly, "
-                    "EXCEPT update the '(Last: ...)' location/holder tag if the NEW TEXT shows the item moved.\n"
-                    "- Add new items from the NEW TEXT under the most appropriate existing category heading.\n"
+                    "- Emit a '### Category' heading only if no suitable heading exists yet.\n"
                     "- If no existing category fits, create a new ### heading for the new group.\n"
                     "- Each item should be one line: '- Item name: Brief description of what it is or its significance. (Last: where it currently is / who currently holds it)'\n"
                     "- CRITICAL - always include the '(Last: ...)' tag, even for items whose location didn't change this turn. "
@@ -6082,6 +6157,11 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                 # These return the complete restructured file from the AI.
                 # Leave FULL_REWRITE_CATEGORIES empty for normal append-only reference updates.
                 if cat.lower() in FULL_REWRITE_CATEGORIES:
+                    # Drop any instruction lines the model echoed back before writing.
+                    new_content = "\n".join(
+                        ln for ln in new_content.split("\n")
+                        if not _is_prompt_echo(ln)
+                    ).strip()
                     # Only overwrite if the AI actually returned substantial content
                     if len(new_content) > 20:  # Sanity check: don't overwrite with tiny output
                         _atomic_write_text(path, clean_text(f"## {cat.title()}\n\n{new_content}"))
@@ -6106,9 +6186,11 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                             continue
                         line_stripped = normalized_line
                         existing_character_names.add(key)
-                    # Skip empty lines, duplicates, and leaked task separator headers
+                    # Skip empty lines, duplicates, and any instruction text the
+                    # model echoed back out of its own prompt (see _is_prompt_echo).
                     if (line_stripped and line_stripped not in existing
-                            and not line_stripped.startswith("=====")):
+                            and not line_stripped.startswith("=====")
+                            and not _is_prompt_echo(line_stripped)):
                         new_lines.append(line_stripped)
                 if new_lines:
                     if cat.lower() == "characters":
@@ -6141,10 +6223,12 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
                 new_lines = []
                 for line in new_summary.split("\n"):
                     line_stripped = line.strip()
-                    # Skip empty lines, duplicates, summary headers, and leaked task separators
+                    # Skip empty lines, duplicates, summary headers, leaked task
+                    # separators, and echoed prompt instructions.
                     if (line_stripped and line_stripped not in existing
                             and not line_stripped.startswith("## Summary")
-                            and not line_stripped.startswith("=====")):
+                            and not line_stripped.startswith("=====")
+                            and not _is_prompt_echo(line_stripped)):
                         new_lines.append(line_stripped)
                 if new_lines:
                     updated_summary = existing if existing.strip() else "## Summary\n"
