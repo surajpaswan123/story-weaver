@@ -3156,6 +3156,197 @@ async def get_consistency(story_id: str, user_id: str = Depends(get_current_user
     with open(path, "r", encoding="utf-8") as f:
         return {"text": f.read()}
 
+# --- Raw Story File Browser / Editor -------------------------------------------------
+# Lets the user list, read, and hand-edit every .md file in a story folder. These are
+# the same files the AI reads as context every turn (see STORY_FILES_MANIFEST), so a
+# manual fix here changes what the story model believes on the very next generation.
+
+# Human-readable labels + ownership for the file panel. "user" files are authored by
+# the user and never touched by the pipeline; "ai" files are maintained by the
+# continuity pass after every turn (a manual edit survives until that pass next
+# appends to the file).
+STORY_FILE_INFO = {
+    "story.md":       ("Manuscript", "The complete story text, in order.", "ai"),
+    "rules.md":       ("World Rules", "Hard law for this world. Outranks everything.", "user"),
+    "style.md":       ("Style Guide", "Voice, tense, person, pacing.", "user"),
+    "characters.md":  ("Characters", "Cast sheet: name + stable physical description.", "ai"),
+    "positions.md":   ("Current Positions", "Where everyone is RIGHT NOW. Live snapshot.", "ai"),
+    "locations.md":   ("Locations", "Established places and their details.", "ai"),
+    "items.md":       ("Items", "Possession ledger with (Last: ...) holder tags.", "ai"),
+    "villains.md":    ("Villains", "Antagonist roster with status tags.", "ai"),
+    "incidents.md":   ("Key Incidents", "Plot event log, each tagged (Day X).", "ai"),
+    "time.md":        ("Story Timeline", "Day numbers, times of day, event order.", "ai"),
+    "consistency.md": ("Consistency Notes", "Contradictions flagged by the checker.", "ai"),
+    "summary.md":     ("Story Summary", "Condensed account of the whole story.", "ai"),
+    "audio_log.md":   ("Audio Log", "Songs the user has shared and their mood.", "ai"),
+}
+
+# A .md filename with no path component. Blocks traversal ('../x.md'), absolute
+# paths, alternate data streams, and Windows reserved device names.
+_STORY_FILENAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]{0,60}\.md$')
+
+
+def _resolve_story_file(story_id: str, filename: str, uid: str, create_dir: bool = False) -> str:
+    """Validate a user-supplied .md filename and resolve it inside the story folder.
+
+    Two independent checks: the name must match _STORY_FILENAME_RE (so it cannot
+    contain a separator at all), and the realpath must still sit under the story
+    directory (catches symlinks and any regex gap).
+    """
+    name = (filename or "").strip()
+    if not _STORY_FILENAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Filename must be a simple .md name, e.g. characters.md")
+    if name.rsplit(".", 1)[0].casefold() in WINDOWS_RESERVED_NAMES:
+        raise HTTPException(status_code=400, detail="That filename is reserved by the operating system")
+
+    story_dir = get_story_dir(story_id, uid=uid, create=create_dir)
+    target = os.path.join(story_dir, name)
+    try:
+        real_dir = os.path.realpath(story_dir)
+        real_target = os.path.realpath(target)
+        if os.path.commonpath([real_dir, real_target]) != real_dir:
+            raise ValueError("escaped story directory")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    return target
+
+
+def _story_file_meta(name: str) -> dict:
+    label, description, owner = STORY_FILE_INFO.get(
+        name,
+        (name.replace(".md", "").replace("_", " ").title(), "Auto-created category file.", "ai"),
+    )
+    return {"label": label, "description": description, "owner": owner}
+
+
+@app.get("/story/{story_id}/files")
+async def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id)):
+    """List every .md file in this story's folder, with size and line count."""
+    restore_story_directory_from_firestore(user_id, story_id)
+    story_dir = get_story_dir(story_id, uid=user_id, create=False)
+    files = []
+    if os.path.isdir(story_dir):
+        for name in os.listdir(story_dir):
+            if not name.endswith(".md"):
+                continue
+            full = os.path.join(story_dir, name)
+            if not os.path.isfile(full):
+                continue
+            try:
+                with open(full, "r", encoding="utf-8") as handle:
+                    content = handle.read()
+            except OSError as e:
+                print(f"[Files] Could not read {name}: {e}")
+                continue
+            meta = _story_file_meta(name)
+            files.append({
+                "name": name,
+                "label": meta["label"],
+                "description": meta["description"],
+                "owner": meta["owner"],
+                "chars": len(content),
+                "lines": len(content.splitlines()),
+                "empty": not content.strip(),
+            })
+
+    # Stable, meaningful order: the documented pipeline order first, extras alphabetical.
+    preferred = list(STORY_FILE_INFO.keys())
+    files.sort(key=lambda f: (preferred.index(f["name"]) if f["name"] in preferred else len(preferred), f["name"]))
+    return {"files": files, "count": len(files)}
+
+
+@app.get("/story/{story_id}/file/{filename}")
+async def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_current_user_id)):
+    """Read one .md file from the story folder verbatim."""
+    restore_story_directory_from_firestore(user_id, story_id)
+    target = _resolve_story_file(story_id, filename, user_id)
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail=f"{filename} does not exist in this story")
+    with open(target, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    meta = _story_file_meta(os.path.basename(target))
+    return {
+        "name": os.path.basename(target),
+        "label": meta["label"],
+        "description": meta["description"],
+        "owner": meta["owner"],
+        "text": content,
+        "chars": len(content),
+        "lines": len(content.splitlines()),
+    }
+
+
+class StoryFileInput(BaseModel):
+    text: str = Field(max_length=2_000_000)
+
+
+@app.put("/story/{story_id}/file/{filename}")
+async def write_story_file(
+    story_id: str,
+    filename: str,
+    input_data: StoryFileInput,
+    user_info: dict = Depends(require_authenticated_user),
+):
+    """Overwrite one .md file in the story folder with user-supplied text.
+
+    Refuses while a generation is in flight, because the worker holds the story
+    text in memory and would clobber the edit when it commits its turn.
+    """
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Wait for the current generation to finish before editing story files",
+        )
+    restore_story_directory_from_firestore(user_id, story_id)
+    target = _resolve_story_file(story_id, filename, user_id, create_dir=True)
+    name = os.path.basename(target)
+
+    existed = os.path.isfile(target)
+    cleaned = clean_text(input_data.text)
+    with get_story_lock(story_id, user_id):
+        _atomic_write_text(target, cleaned)
+    sync_story_directory_to_firestore(user_id, story_id)
+    print(f"[Files] {'Updated' if existed else 'Created'} {name} for story {story_id} ({len(cleaned)} chars)")
+    return {
+        "success": True,
+        "name": name,
+        "created": not existed,
+        "chars": len(cleaned),
+        "lines": len(cleaned.splitlines()),
+    }
+
+
+@app.delete("/story/{story_id}/file/{filename}")
+async def delete_story_file(
+    story_id: str,
+    filename: str,
+    user_info: dict = Depends(require_authenticated_user),
+):
+    """Delete one .md file. story.md is refused - use the turn-delete controls instead."""
+    user_id = user_info["uid"]
+    if story_turn_is_active(story_id, user_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Wait for the current generation to finish before deleting story files",
+        )
+    restore_story_directory_from_firestore(user_id, story_id)
+    target = _resolve_story_file(story_id, filename, user_id)
+    name = os.path.basename(target)
+    if name == "story.md":
+        raise HTTPException(
+            status_code=400,
+            detail="story.md cannot be deleted here. Use the delete-turn controls on the Story tab.",
+        )
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail=f"{name} does not exist in this story")
+    with get_story_lock(story_id, user_id):
+        os.remove(target)
+    sync_story_directory_to_firestore(user_id, story_id)
+    print(f"[Files] Deleted {name} for story {story_id}")
+    return {"success": True, "name": name, "deleted": True}
+
+
 def is_rate_limit_error(e):
     """Check if an error is a rate limit, quota, or temporary overload error."""
     msg = str(e).lower()

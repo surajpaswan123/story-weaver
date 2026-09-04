@@ -809,6 +809,9 @@ let logsPollingInterval = null;
                     <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
                         aria-controls="tab-consistency" data-tab="consistency" tabindex="-1"><span aria-hidden="true">🔍</span>
                         Consistency</button>
+                    <button class="tab-btn py-2.5 px-2 text-sm" role="tab" aria-selected="false"
+                        aria-controls="tab-files" data-tab="files" tabindex="-1"><span aria-hidden="true">🗂️</span>
+                        Files</button>
                 </div>
             </div>
 
@@ -953,6 +956,57 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         <div id="consistency-log"
                             class="w-full p-4 rounded-lg border border-stone-300 bg-white text-sm story-font leading-relaxed min-h-[200px] whitespace-pre-wrap">
                             <span class="text-stone-400 italic">No checks yet — generate some story first.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Story Files Tab: view + hand-edit every .md the AI reads as context -->
+                <div id="tab-files" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
+                    aria-label="Story files" tabindex="-1">
+                    <div class="max-w-3xl mx-auto">
+                        <div class="flex justify-between items-center mb-3 flex-wrap gap-2">
+                            <h2 class="text-sm font-semibold text-stone-600"><span aria-hidden="true">🗂️</span> Story Files</h2>
+                            <button onclick="loadFileList()" aria-label="Refresh file list"
+                                class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-2 py-1 rounded transition-colors"><span aria-hidden="true">↻</span>
+                                Refresh list</button>
+                        </div>
+                        <p class="text-xs text-stone-400 mb-4">
+                            Every file the AI reads as context before it writes. Editing one changes what the
+                            story model believes on the next generation. AI-maintained files are rewritten by the
+                            continuity pass after each turn, so your edit lasts until that file next changes.
+                        </p>
+
+                        <!-- File list -->
+                        <div id="file-list" class="space-y-2 mb-6" role="list" aria-label="Story files">
+                            <p class="text-stone-400 italic text-sm">Loading files…</p>
+                        </div>
+
+                        <!-- Editor: hidden until a file is opened -->
+                        <div id="file-editor-wrap" class="hidden border-t border-stone-200 pt-4">
+                            <h3 id="file-editor-heading" class="text-sm font-semibold text-stone-700 mb-1">
+                                Editing file
+                            </h3>
+                            <p id="file-editor-desc" class="text-xs text-stone-400 mb-1"></p>
+                            <p id="file-editor-meta" class="text-xs text-stone-400 mb-2"></p>
+                            <div class="flex gap-2 mb-2 flex-wrap">
+                                <button onclick="saveOpenFile()" id="file-save-btn"
+                                    class="text-xs bg-stone-800 hover:bg-stone-700 text-white px-3 py-1.5 rounded transition-colors"
+                                    aria-label="Save this file"><span aria-hidden="true">💾</span> Save file</button>
+                                <button onclick="reloadOpenFile()"
+                                    class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-3 py-1.5 rounded transition-colors"
+                                    aria-label="Reload this file from the server, discarding unsaved changes"><span aria-hidden="true">↻</span> Discard changes</button>
+                                <button onclick="closeOpenFile()"
+                                    class="text-xs bg-stone-200 hover:bg-stone-300 text-stone-700 px-3 py-1.5 rounded transition-colors"
+                                    aria-label="Close the editor and return to the file list"><span aria-hidden="true">✕</span> Close editor</button>
+                                <button onclick="deleteOpenFile()" id="file-delete-btn"
+                                    class="text-xs bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1.5 rounded transition-colors"
+                                    aria-label="Delete this file permanently"><span aria-hidden="true">🗑️</span> Delete file</button>
+                            </div>
+                            <textarea id="file-textarea"
+                                class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-y bg-white text-sm story-font leading-relaxed"
+                                rows="22" spellcheck="false"
+                                aria-label="File contents, editable"></textarea>
+                            <div id="file-status" class="text-xs text-stone-400 mt-1 text-center" role="status" aria-live="polite"></div>
                         </div>
                     </div>
                 </div>
@@ -1341,11 +1395,13 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             document.getElementById('tab-style').classList.toggle('hidden', tab !== 'style');
             document.getElementById('tab-rules').classList.toggle('hidden', tab !== 'rules');
             document.getElementById('tab-consistency').classList.toggle('hidden', tab !== 'consistency');
+            document.getElementById('tab-files').classList.toggle('hidden', tab !== 'files');
             if (tab === 'elements') loadElements();
             if (tab === 'summary') loadSummary();
             if (tab === 'style') loadStyle();
             if (tab === 'rules') loadRules();
             if (tab === 'consistency') loadConsistency();
+            if (tab === 'files') loadFileList();
             announceStatus(`Viewing ${tab} tab`);
             // Move the reading position into the panel itself, not just the live-region status
             const panel = document.getElementById(`tab-${tab}`);
@@ -1733,6 +1789,238 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 document.getElementById('rules-textarea').value = data.text || '';
                 document.getElementById('rules-status').textContent = data.text ? 'Loaded' : 'No rules yet — define your world constraints.';
             } catch (err) { console.error('Failed to load rules:', err); }
+        }
+
+        // ===== STORY FILES PANEL =====
+        // Lists every .md in the story folder, opens one in a textarea, saves it back.
+        // These are the exact files the AI reads as context each turn.
+        let openFileName = null;      // filename currently in the editor
+        let openFileOwner = null;     // 'user' | 'ai'
+        let openFileOriginal = '';    // last-saved text, for the dirty check
+
+        function fileStatus(msg) {
+            const el = document.getElementById('file-status');
+            if (el) el.textContent = msg || '';
+        }
+
+        function fileEditorIsDirty() {
+            if (!openFileName) return false;
+            return document.getElementById('file-textarea').value !== openFileOriginal;
+        }
+
+        async function loadFileList() {
+            const listEl = document.getElementById('file-list');
+            if (!listEl) return;
+            listEl.innerHTML = '<p class="text-stone-400 italic text-sm">Loading files…</p>';
+            try {
+                const res = await authFetch(`/story/${encodeURIComponent(currentStoryId)}/files`);
+                const data = await requireJsonResponse(res, 'Failed to list files');
+                const files = data.files || [];
+                listEl.innerHTML = '';
+
+                if (!files.length) {
+                    listEl.innerHTML = '<p class="text-stone-400 italic text-sm">No files yet — write a turn and the AI will create them.</p>';
+                    announceStatus('No story files yet');
+                    return;
+                }
+
+                files.forEach((f) => {
+                    const row = document.createElement('div');
+                    row.className = 'flex items-start justify-between gap-3 border border-stone-200 rounded-lg p-3 bg-white';
+                    row.setAttribute('role', 'listitem');
+
+                    const info = document.createElement('div');
+                    info.className = 'min-w-0';
+
+                    // The filename is the heading, so heading-by-heading navigation
+                    // walks the file list directly.
+                    const h = document.createElement('h3');
+                    h.className = 'text-sm font-semibold text-stone-700';
+                    h.textContent = `${f.label} — ${f.name}`;
+                    info.appendChild(h);
+
+                    const desc = document.createElement('p');
+                    desc.className = 'text-xs text-stone-500 mt-0.5';
+                    desc.textContent = f.description;
+                    info.appendChild(desc);
+
+                    const meta = document.createElement('p');
+                    meta.className = 'text-xs text-stone-400 mt-0.5';
+                    const ownerText = f.owner === 'user' ? 'yours' : 'AI-maintained';
+                    meta.textContent = f.empty
+                        ? `empty · ${ownerText}`
+                        : `${f.lines.toLocaleString()} lines · ${f.chars.toLocaleString()} characters · ${ownerText}`;
+                    info.appendChild(meta);
+
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'shrink-0 text-xs bg-stone-800 hover:bg-stone-700 text-white px-3 py-1.5 rounded transition-colors';
+                    btn.textContent = 'Open';
+                    btn.setAttribute('aria-label', `Open ${f.label}, ${f.name}, for editing`);
+                    btn.addEventListener('click', () => openStoryFile(f.name));
+
+                    row.appendChild(info);
+                    row.appendChild(btn);
+                    listEl.appendChild(row);
+                });
+
+                announceStatus(`${files.length} story ${files.length === 1 ? 'file' : 'files'}`);
+            } catch (err) {
+                console.error('Failed to list story files:', err);
+                listEl.innerHTML = `<p class="text-red-700 text-sm">Could not load the file list: ${escapeHtml(err.message)}</p>`;
+                announceStatus('Could not load file list');
+            }
+        }
+
+        async function openStoryFile(name) {
+            if (fileEditorIsDirty()) {
+                const ok = window.confirm(
+                    `You have unsaved changes in ${openFileName}. Discard them and open ${name}?`
+                );
+                if (!ok) return;
+            }
+            try {
+                fileStatus('Loading…');
+                const res = await authFetch(
+                    `/story/${encodeURIComponent(currentStoryId)}/file/${encodeURIComponent(name)}`
+                );
+                const data = await requireJsonResponse(res, `Failed to open ${name}`);
+
+                openFileName = data.name;
+                openFileOwner = data.owner;
+                openFileOriginal = data.text || '';
+
+                const wrap = document.getElementById('file-editor-wrap');
+                const ta = document.getElementById('file-textarea');
+                ta.value = openFileOriginal;
+                ta.setAttribute('aria-label', `Contents of ${data.name}, editable`);
+
+                document.getElementById('file-editor-heading').textContent =
+                    `Editing ${data.label} — ${data.name}`;
+                document.getElementById('file-editor-desc').textContent = data.description || '';
+                document.getElementById('file-editor-meta').textContent =
+                    `${data.lines.toLocaleString()} lines · ${data.chars.toLocaleString()} characters · ` +
+                    (data.owner === 'user'
+                        ? 'yours — the pipeline never rewrites this file'
+                        : 'AI-maintained — the continuity pass may change this after a turn');
+
+                // story.md is the manuscript; deleting it here would orphan the chat log.
+                const delBtn = document.getElementById('file-delete-btn');
+                delBtn.classList.toggle('hidden', data.name === 'story.md');
+
+                wrap.classList.remove('hidden');
+                fileStatus('');
+                // Land the screen reader on the editor heading, which is where the
+                // user now needs to be.
+                const heading = document.getElementById('file-editor-heading');
+                heading.setAttribute('tabindex', '-1');
+                heading.focus({ preventScroll: false });
+                announceToScreenReader(`Opened ${data.label}, ${data.name}, for editing. ${data.lines} lines.`);
+            } catch (err) {
+                console.error('Failed to open file:', err);
+                fileStatus(`Could not open: ${err.message}`);
+                announceToScreenReader(`Could not open ${name}: ${err.message}`);
+            }
+        }
+
+        async function saveOpenFile() {
+            if (!openFileName) return;
+            const text = document.getElementById('file-textarea').value;
+            const saveBtn = document.getElementById('file-save-btn');
+            if (saveBtn.disabled) return;   // a save is already in flight
+            saveBtn.disabled = true;
+            try {
+                fileStatus('Saving…');
+                const res = await authFetch(
+                    `/story/${encodeURIComponent(currentStoryId)}/file/${encodeURIComponent(openFileName)}`,
+                    {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text: text }),
+                    }
+                );
+                const data = await requireJsonResponse(res, `Failed to save ${openFileName}`);
+                openFileOriginal = text;
+                fileStatus(`Saved — ${data.lines.toLocaleString()} lines, ${data.chars.toLocaleString()} characters.`);
+                document.getElementById('file-editor-meta').textContent =
+                    `${data.lines.toLocaleString()} lines · ${data.chars.toLocaleString()} characters · ` +
+                    (openFileOwner === 'user'
+                        ? 'yours — the pipeline never rewrites this file'
+                        : 'AI-maintained — the continuity pass may change this after a turn');
+                announceToScreenReader(`${openFileName} saved. ${data.lines} lines.`);
+                loadFileList();
+                // Keep the tabs that mirror specific files in sync.
+                if (openFileName === 'rules.md') loadRules();
+                if (openFileName === 'style.md') loadStyle();
+                if (openFileName === 'summary.md') loadSummary();
+                if (openFileName === 'consistency.md') loadConsistency();
+            } catch (err) {
+                console.error('Failed to save file:', err);
+                fileStatus(`Could not save: ${err.message}`);
+                announceToScreenReader(`Could not save ${openFileName}: ${err.message}`);
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        async function reloadOpenFile() {
+            if (!openFileName) return;
+            if (fileEditorIsDirty()) {
+                const ok = window.confirm(`Discard your unsaved changes to ${openFileName}?`);
+                if (!ok) return;
+            }
+            const name = openFileName;
+            await openStoryFile(name);
+            announceToScreenReader(`${name} reloaded from the server.`);
+        }
+
+        function closeOpenFile() {
+            if (fileEditorIsDirty()) {
+                const ok = window.confirm(`Close ${openFileName} and discard your unsaved changes?`);
+                if (!ok) return;
+            }
+            const name = openFileName;
+            openFileName = null;
+            openFileOwner = null;
+            openFileOriginal = '';
+            document.getElementById('file-textarea').value = '';
+            document.getElementById('file-editor-wrap').classList.add('hidden');
+            fileStatus('');
+            announceToScreenReader(`Closed ${name}. Back to the file list.`);
+            const listHeading = document.querySelector('#tab-files h2');
+            if (listHeading) {
+                listHeading.setAttribute('tabindex', '-1');
+                listHeading.focus({ preventScroll: false });
+            }
+        }
+
+        async function deleteOpenFile() {
+            if (!openFileName) return;
+            const name = openFileName;
+            const ok = window.confirm(
+                `Delete ${name} permanently? The AI will lose this context on the next turn. This cannot be undone.`
+            );
+            if (!ok) return;
+            try {
+                fileStatus('Deleting…');
+                const res = await authFetch(
+                    `/story/${encodeURIComponent(currentStoryId)}/file/${encodeURIComponent(name)}`,
+                    { method: 'DELETE' }
+                );
+                await requireJsonResponse(res, `Failed to delete ${name}`);
+                openFileName = null;
+                openFileOwner = null;
+                openFileOriginal = '';
+                document.getElementById('file-textarea').value = '';
+                document.getElementById('file-editor-wrap').classList.add('hidden');
+                fileStatus('');
+                announceToScreenReader(`${name} deleted.`);
+                loadFileList();
+            } catch (err) {
+                console.error('Failed to delete file:', err);
+                fileStatus(`Could not delete: ${err.message}`);
+                announceToScreenReader(`Could not delete ${name}: ${err.message}`);
+            }
         }
 
         async function saveRules() {
