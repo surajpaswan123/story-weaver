@@ -54,7 +54,8 @@ const pipelineIds = ['input-story-model', 'input-background-model', 'input-rules
 function setup() {
     const elements = {};
     for (const id of ['provider-select', 'model-select', ...pipelineIds]) elements[id] = new Element('select');
-    for (const id of ['models-loader-bar', 'models-status-tag', 'settings-models-status']) elements[id] = new Element();
+    for (const id of ['models-loader-bar', 'models-status-tag', 'settings-models-status', 'selected-provider-status', 'manual-model-field']) elements[id] = new Element();
+    elements['manual-model-id'] = new Element('input');
     const requests = [];
     const context = vm.createContext({
         document: { getElementById: id => elements[id] || null, createElement: tag => new Element(tag) },
@@ -76,7 +77,8 @@ function setup() {
     return { elements, requests, context, load: () => context.loadProvidersAndModels() };
 }
 function reply(request, models, errors = {}) {
-    const providers = models.length ? { openai: { name: 'Current provider', models } } : {};
+    const providers = { openai: { name: 'OpenAI (User Key)', configured: true, models,
+        base_url: 'https://example.com/v1', discovery_error: errors.openai || '' } };
     request.resolve({ ok: true, json: async () => ({ providers, errors }) });
 }
 function values(element) { return element.options.filter(option => !option.disabled).map(option => option.value).filter(Boolean); }
@@ -123,7 +125,7 @@ test('stale JSON body or failure cannot replace a newer empty result', async () 
         if (reject) app.requests[0].reject(new Error('stale failure'));
         else resolveBody({ providers: { openai: { models: ['old-model'] } } });
         await old;
-        assert.deepEqual(values(app.elements['provider-select']), []);
+        assert.deepEqual(values(app.elements['provider-select']), ['openai']);
         assert.match(app.elements['settings-models-status'].textContent, /returned no models/);
         assert.doesNotMatch(app.elements['models-status-tag'].textContent, /ready|stale failure/);
     }
@@ -188,4 +190,63 @@ test('loading settings performs just one shared catalog discovery', async () => 
     reply(app.requests[1], ['new-model']);
     await done;
     assert.equal(app.requests.length, 2);
+});
+
+test('configured OpenAI is selectable with an empty catalog and exposes a labelled manual model field', async () => {
+    const app = setup();
+    const done = app.load();
+    reply(app.requests[0], [], { openai: 'The provider returned no models.' });
+    await done;
+    assert.deepEqual(values(app.elements['provider-select']), ['openai']);
+    app.elements['provider-select'].value = 'openai';
+    app.context.onProviderChange();
+    assert.equal(app.elements['provider-select'].disabled, false);
+    assert.equal(app.elements['model-select'].disabled, true);
+    assert.equal(app.elements['manual-model-field'].hidden, false);
+    assert.equal(app.elements['manual-model-id'].disabled, false);
+    assert.match(app.elements['selected-provider-status'].textContent, /https:\/\/example.com\/v1/);
+    assert.match(app.elements['selected-provider-status'].textContent, /returned no models/);
+    assert.match(html, /<label for="manual-model-id"/);
+    assert.match(html, /id="manual-model-id"[^>]+aria-describedby="manual-model-help selected-provider-status"/);
+    app.elements['manual-model-id'].value = '  known-provider-model  ';
+    assert.equal(app.context.getSelectedModel(), 'known-provider-model');
+});
+
+test('manual model selection is cleared when the provider or saved connection changes', async () => {
+    const app = setup();
+    const done = app.load();
+    reply(app.requests[0], []);
+    await done;
+    app.elements['provider-select'].value = 'openai';
+    app.context.onProviderChange();
+    app.elements['manual-model-id'].value = 'old-model';
+    app.elements['provider-select'].value = '';
+    app.context.onProviderChange();
+    assert.equal(app.elements['manual-model-id'].value, '');
+    assert.equal(app.elements['manual-model-field'].hidden, true);
+    assert.equal(app.context.getSelectedModel(), '');
+    app.elements['provider-select'].value = 'openai';
+    app.context.onProviderChange();
+    app.elements['manual-model-id'].value = 'another-old-model';
+    app.context.invalidateProviderModels();
+    assert.equal(app.elements['manual-model-id'].value, '');
+    assert.equal(app.elements['manual-model-id'].disabled, true);
+});
+
+test('a successful catalog refresh restores the dropdown and hides manual entry', async () => {
+    const app = setup();
+    let done = app.load();
+    reply(app.requests[0], []);
+    await done;
+    app.elements['provider-select'].value = 'openai';
+    app.context.onProviderChange();
+    app.elements['manual-model-id'].value = 'manual-model';
+    done = app.load();
+    reply(app.requests[1], ['listed-model']);
+    await done;
+    assert.equal(app.elements['manual-model-field'].hidden, true);
+    assert.equal(app.elements['model-select'].disabled, false);
+    assert.deepEqual(values(app.elements['model-select']), ['listed-model']);
+    app.elements['model-select'].value = 'listed-model';
+    assert.equal(app.context.getSelectedModel(), 'listed-model');
 });

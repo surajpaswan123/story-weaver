@@ -1030,14 +1030,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <div id="models-loader-bar" class="absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-600 transition-all duration-500 w-1/3"></div>
 
                     <div class="flex items-center gap-1.5">
-                        <span class="font-medium text-stone-600 flex items-center gap-1">⚡ <span>Provider:</span></span>
-                        <select id="provider-select" onchange="onProviderChange()" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
+                        <label for="provider-select" class="font-medium text-stone-600 flex items-center gap-1"><span aria-hidden="true">⚡</span> Provider:</label>
+                        <select id="provider-select" onchange="onProviderChange()" aria-describedby="selected-provider-status" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
                             <option value="" disabled selected>Choose a provider…</option>
                         </select>
                     </div>
 
                     <div class="flex items-center gap-1.5 flex-1 min-w-[200px]">
-                        <span class="font-medium text-stone-600 flex items-center gap-1">🤖 <span>Model:</span></span>
+                        <label for="model-select" class="font-medium text-stone-600 flex items-center gap-1"><span aria-hidden="true">🤖</span> Model:</label>
                         <select id="model-select" class="bg-white border border-stone-300 rounded px-2.5 py-1 text-stone-700 font-medium w-full focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm">
                             <option value="" disabled selected>Choose a model…</option>
                         </select>
@@ -1048,6 +1048,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         <span class="animate-spin text-[9px]">🔄</span> Fetching online models...
                     </span>
                     <button type="button" onclick="loadProvidersAndModels()" class="text-xs underline px-2 py-1">Refresh models</button>
+                </div>
+                <p id="selected-provider-status" role="status" aria-live="polite" class="text-xs text-stone-700 mb-2"></p>
+                <div id="manual-model-field" hidden class="mb-2">
+                    <label for="manual-model-id" class="block text-sm font-medium text-stone-700">Model ID</label>
+                    <input id="manual-model-id" type="text" maxlength="300" autocomplete="off" spellcheck="false" disabled aria-describedby="manual-model-help selected-provider-status" class="w-full rounded border border-stone-300 px-2 py-1 text-sm">
+                    <p id="manual-model-help" class="text-xs text-stone-600 mt-1">This provider did not supply a model list. Enter an exact model ID from your provider to generate, or use Refresh models to try discovery again.</p>
                 </div>
 
                 <!-- Audio attachment badge -->
@@ -2174,13 +2180,15 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             // No silent auto-selection is performed anymore.
             if (!bypassCheck) {
                 const _cp = document.getElementById('provider-select');
-                const _cm = document.getElementById('model-select');
                 const _pv = _cp ? _cp.value : '';
-                const _mv = _cm ? _cm.value : '';
+                const _mv = getSelectedModel();
                 if (!_pv || !_mv) {
-                    announceStatus('Please choose a Provider and a Model before generating.');
-                    announceToScreenReader('Please choose a provider and a model from the dropdowns above the input box.');
-                    if (_cp) _cp.focus();
+                    const message = 'Choose a provider, then choose a model or enter its exact Model ID before generating.';
+                    announceStatus(message);
+                    announceToScreenReader(message);
+                    const manual = document.getElementById('manual-model-id');
+                    if (_pv && manual && !manual.disabled) manual.focus();
+                    else if (_cp) _cp.focus();
                     return;
                 }
             }
@@ -2201,7 +2209,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                              currentUserSettings.masked_keys.story_model && 
                                              currentUserSettings.masked_keys.story_model.trim() !== '';
                     const providerVal = document.getElementById('provider-select')?.value || 'auto';
-                    const modelVal = document.getElementById('model-select')?.value || 'auto';
+                    const modelVal = getSelectedModel() || 'auto';
 
                     console.log("[DEBUG] submitStory check:", { hasKeys, hasStoryOverride, providerVal, modelVal, currentUserSettings });
 
@@ -2294,7 +2302,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             try {
                 const providerVal = document.getElementById('provider-select')?.value || '';
-                const modelVal = document.getElementById('model-select')?.value || '';
+                const modelVal = getSelectedModel();
                 let response;
                 if (providerVal === 'local') {
                     // Local provider wins even with audio attached - multimodal local
@@ -3066,6 +3074,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         function invalidateProviderModels() {
             modelsRequestVersion++;
             providersData = {};
+            clearManualModel();
+            const selectedStatus = document.getElementById('selected-provider-status');
+            if (selectedStatus) selectedStatus.textContent = '';
             for (const id of ['provider-select', 'model-select', 'input-story-model',
                               'input-background-model', 'input-rules-model', 'input-audio-model']) {
                 const select = document.getElementById(id);
@@ -3122,7 +3133,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     onProviderChange();
                 }
                 if (modelSelect) {
-                    modelSelect.disabled = false;
                     if (providersData[previousProvider]?.models?.includes(previousModel)) {
                         modelSelect.value = previousModel;
                     }
@@ -3161,6 +3171,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             
             const selectedProvider = providerSelect.value;
             modelSelect.innerHTML = '<option value="" disabled selected>Choose a model…</option>';
+            modelSelect.disabled = false;
+            clearManualModel();
+            const status = document.getElementById('selected-provider-status');
+            if (status) status.textContent = '';
             
             if (selectedProvider === 'local') {
                 refreshLocalModelDropdown(modelSelect);
@@ -3168,14 +3182,46 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
             
             if (selectedProvider !== 'auto' && providersData[selectedProvider]) {
-                const models = providersData[selectedProvider].models || [];
+                const provider = providersData[selectedProvider];
+                const models = provider.models || [];
                 for (const m of models) {
                     const opt = document.createElement('option');
                     opt.value = m;
                     opt.textContent = m;
                     modelSelect.appendChild(opt);
                 }
+                const connection = provider.base_url ? `Saved API URL: ${provider.base_url}. ` : '';
+                if (models.length) {
+                    if (status) status.textContent = `${connection}${models.length} models listed.`;
+                } else if (provider.configured) {
+                    modelSelect.innerHTML = '<option value="">No models listed — enter a Model ID below</option>';
+                    modelSelect.disabled = true;
+                    const manual = document.getElementById('manual-model-id');
+                    const field = document.getElementById('manual-model-field');
+                    if (manual) manual.disabled = false;
+                    if (field) field.hidden = false;
+                    if (status) status.textContent = `${connection}${provider.discovery_error || 'The model list is unavailable.'} The provider remains selected; you can enter a known Model ID below.`;
+                }
             }
+        }
+
+        function clearManualModel() {
+            const manual = document.getElementById('manual-model-id');
+            const field = document.getElementById('manual-model-field');
+            if (manual) {
+                manual.value = '';
+                manual.disabled = true;
+            }
+            if (field) field.hidden = true;
+        }
+
+        function getSelectedModel() {
+            const provider = document.getElementById('provider-select')?.value;
+            const manual = document.getElementById('manual-model-id');
+            if (providersData[provider]?.configured && !providersData[provider].models?.length) {
+                return manual && !manual.disabled ? manual.value.trim() : '';
+            }
+            return document.getElementById('model-select')?.value || '';
         }
 
         // ===== LOCAL OPENAI-COMPATIBLE SERVER (BROWSER-DIRECT) =====

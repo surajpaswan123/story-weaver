@@ -8824,7 +8824,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
     if not keys:
         return None
     try:
-        safe_base_url = validate_openai_base_url(base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+        default_base_url = os.getenv("OPENAI_BASE_URL") if api_key is None else None
+        safe_base_url = validate_openai_base_url(base_url or default_base_url or "https://api.openai.com/v1")
         safe_base_url, _ = resolve_openai_endpoint(safe_base_url)
     except ValueError as exc:
         if strict:
@@ -9191,15 +9192,24 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
             live = None
             errors[pkey] = f"{display}: {exc}"
         models = _dropdown_models(pkey, live)
-        if models:
-            allowed_providers[pkey] = {"name": display, "models": models}
-        elif pkey not in errors:
+        if not models and pkey not in errors:
             reason = (
                 "The provider returned no models for this API key. Check model access in the provider account, then refresh models."
                 if live is not None else
                 "Could not load models for this connection. Check the API key and URL, then refresh models."
             )
             errors[pkey] = f"{display}: {reason}"
+        # A saved connection remains selectable even when its catalog is absent.
+        # Catalog availability does not establish whether generation is supported.
+        allowed_providers[pkey] = {
+            "name": display,
+            "configured": True,
+            "models": models,
+            "discovery_status": "ready" if models else ("empty" if live is not None else "error"),
+            "discovery_error": errors.get(pkey, ""),
+        }
+        if pkey == "openai":
+            allowed_providers[pkey]["base_url"] = user_keys.get("openai_base_url") or "https://api.openai.com/v1"
         _cache_provider_models(pkey, display, live)
 
     return {"providers": allowed_providers, "errors": errors}

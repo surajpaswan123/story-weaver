@@ -41,7 +41,13 @@ from the previous connection. Use **Refresh models** to retry discovery after
 changing access in the provider account. Include the API path in the base URL
 (for example, `https://api.justwoker.icu/v1`); a website homepage may return
 HTML instead of a model catalog. A successful `/models` response with an empty
-`data` list means the provider advertised no models for that key.
+`data` list means the provider advertised no models for that key. Every provider
+with a saved key remains in the Provider selector even if discovery fails or
+returns no models. Select it to hear its connection status; when no catalog is
+available, enter an exact **Model ID** supplied by that provider to generate a
+story. A missing catalog alone does not establish whether generation works.
+For OpenAI, the selected-provider status also displays the saved API URL. An
+empty URL uses `https://api.openai.com/v1` for both discovery and generation.
 
 For OpenCode Zen's `muse-spark-1.3-contributor-free` example:
 
