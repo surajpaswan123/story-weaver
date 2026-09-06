@@ -70,6 +70,7 @@ import hashlib
 import ipaddress
 
 from dotenv import load_dotenv
+from openai_compat import API_FORMATS, REASONING_EFFORTS, ResponsesClient, resolve_openai_endpoint
 
 load_dotenv()
 
@@ -671,11 +672,17 @@ def _clients_from_keys(user_keys: dict) -> dict:
         return c
 
     def _cached_openai_compatible(kind: str, key: str, base_url: str):
-        ck = (kind, base_url, key)
+        api_format, effort = "chat_completions", ""
+        if kind == "openai":
+            base_url, api_format = resolve_openai_endpoint(base_url, user_keys.get("openai_api_format", "auto"))
+            effort = user_keys.get("openai_reasoning_effort", "")
+        ck = (kind, base_url, key, api_format, effort)
         c = cache.get(ck)
         if c is None:
             extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
             c = OpenAI(base_url=base_url, api_key=key, **extra)
+            if api_format == "responses":
+                c = ResponsesClient(c, effort)
             cache[ck] = c
         return c
 
@@ -788,6 +795,8 @@ def load_user_keys(uid: str) -> dict:
         "gemini_api_key": "",
         "openai_api_key": "",
         "openai_base_url": "https://api.openai.com/v1",
+        "openai_api_format": "auto",
+        "openai_reasoning_effort": "",
         "openrouter_api_key": "",
         "groq_api_key": "",
         "nvidia_api_key": "",
@@ -857,7 +866,7 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
             keys[key] = ""
 
     # Non-secret fields can be set to empty (to clear a model override)
-    NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     for k in keys:
@@ -865,6 +874,10 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
             val = new_keys[k].strip()
             if k == "openai_base_url" and val:
                 val = validate_openai_base_url(val)
+            if k == "openai_api_format" and val and val not in API_FORMATS:
+                raise ValueError("Invalid OpenAI API format")
+            if k == "openai_reasoning_effort" and val not in REASONING_EFFORTS:
+                raise ValueError("Invalid OpenAI reasoning effort")
             if val:
                 # Always accept non-empty values
                 keys[k] = val
@@ -8770,6 +8783,7 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None):
         return None
     try:
         safe_base_url = validate_openai_base_url(base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+        safe_base_url, _ = resolve_openai_endpoint(safe_base_url)
         url = safe_base_url + "/models"
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {key}",
@@ -9120,6 +9134,8 @@ class UserKeysPayload(BaseModel):
     gemini_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_base_url: Optional[str] = Field(default=None, max_length=2048)
+    openai_api_format: Optional[str] = Field(default=None, max_length=32)
+    openai_reasoning_effort: Optional[str] = Field(default=None, max_length=16)
     openrouter_api_key: Optional[str] = Field(default=None, max_length=4096)
     groq_api_key: Optional[str] = Field(default=None, max_length=4096)
     nvidia_api_key: Optional[str] = Field(default=None, max_length=4096)
@@ -9154,7 +9170,7 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         }
     keys = load_user_keys(uid)
     # Non-secret fields that should be returned in full (not masked)
-    NON_SECRET_FIELDS = {"openai_base_url", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     masked_keys = {}

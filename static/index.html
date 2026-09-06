@@ -265,6 +265,8 @@ function renderUserSettingsUI() {
     if (document.getElementById('input-openai-base-url')) {
         document.getElementById('input-openai-base-url').value = masked.openai_base_url || 'https://api.openai.com/v1';
     }
+    document.getElementById('input-openai-api-format').value = masked.openai_api_format || 'auto';
+    document.getElementById('input-openai-reasoning-effort').value = masked.openai_reasoning_effort || '';
 
     if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
     if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
@@ -307,6 +309,8 @@ async function saveUserSettings(e) {
         gemini_api_key: getKeyListValues('gemini'),
         openai_api_key: getKeyListValues('openai'),
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
+        openai_api_format: document.getElementById('input-openai-api-format').value,
+        openai_reasoning_effort: document.getElementById('input-openai-reasoning-effort').value,
         openrouter_api_key: getKeyListValues('openrouter'),
         groq_api_key: getKeyListValues('groq'),
         nvidia_api_key: getKeyListValues('nvidia'),
@@ -3750,8 +3754,33 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             </div>
 
             <div>
-                <label class="block font-medium text-stone-300 mb-1">OpenAI Base URL (Optional Custom Endpoint)</label>
-                <input type="text" id="input-openai-base-url" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI Base URL or Full Endpoint</label>
+                <input type="text" id="input-openai-base-url" aria-describedby="openai-endpoint-help" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
+                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Accepts a base URL or an endpoint ending in /responses or /chat/completions. For OpenCode Muse Spark, use https://opencode.ai/zen/v1/responses.</p>
+            </div>
+
+            <div>
+                <label for="input-openai-api-format" class="block font-medium text-stone-300 mb-1">OpenAI API Format</label>
+                <select id="input-openai-api-format" aria-describedby="openai-format-help" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
+                    <option value="auto">Auto (from endpoint URL)</option>
+                    <option value="chat_completions">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                </select>
+                <p id="openai-format-help" class="mt-1 text-xs text-stone-300">Auto uses Responses for a URL ending in /responses, otherwise Chat Completions. Select Responses explicitly when using a base URL with a Responses model.</p>
+            </div>
+
+            <div>
+                <label for="input-openai-reasoning-effort" class="block font-medium text-stone-300 mb-1">Responses Reasoning Effort</label>
+                <select id="input-openai-reasoning-effort" aria-describedby="openai-reasoning-help" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
+                    <option value="">Provider default</option>
+                    <option value="none">None</option>
+                    <option value="minimal">Minimal</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">Extra high (xhigh)</option>
+                </select>
+                <p id="openai-reasoning-help" class="mt-1 text-xs text-stone-300">Applies to Responses story generation, background analysis, and rule refinement. Available efforts depend on the provider and model.</p>
             </div>
 
             <div>
