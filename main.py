@@ -860,6 +860,7 @@ def load_user_keys(uid: str) -> dict:
 def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
     """Save user-specific custom API keys to user_keys.json and Firestore."""
     keys = load_user_keys(uid)
+    previous_keys = keys.copy()
     secret_fields = {
         "gemini_api_key", "openai_api_key", "openrouter_api_key",
         "groq_api_key", "nvidia_api_key", "local_api_key",
@@ -888,6 +889,15 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
                 # Allow clearing non-secret fields (model overrides, base_url)
                 keys[k] = val
             # else: skip empty strings for secret keys — preserves existing value
+
+    # A saved model belongs to its connection. A form often resubmits the old
+    # overrides together with a new URL/key; do not carry those into that account.
+    if any(keys.get(field) != previous_keys.get(field)
+           for field in ("openai_api_key", "openai_base_url")):
+        for field in ("story_model", "background_model", "rules_model", "audio_model"):
+            old_model = previous_keys.get(field, "")
+            if old_model.startswith("openai::") and keys.get(field) == old_model:
+                keys[field] = ""
 
     key_file = get_user_keys_file(uid)
     _atomic_write_json(key_file, keys, indent=2)
@@ -1610,7 +1620,7 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
 
     if active_clients.get("openai_client"):
         c = active_clients["openai_client"]
-        for m in ["gpt-4o-mini", "gpt-4o", "o3-mini"]:
+        for m in _user_openai_models(user_keys):
             try:
                 kwargs = {"model": m, "messages": messages}
                 if not m.startswith("o"): kwargs["temperature"] = temperature
@@ -2004,9 +2014,6 @@ NOKEY_SAFETY_OFF = {
 
 # Official OpenAI Client - built per-user from Settings keys only
 official_openai_client = None
-
-OPENAI_MODELS = LiveModelList("openai")
-
 
 # Cerebras - built per-user from Settings keys only
 cerebras_client = None
@@ -5244,7 +5251,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
 
         # 5. User selected OpenAI / custom OpenAI-compatible endpoint
         elif selected_provider == "openai" and active_openai_client:
-            oa_models = [target_model] if target_model else OPENAI_MODELS
+            oa_models = [target_model] if target_model else _user_openai_models(user_keys)
             for m_name in oa_models:
                 try:
                     print(f"=== Streaming User Selected OpenAI ({m_name}) ===")
@@ -8769,22 +8776,26 @@ def _sorted_registered_ids(items, created_map=None):
     return sorted(ids, key=_key, reverse=True)
 
 
-def _dropdown_models(provider_key, live_result=None):
-    """Build the dropdown model list for a provider: prefer the live fetch
-    result (already {id, created} items), else the cached list + created map.
-    Sorted newest-first by registration date."""
-    if live_result and live_result[1]:
-        return _sorted_registered_ids(live_result[1])
+_NO_LIVE_MODEL_FETCH = object()
+
+
+def _dropdown_models(provider_key, live_result=_NO_LIVE_MODEL_FETCH):
+    """A completed fetch, including failure/empty, supersedes any old catalog."""
+    if live_result is not _NO_LIVE_MODEL_FETCH:
+        return _sorted_registered_ids(live_result[1]) if live_result else []
     cached = DYNAMIC_PROVIDER_MODELS.get(provider_key, {}) or {}
     return _sorted_registered_ids(cached.get("models", []) or [], cached.get("created", {}) or {})
 
 
 def _cache_provider_models(provider_key, display, live_result):
-    """Store a user's Settings-configured provider fetch into the shared cache.
-    This is the ONLY way DYNAMIC_PROVIDER_MODELS gets populated now, so the
-    generation model lists and dropdown fallback only ever contain providers
-    that are actually configured in Settings - never random server .env keys."""
+    """Warm fixed-provider generation lists, never a custom endpoint catalog."""
+    if provider_key == "openai":
+        # Different URLs and credentials can expose entirely different models.
+        # OpenAI automatic selection discovers from that user's connection.
+        DYNAMIC_PROVIDER_MODELS.pop(provider_key, None)
+        return
     if not live_result or not live_result[1]:
+        DYNAMIC_PROVIDER_MODELS.pop(provider_key, None)
         return
     items = live_result[1]
     ids = [it["id"] for it in items if it.get("id")]
@@ -8804,29 +8815,65 @@ def _cache_provider_models(provider_key, display, live_result):
     }
 
 
-def fetch_openai_live_models(api_key: str = None, base_url: str = None):
-    key = api_key or os.getenv("OPENAI_API_KEY")
-    if not key:
+class ModelDiscoveryError(ValueError):
+    """A safe, actionable catalog error that can be returned to the browser."""
+
+
+def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False):
+    keys = _split_keys(api_key if api_key is not None else os.getenv("OPENAI_API_KEY"))
+    if not keys:
         return None
     try:
         safe_base_url = validate_openai_base_url(base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
         safe_base_url, _ = resolve_openai_endpoint(safe_base_url)
-        url = safe_base_url + "/models"
-        req = urllib.request.Request(url, headers={
-            "Authorization": f"Bearer {key}",
-            "User-Agent": "StoryWeaver/1.0"
-        })
-        with _NO_REDIRECT_OPENER.open(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            models = [{"id": m.get("id"), "created": _created_ts(m.get("created"))}
-                      for m in data.get("data", []) if m.get("id")]
+    except ValueError as exc:
+        if strict:
+            raise ModelDiscoveryError("Invalid provider base URL. Check the HTTPS API URL in Settings.") from exc
+        return None
+    error = "Could not reach the provider's /models endpoint. Check the URL and try refreshing models."
+    empty_result = False
+    for key in keys:
+        try:
+            req = urllib.request.Request(safe_base_url + "/models", headers={
+                "Authorization": f"Bearer {key}", "User-Agent": "StoryWeaver/1.0"
+            })
+            with _NO_REDIRECT_OPENER.open(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("Missing model list")
+            models = [{"id": m["id"], "created": _created_ts(m.get("created"))}
+                      for m in data["data"]
+                      if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"].strip()]
             if models:
                 return "openai", models
-    except urllib.error.HTTPError as e:
-        print(f"[Live Fetch Note] OpenAI models fetch: {_http_error_detail(e)}")
-    except Exception as e:
-        print(f"[Live Fetch Note] OpenAI models fetch: {e}")
+            empty_result = True
+        except urllib.error.HTTPError as exc:
+            error = f"Provider model discovery failed (HTTP {exc.code}). "
+            error += {
+                401: "Check the API key for this provider.",
+                403: "This key does not have access to the provider's model catalog.",
+                404: "Check the API base URL, including /v1 if required.",
+                429: "The provider is rate limiting model discovery. Try refreshing later.",
+            }.get(exc.code, "Check the provider connection and try refreshing models.")
+            exc.close()
+        except (ValueError, UnicodeError):
+            error = "The provider's /models endpoint did not return a valid model list. Check the API base URL, including /v1 if required."
+        except Exception:
+            # Do not expose request headers or arbitrary provider bodies in logs/UI.
+            pass
+    if empty_result:
+        return "openai", []
+    if strict:
+        raise ModelDiscoveryError(error)
+    print(f"[Live Fetch Note] OpenAI models fetch: {error}")
     return None
+
+
+def _user_openai_models(user_keys):
+    """Automatic candidates belong to the current key and URL, never another user."""
+    live = fetch_openai_live_models(user_keys.get("openai_api_key", ""), user_keys.get("openai_base_url"))
+    return [model for model in _dropdown_models("openai", live)
+            if not any(hint in model.lower() for hint in NON_CHAT_MODEL_HINTS)]
 
 
 def fetch_openrouter_live_models(api_key: str = None):
@@ -9103,11 +9150,7 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     """Returns available AI providers and models based on the user's Settings keys."""
     uid = user_info.get("uid", "default_user")
     user_keys = load_user_keys(uid)
-    is_super_admin = user_info.get("is_super_admin", False)
-
-    # Providers are driven by the user's Settings keys only (gemini, nvidia,
-    # openai, openrouter, groq). Always refresh the keyless public catalogs so
-    # the shared cache is warm, then surface whatever providers are usable.
+    # Configured connections always get a fresh discovery result.
     provider_defs = (
         ("google", "gemini_api_key", "Google GenAI (Gemini)", fetch_google_live_models),
         ("nvidia", "nvidia_api_key", "NVIDIA NIM", fetch_nvidia_live_models),
@@ -9127,6 +9170,8 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
             threading.Thread(target=refresh_live_provider_models, daemon=True).start()
         providers = {}
         for pkey, pinfo in (DYNAMIC_PROVIDER_MODELS or {}).items():
+            if pkey not in {"nvidia", "nokey"}:
+                continue
             models = _dropdown_models(pkey)
             if models:
                 providers[pkey] = {
@@ -9134,28 +9179,30 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
                     "models": models,
                 }
         return {"providers": providers}
-    # Only fetch/list models for providers the user actually configured in
-    # Settings, and seed the shared cache with those same providers.
     allowed_providers = {}
+    errors = {}
     for pkey, keyname, display, fetcher in configured:
-        if pkey == "openai":
-            live = fetcher(user_keys[keyname], user_keys.get("openai_base_url"))
-        else:
-            live = fetcher(user_keys[keyname])
+        try:
+            if pkey == "openai":
+                live = fetcher(user_keys[keyname], user_keys.get("openai_base_url"), strict=True)
+            else:
+                live = fetcher(user_keys[keyname])
+        except ModelDiscoveryError as exc:
+            live = None
+            errors[pkey] = f"{display}: {exc}"
         models = _dropdown_models(pkey, live)
         if models:
             allowed_providers[pkey] = {"name": display, "models": models}
+        elif pkey not in errors:
+            reason = (
+                "The provider returned no models for this API key. Check model access in the provider account, then refresh models."
+                if live is not None else
+                "Could not load models for this connection. Check the API key and URL, then refresh models."
+            )
+            errors[pkey] = f"{display}: {reason}"
         _cache_provider_models(pkey, display, live)
 
-    if not allowed_providers:
-        allowed_providers = {
-            "notice": {
-                "name": "⚠️ Key Required (Open Settings ⚙️)",
-                "models": ["Please enter your API Key in Settings (⚙️)"]
-            }
-        }
-
-    return {"providers": allowed_providers}
+    return {"providers": allowed_providers, "errors": errors}
 
 class UserKeysPayload(BaseModel):
     gemini_api_key: Optional[str] = Field(default=None, max_length=4096)

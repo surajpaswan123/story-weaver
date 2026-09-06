@@ -33,6 +33,16 @@ For other providers, **OpenAI API Format** defaults to Auto: a URL ending in
 explicitly for a base URL when required. Model discovery always uses the
 base URL's `/models` route.
 
+Saving a changed API key or URL refreshes the main model selector and all
+pipeline selectors from the same current catalog. Previous OpenAI pipeline
+overrides reset when the connection changes. Empty lists and discovery errors
+are shown in Settings and beside the main selectors; they do not reuse models
+from the previous connection. Use **Refresh models** to retry discovery after
+changing access in the provider account. Include the API path in the base URL
+(for example, `https://api.justwoker.icu/v1`); a website homepage may return
+HTML instead of a model catalog. A successful `/models` response with an empty
+`data` list means the provider advertised no models for that key.
+
 For OpenCode Zen's `muse-spark-1.3-contributor-free` example:
 
 - URL: `https://opencode.ai/zen/v1`
@@ -60,6 +70,7 @@ is shown as a rate limit during retries, rather than as an unavailable model.
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
+node --test tests/test_model_discovery_frontend.cjs
 ```
 
 ## Hosted deployment

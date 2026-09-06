@@ -15,6 +15,7 @@
 // ===== USER SETTINGS MODAL LOGIC =====
 let currentUserSettings = null;
 let isGuestMode = false;
+let settingsRequestVersion = 0;
 
 
 
@@ -25,13 +26,8 @@ function isAudioModel(modelName) {
     return keywords.some(kw => name.includes(kw));
 }
 
-async function populatePipelineModelDropdowns() {
+function populatePipelineModelDropdowns(providers = {}) {
     try {
-        const res = await authFetch('/api/providers-models');
-        if (!res.ok) return;
-        const data = await res.json();
-        const providers = data.providers || {};
-
         // Build provider-grouped options. Value carries the provider tag
         // ('nvidia::deepseek-ai/deepseek-v4-flash-0731') so the backend routes
         // DIRECTLY to that provider instead of blind-firing every client.
@@ -48,7 +44,8 @@ async function populatePipelineModelDropdowns() {
         ids.forEach(id => {
             const sel = document.getElementById(id);
             if (!sel) return;
-            let currentVal = sel.dataset.val || sel.value || '';
+            let currentVal = sel.dataset.val ?? sel.value ?? '';
+            delete sel.dataset.val;
             // Normalize legacy bare values to their tagged form when unambiguous:
             // a bare id that exists under exactly one provider group gets tagged.
             const findOwners = (bareId) => {
@@ -81,10 +78,12 @@ async function populatePipelineModelDropdowns() {
             if (currentVal && !sel.querySelector(`option[value="${CSS.escape(currentVal)}"]`)) {
                 const opt = document.createElement('option');
                 opt.value = currentVal;
-                opt.textContent = currentVal.includes('::') ? currentVal : `${currentVal} (Custom)`;
+                opt.textContent = `${currentVal} (Unavailable on this connection; choose another model)`;
                 opt.selected = true;
+                opt.disabled = true;
                 sel.appendChild(opt);
             }
+            sel.disabled = false;
         });
     } catch (e) {
         console.warn('Failed to populate pipeline model dropdowns:', e);
@@ -189,10 +188,12 @@ document.addEventListener('click', (e) => {
 });
 
 async function fetchUserSettings() {
+    const requestVersion = ++settingsRequestVersion;
     try {
         const res = await authFetch('/api/user/settings');
-        if (!res.ok) return;
-        currentUserSettings = await res.json();
+        const settings = await requireJsonResponse(res, 'Could not load saved settings');
+        if (requestVersion !== settingsRequestVersion) return;
+        currentUserSettings = settings;
         // Check if backend reports guest mode
         if (currentUserSettings.is_guest && !isGuestMode) {
             isGuestMode = true;
@@ -200,11 +201,12 @@ async function fetchUserSettings() {
             applyGuestRestrictions();
         }
         renderUserSettingsUI();
-        await populatePipelineModelDropdowns();
-        addLocalProviderToDropdown();
+        await loadProvidersAndModels();
         populateLocalPipelineModelDropdowns();
     } catch (e) {
+        if (requestVersion !== settingsRequestVersion) return;
         console.warn('Failed to fetch user settings:', e);
+        await loadProvidersAndModels();
     }
 }
 
@@ -331,6 +333,11 @@ async function saveUserSettings(e) {
             : [],
     };
 
+    // Invalidate any request made with the previous saved connection, including
+    // one still in flight while the settings POST is being processed.
+    settingsRequestVersion++;
+    invalidateProviderModels();
+
     try {
         const res = await authFetch('/api/user/settings', {
             method: 'POST',
@@ -354,13 +361,12 @@ async function saveUserSettings(e) {
         if (document.getElementById('clear-api-keys')) document.getElementById('clear-api-keys').checked = false;
 
         await fetchUserSettings();
-        // Refresh provider/model dropdowns to reflect newly saved API keys
-        await loadProvidersAndModels();
     } catch (err) {
         if (msg) {
             msg.className = 'text-xs text-red-400 font-medium py-1';
             msg.textContent = `❌ Error saving settings: ${err.message}`;
         }
+        await loadProvidersAndModels();
     } finally {
         if (btn) btn.disabled = false;
     }
@@ -1038,9 +1044,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     </div>
 
                     <!-- Online Models Status Tag -->
-                    <span id="models-status-tag" class="text-[10px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex items-center gap-1">
+                    <span id="models-status-tag" role="status" aria-live="polite" class="text-[10px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex items-center gap-1">
                         <span class="animate-spin text-[9px]">🔄</span> Fetching online models...
                     </span>
+                    <button type="button" onclick="loadProvidersAndModels()" class="text-xs underline px-2 py-1">Refresh models</button>
                 </div>
 
                 <!-- Audio attachment badge -->
@@ -2948,7 +2955,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         removeGuestRestrictions();
                         loadStoryList();
                         loadStory();
-                        loadProvidersAndModels();
                         fetchUserSettings();
                     } else {
                         currentUser = null;
@@ -3019,7 +3025,6 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             applyGuestRestrictions();
             loadStoryList();
             loadStory();
-            loadProvidersAndModels();
             fetchUserSettings();
         }
 
@@ -3054,32 +3059,54 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             return data;
         }
 
-        // ===== PROVIDER & MODEL SELECTION LOGIC WITH AUTO-RETRY & PROGRESS BAR =====
+        // ===== CONNECTION-SPECIFIC MODEL DISCOVERY =====
         let providersData = {};
-        let modelsRetryCount = 0;
+        let modelsRequestVersion = 0;
+
+        function invalidateProviderModels() {
+            modelsRequestVersion++;
+            providersData = {};
+            for (const id of ['provider-select', 'model-select', 'input-story-model',
+                              'input-background-model', 'input-rules-model', 'input-audio-model']) {
+                const select = document.getElementById(id);
+                if (!select) continue;
+                if (id.startsWith('input-') && select.dataset.val === undefined) {
+                    select.dataset.val = select.value;
+                }
+                select.innerHTML = '<option value="">Refreshing models…</option>';
+                select.disabled = true;
+            }
+            return modelsRequestVersion;
+        }
+
+        function showModelDiscoveryStatus(message, failed = false) {
+            for (const id of ['models-status-tag', 'settings-models-status']) {
+                const target = document.getElementById(id);
+                if (!target) continue;
+                target.classList.remove('hidden');
+                target.textContent = message;
+                target.dataset.state = failed ? 'error' : 'ready';
+            }
+        }
 
         async function loadProvidersAndModels() {
             const loaderBar = document.getElementById('models-loader-bar');
-            const statusTag = document.getElementById('models-status-tag');
+            const providerSelect = document.getElementById('provider-select');
+            const modelSelect = document.getElementById('model-select');
+            const previousProvider = providerSelect?.value;
+            const previousModel = modelSelect?.value;
+            const requestVersion = invalidateProviderModels();
 
             if (loaderBar) { loaderBar.classList.remove('hidden'); loaderBar.style.width = '35%'; }
-            if (statusTag) {
-                statusTag.classList.remove('hidden');
-                statusTag.innerHTML = `<span class="animate-spin text-[9px]">🔄</span> ${modelsRetryCount > 0 ? `Retrying online models (${modelsRetryCount})...` : 'Fetching online models...'}`;
-            }
+            showModelDiscoveryStatus('Fetching models for the saved connection…');
 
             try {
                 const res = await authFetch('/api/providers-models');
-                if (loaderBar) loaderBar.style.width = '75%';
-
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-                const data = await res.json();
+                const data = await requireJsonResponse(res, 'Model discovery failed');
+                if (requestVersion !== modelsRequestVersion) return;
                 providersData = data.providers || {};
 
-                const providerSelect = document.getElementById('provider-select');
                 if (providerSelect) {
-                    const currentSelection = providerSelect.value;
                     providerSelect.innerHTML = '<option value="" disabled selected>Choose a provider…</option>';
                     for (const [key, p] of Object.entries(providersData)) {
                         const opt = document.createElement('option');
@@ -3087,31 +3114,43 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         opt.textContent = p.name || key.toUpperCase();
                         providerSelect.appendChild(opt);
                     }
+                    providerSelect.disabled = false;
                     addLocalProviderToDropdown();
-                    if (currentSelection === 'local' || (currentSelection && providersData[currentSelection])) {
-                        providerSelect.value = currentSelection;
+                    if ((previousProvider === 'local' && getLocalServerConfig().enabled) || providersData[previousProvider]) {
+                        providerSelect.value = previousProvider;
                     }
                     onProviderChange();
                 }
+                if (modelSelect) {
+                    modelSelect.disabled = false;
+                    if (providersData[previousProvider]?.models?.includes(previousModel)) {
+                        modelSelect.value = previousModel;
+                    }
+                }
+                populatePipelineModelDropdowns(providersData);
 
-                // Success! Fill progress bar and show ready status
-                if (loaderBar) { loaderBar.style.width = '100%'; setTimeout(() => loaderBar.classList.add('hidden'), 500); }
-                if (statusTag) {
-                    const totalModels = Object.values(providersData).reduce((sum, p) => sum + (p.models ? p.models.length : 0), 0);
-                    statusTag.className = "text-[10px] text-emerald-700 font-medium bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1";
-                    statusTag.innerHTML = `<span>✓</span> ${totalModels} Online Models Ready`;
-                    setTimeout(() => statusTag.classList.add('hidden'), 5000);
-                }
+                const total = Object.values(providersData).reduce((sum, p) => sum + (p.models?.length || 0), 0);
+                const errors = Object.values(data.errors || {}).join(' ');
+                const message = errors
+                    ? `${total ? `${total} online models available. ` : ''}${errors}`
+                    : total ? `${total} online models ready.` : 'No online models available. Configure a provider in Settings, then refresh models.';
+                showModelDiscoveryStatus(message, !!errors || total === 0);
             } catch (e) {
-                console.warn('[Model Fetch] Connection offline / retry needed:', e);
-                modelsRetryCount++;
-                if (loaderBar) loaderBar.style.width = '20%';
-                if (statusTag) {
-                    statusTag.className = "text-[10px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex items-center gap-1";
-                    statusTag.innerHTML = `<span class="animate-spin text-[9px]">🔄</span> Connection offline — retrying (${modelsRetryCount})...`;
+                if (requestVersion !== modelsRequestVersion) return;
+                // A failed discovery must never leave old online models usable.
+                if (providerSelect) {
+                    providerSelect.innerHTML = '<option value="">Choose a provider…</option>';
+                    providerSelect.disabled = false;
+                    addLocalProviderToDropdown();
                 }
-                // Persistent retry loop: keep retrying every 3s until network connects
-                setTimeout(loadProvidersAndModels, 3000);
+                if (modelSelect) {
+                    modelSelect.innerHTML = '<option value="">Choose a model…</option>';
+                    modelSelect.disabled = false;
+                }
+                populatePipelineModelDropdowns({});
+                showModelDiscoveryStatus(`Could not refresh models: ${e.message}. Use Refresh models to try again.`, true);
+            } finally {
+                if (requestVersion === modelsRequestVersion && loaderBar) loaderBar.classList.add('hidden');
             }
         }
 
@@ -3869,6 +3908,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             <!-- Pipeline Model Overrides -->
             <div class="border-t border-stone-800 pt-4 mt-2">
                 <h3 class="text-sm font-semibold text-stone-300 mb-3 flex items-center gap-2"><span aria-hidden="true">🔧</span> Pipeline Model Overrides</h3>
+                <p id="settings-models-status" role="status" aria-live="polite" class="text-xs text-stone-300 mb-2"></p>
+                <button type="button" onclick="loadProvidersAndModels()" class="text-xs underline mb-2">Refresh models from saved connection</button>
+                <p class="text-xs text-stone-400 mb-2">Save URL or key changes to refresh all model lists. Changing the OpenAI connection resets its previous pipeline selections. Unavailable saved models are disabled; choose another model or Default.</p>
                 <p class="text-[10px] text-stone-500 mb-3">Override which AI model is used for each pipeline task. Leave as "Default" to use the system's automatic selection.</p>
                 <div class="grid grid-cols-2 gap-3">
                     <div>
