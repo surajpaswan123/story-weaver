@@ -70,7 +70,8 @@ import hashlib
 import ipaddress
 
 from dotenv import load_dotenv
-from openai_compat import API_FORMATS, REASONING_EFFORTS, ResponsesClient, resolve_openai_endpoint
+from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
+                           ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
 
 load_dotenv()
 
@@ -681,7 +682,9 @@ def _clients_from_keys(user_keys: dict) -> dict:
         if c is None:
             extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
             c = OpenAI(base_url=base_url, api_key=key, **extra)
-            if api_format == "responses":
+            if kind == "openai" and is_opencode_zen(base_url):
+                c = OpenCodeClient(c, effort)
+            elif api_format == "responses":
                 c = ResponsesClient(c, effort)
             cache[ck] = c
         return c
@@ -4721,6 +4724,17 @@ def _friendly_api_error(e):
     If the exception looks like a google-genai APIError, extract its clean
     code/status/message instead; otherwise return the original text."""
     try:
+        status = getattr(e, "status_code", None)
+        body = getattr(e, "body", None)
+        detail = body.get("error", body) if isinstance(body, dict) else {}
+        detail = detail if isinstance(detail, dict) else {}
+        message = detail.get("message", "")
+        if status == 429:
+            if detail.get("type") == "FreeUsageLimitError":
+                return "OpenCode's free-model usage limit was reached (HTTP 429). Please try again later."
+            return f"Provider rate limit reached (HTTP 429). {message or 'Please try again later.'}"
+        if isinstance(status, int) and message:
+            return f"Provider error (HTTP {status}): {message}"
         if hasattr(e, "details") and hasattr(e, "code"):
             code = getattr(e, "code", "") or ""
             status = getattr(e, "status", "") or ""
@@ -5120,6 +5134,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
 
     # USER SELECTED SPECIFIC PROVIDER ATTEMPT
     if _strict:
+        selected_error = None
         target_model = selected_model if (selected_model and selected_model != "auto") else None
         if not target_model and story_model_override:
             # only adopt the story override if it's tagged for THIS provider
@@ -5158,6 +5173,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                         first_chunk = next(iter(stream))
                         return StreamWithFirstChunk(stream, first_chunk), f"Google/{base_m}", _thinks
                     except Exception as err:
+                        selected_error = err
                         print(f"  Google GenAI {m_name} failed: {err}")
 
         # 2. User selected NVIDIA NIM
@@ -5183,6 +5199,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"NVIDIA/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  NVIDIA {m_name} failed: {err}")
 
         # 3. User selected Groq
@@ -5202,6 +5219,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"Groq/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  Groq {m_name} failed: {err}")
 
         # 4. User selected OpenRouter
@@ -5221,6 +5239,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"OpenRouter/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  OpenRouter {m_name} failed: {err}")
 
         # 5. User selected OpenAI / custom OpenAI-compatible endpoint
@@ -5245,6 +5264,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  OpenAI {m_name} failed: {err}")
 
         # 6. User selected Mistral
@@ -5264,6 +5284,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"Mistral/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  Mistral {m_name} failed: {err}")
 
         # 7. User selected HuggingFace
@@ -5283,6 +5304,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"HuggingFace/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  HuggingFace {m_name} failed: {err}")
 
         # 8. User selected Cerebras
@@ -5302,6 +5324,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     first_chunk = next(gen)
                     return StreamWithFirstChunk(gen, first_chunk), f"Cerebras/{m_name}", False
                 except Exception as err:
+                    selected_error = err
                     print(f"  Cerebras {m_name} failed: {err}")
 
 
@@ -5309,6 +5332,10 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         # of the branches above returned, fail HARD - never fall through to
         # the silent cross-provider chain below.
         if _strict:
+            if selected_error is not None:
+                # Preserve status_code/body so the outer retry loop can retry
+                # a 429/503 and the UI can report the actual provider failure.
+                raise selected_error
             _detail = f"provider={selected_provider}"
             if target_model:
                 _detail += f", model={target_model}"

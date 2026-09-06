@@ -8,6 +8,28 @@ API_FORMATS = {"auto", "chat_completions", "responses"}
 REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh"}
 
 
+def is_opencode_zen(url):
+    parsed = urlsplit(str(url))
+    return (parsed.scheme == "https" and parsed.hostname == "opencode.ai"
+            and parsed.port in (None, 443) and parsed.path.rstrip("/") == "/zen/v1")
+
+
+def opencode_model_format(model):
+    """Zen publishes endpoint formats by model family, not in GET /models.
+
+    Source: https://opencode.ai/docs/zen/#endpoints. This only controls routing;
+    available model IDs still come from the live authenticated model catalog.
+    """
+    name = model.lower()
+    if name.startswith(("muse-spark-", "gpt-", "grok-")):
+        return "responses"
+    if name.startswith(("claude-", "qwen")):
+        return "messages"
+    if name.startswith("gemini-"):
+        return "google"
+    return "chat_completions"
+
+
 def resolve_openai_endpoint(url, api_format="auto"):
     """Accept either an API base URL or a complete generation endpoint."""
     api_format = api_format or "auto"
@@ -148,6 +170,34 @@ class ResponsesClient:
     def __init__(self, client, reasoning_effort=""):
         self.client = client
         self.chat = SimpleNamespace(completions=ResponsesCompletions(client, reasoning_effort))
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+
+class OpenCodeCompletions:
+    """Choose the wire format on every call, including pipeline overrides."""
+
+    def __init__(self, client, reasoning_effort=""):
+        self.client = client
+        self.reasoning_effort = reasoning_effort
+        self.responses = ResponsesCompletions(client, reasoning_effort)
+
+    def create(self, *, model, messages, stream=False, **kwargs):
+        protocol = opencode_model_format(model)
+        if protocol == "responses":
+            return self.responses.create(model=model, messages=messages, stream=stream, **kwargs)
+        if protocol != "chat_completions":
+            endpoint = "/messages" if protocol == "messages" else "the Google Generative AI API"
+            raise ValueError(f"OpenCode model {model} requires {endpoint}. "
+                             "This connection supports Chat Completions and Responses models.")
+        return self.client.chat.completions.create(model=model, messages=messages, stream=stream, **kwargs)
+
+
+class OpenCodeClient:
+    def __init__(self, client, reasoning_effort=""):
+        self.client = client
+        self.chat = SimpleNamespace(completions=OpenCodeCompletions(client, reasoning_effort))
 
     def __getattr__(self, name):
         return getattr(self.client, name)

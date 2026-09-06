@@ -2526,8 +2526,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                     const att = payload.attempt || 1;
                                     const max = payload.max || 20;
                                     const wait = payload.wait != null ? payload.wait : '';
-                                    statusDiv.textContent = `provider busy — retry ${att}/${max}...`;
-                                    announceStatus(`Provider busy. Retry ${att} of ${max}` +
+                                    const reason = payload.message || 'Provider busy.';
+                                    statusDiv.textContent = `${reason} Retry ${att}/${max}...`;
+                                    announceStatus(`${reason} Retry ${att} of ${max}` +
                                                    (wait !== '' ? ` in ${wait} seconds.` : '.'));
                                 } else if (payload.type === 'heartbeat') {
                                     // Keeps the connection alive during a long finalizing phase - no UI change needed.
@@ -3756,17 +3757,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             <div>
                 <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI Base URL or Full Endpoint</label>
                 <input type="text" id="input-openai-base-url" aria-describedby="openai-endpoint-help" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
-                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Accepts a base URL or an endpoint ending in /responses or /chat/completions. For OpenCode Muse Spark, use https://opencode.ai/zen/v1/responses.</p>
+                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Accepts a base URL or an endpoint ending in /responses or /chat/completions. For OpenCode Zen, use https://opencode.ai/zen/v1. Story Weaver automatically chooses Chat Completions or Responses for each OpenCode model.</p>
             </div>
 
             <div>
                 <label for="input-openai-api-format" class="block font-medium text-stone-300 mb-1">OpenAI API Format</label>
                 <select id="input-openai-api-format" aria-describedby="openai-format-help" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
-                    <option value="auto">Auto (from endpoint URL)</option>
+                    <option value="auto">Auto (model or endpoint URL)</option>
                     <option value="chat_completions">Chat Completions</option>
                     <option value="responses">Responses</option>
                 </select>
-                <p id="openai-format-help" class="mt-1 text-xs text-stone-300">Auto uses Responses for a URL ending in /responses, otherwise Chat Completions. Select Responses explicitly when using a base URL with a Responses model.</p>
+                <p id="openai-format-help" class="mt-1 text-xs text-stone-300">OpenCode Zen chooses the format per model, including pipeline overrides, regardless of this setting. For other providers, Auto uses Responses for a URL ending in /responses, otherwise Chat Completions.</p>
             </div>
 
             <div>

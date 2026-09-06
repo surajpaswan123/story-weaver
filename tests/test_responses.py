@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from openai import OpenAI
 
 import main
-from openai_compat import ResponsesClient, resolve_openai_endpoint
+from openai_compat import OpenCodeClient, ResponsesClient, resolve_openai_endpoint
 
 
 MODEL = "muse-spark-1.3-contributor-free"
@@ -155,7 +155,7 @@ def test_settings_api_round_trip_and_client_cache(configured_user):
             assert settings["openai_reasoning_effort"] == "xhigh"
             assert settings["openai_api_key"] != "test-key"
             first = main.get_effective_ai_clients(configured_user)["openai_client"]
-            assert isinstance(first, ResponsesClient)
+            assert isinstance(first, OpenCodeClient)
             assert str(first.base_url) == "https://opencode.ai/zen/v1/"
             assert first._client.follow_redirects is False
             assert main.get_effective_ai_clients(configured_user)["openai_client"] is first
@@ -166,7 +166,7 @@ def test_settings_api_round_trip_and_client_cache(configured_user):
             assert second is not first
             assert second.chat.completions.reasoning_effort == ""
             assert app.post("/api/user/settings", json={"openai_api_format": "chat_completions"}).status_code == 200
-            assert not isinstance(main.get_effective_ai_clients(configured_user)["openai_client"], ResponsesClient)
+            assert isinstance(main.get_effective_ai_clients(configured_user)["openai_client"], OpenCodeClient)
     finally:
         main.app.dependency_overrides.clear()
 
