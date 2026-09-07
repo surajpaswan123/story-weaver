@@ -82,3 +82,30 @@ node --test tests/test_model_discovery_frontend.cjs
 ## Hosted deployment
 
 Configure Firebase Admin credentials before exposing the application publicly. Provider API keys are stored per signed-in account through Settings; guests are read-only. Server-side custom OpenAI-compatible endpoints must use HTTPS and resolve only to public IP addresses. Leave `TRUST_PROXY_HEADERS=false` unless the app is behind a trusted proxy that overwrites the forwarded-client headers.
+
+### Scheduled liveness ping
+
+Use `https://story-weaver-m47x.onrender.com/ping` for a cron-job.org job:
+
+- Method: **GET**.
+- Schedule: **every 10 minutes**.
+- Authentication, headers, and request body: none required.
+- Expected response: HTTP **200**, plain text **OK** (2 bytes).
+
+The endpoint also accepts HEAD, returning the same status and headers without a
+body. It sends `Cache-Control: no-store` and performs no authentication, database,
+story, or AI-provider work. Calling this endpoint reaches Story Weaver directly;
+it does not launch another request to itself. This is a liveness check, not a
+check that model providers or databases are available.
+
+Use `/ping` instead of the homepage: [cron-job.org's FAQ](https://cron-job.org/en/faq/)
+documents a 64 KB response limit and a 30-second execution timeout. The full
+application page exceeds that response limit. Update and re-enable an existing
+job if repeated failures disabled it.
+
+[Render's free-service documentation](https://render.com/docs/free) says an idle
+free web service sleeps after 15 minutes, and waking one can take about a minute.
+A 10-minute schedule is intended to keep incoming requests below that idle
+interval. An initial cold start or deployment restart can still exceed the cron
+timeout; after the app has finished waking, subsequent pings can return the small
+response. Regular pings do not override Render's restarts or account limits.

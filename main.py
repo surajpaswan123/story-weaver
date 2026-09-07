@@ -8680,6 +8680,17 @@ PROVIDER_DISPLAY_NAMES = {
 
 from fastapi import Response
 
+@app.api_route("/ping", methods=["GET", "HEAD"], include_in_schema=False)
+async def ping(request: Request):
+    """Public liveness response for schedulers; no authentication or external I/O."""
+    return Response(
+        content="OK" if request.method == "GET" else "",
+        status_code=200,
+        media_type="text/plain",
+        headers={"Cache-Control": "no-store", "Content-Length": "2"},
+    )
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return Response(status_code=204)
