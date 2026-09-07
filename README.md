@@ -118,6 +118,29 @@ node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend
 
 Configure Firebase Admin credentials before exposing the application publicly. Provider API keys are stored per signed-in account through Settings; guests are read-only. Server-side custom OpenAI-compatible endpoints must use HTTPS and resolve only to public IP addresses. Leave `TRUST_PROXY_HEADERS=false` unless the app is behind a trusted proxy that overwrites the forwarded-client headers.
 
+### Story storage
+
+When `DATABASE_URL` is configured, Postgres is the primary store for story files,
+including the manuscript, chat history, saved model thoughts, and reference files.
+Each save commits the complete file set in one transaction. Story-file saves do
+not write the same content into Firestore. Firebase authentication and the
+existing settings storage remain available.
+
+Postgres is read before legacy Firestore data. A Firestore-only story is imported
+on first open only after a successful Postgres query confirms it has no rows;
+existing Postgres content is never replaced by that import. Legacy Firestore
+documents remain available, and new stories save all initial files to Postgres.
+
+Cache timestamps record their storage source so an old Firestore timestamp cannot
+block a Postgres restore. Failed saves leave a pending marker and preserve local
+work for the next save. If Postgres is unavailable, cached work can still be read;
+loads without a local copy return a temporary-unavailability error instead of
+silently loading an older Firestore copy. Local disk is still a cache, so failed
+uploads need a successful save before an instance restart to become durable.
+
+Deployments without `DATABASE_URL` retain the legacy Firestore story format and
+its [1 MiB document limit](https://firebase.google.com/docs/firestore/quotas).
+
 ### Scheduled liveness ping
 
 Use `https://story-weaver-m47x.onrender.com/ping` for a cron-job.org job:

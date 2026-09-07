@@ -931,204 +931,239 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
 
 
 def save_story_to_firestore(uid: str, story_id: str, file_name: str, content: str, title: str = None):
-    """Save a specific file content into Firestore under users/{uid}/stories/{story_id}"""
-    if db_firestore and uid and uid != "default_user":
-        try:
-            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-            field_key = f"files.{file_name.replace('.', '_')}"
-            update_payload = {
-                "updated_at": time.time(),
-                field_key: content
-            }
-            if title:
-                update_payload["title"] = title
-            doc_ref.set(update_payload, merge=True)
-        except Exception as e:
-            print(f"[Firestore Write Error] {e}")
+    """Legacy entry point: save a local file and sync to the configured story store."""
+    if not uid or uid == "default_user":
+        return
+    if not _is_synced_story_file(file_name):
+        raise ValueError("Invalid story file name")
+    with get_story_lock(story_id, uid):
+        story_dir = get_story_dir(story_id, uid=uid)
+        _atomic_write_text(os.path.join(story_dir, file_name), content)
+        return sync_story_directory_to_firestore(uid, story_id, title=title)
+
 
 SYNC_META_FILE = "_sync_meta.json"
 
 
-def _story_sync_timestamp(story_dir: str) -> float:
+def _story_sync_state(story_dir: str) -> dict:
     try:
         with open(os.path.join(story_dir, SYNC_META_FILE), "r", encoding="utf-8") as handle:
-            return float((json.load(handle) or {}).get("remote_updated_at", 0))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            state = json.load(handle)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _story_sync_timestamp(story_dir: str) -> float:
+    try:
+        return float(_story_sync_state(story_dir).get("remote_updated_at", 0))
+    except (ValueError, TypeError):
         return 0.0
 
 
-def _write_story_sync_timestamp(story_dir: str, updated_at: float) -> None:
-    _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), {"remote_updated_at": float(updated_at)})
+def _write_story_sync_timestamp(story_dir: str, updated_at: float, storage: str = "firestore") -> None:
+    _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), {
+        "remote_updated_at": float(updated_at), "storage": storage,
+    })
+
+
+def _is_synced_story_file(name: str) -> bool:
+    return (isinstance(name, str) and name not in {"pending_retry.json", SYNC_META_FILE}
+            and not name.startswith("temp_") and name.endswith((".md", ".json"))
+            and not any(char in name for char in ("/", "\\", ":"))
+            and name.rsplit(".", 1)[0].casefold() not in WINDOWS_RESERVED_NAMES)
+
+
+def _read_local_story_files(story_dir: str) -> dict:
+    files = {}
+    if os.path.isdir(story_dir):
+        for name in os.listdir(story_dir):
+            path = os.path.join(story_dir, name)
+            if _is_synced_story_file(name) and os.path.isfile(path) and not os.path.islink(path):
+                with open(path, "r", encoding="utf-8") as handle:
+                    files[name] = handle.read()
+    return files
+
+
+def _read_postgres_story(uid: str, story_id: str):
+    import psycopg2
+    conn = psycopg2.connect(db_conn_str, connect_timeout=10)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT file_name, content, updated_at, title FROM user_stories
+                           WHERE uid = %s AND story_id = %s""", (uid, story_id))
+            rows = cur.fetchall()
+        files = {name: content for name, content, _, _ in rows if _is_synced_story_file(name)}
+        updated_at = max((float(row[2] or 0) for row in rows), default=0.0)
+        title = next((row[3] for row in rows if row[0] == "story.md" and row[3]), None)
+        return files, updated_at, title
+    finally:
+        conn.close()
+
+
+def _write_postgres_story(uid: str, story_id: str, files: dict, title: str = None, only_if_absent: bool = False):
+    """Commit a complete snapshot; serialize saves and legacy import for this story."""
+    import psycopg2
+    conn = psycopg2.connect(db_conn_str, connect_timeout=10)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))", (uid, story_id))
+            if only_if_absent:
+                cur.execute("SELECT 1 FROM user_stories WHERE uid = %s AND story_id = %s LIMIT 1", (uid, story_id))
+                if cur.fetchone():
+                    return None
+            sync_timestamp = time.time()
+            if not title:
+                title = next((line[2:].strip() for line in files.get("story.md", "").splitlines() if line.startswith("# ")), None)
+            for name, content in files.items():
+                cur.execute("""
+                    INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (uid, story_id, file_name)
+                    DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at,
+                                  title = COALESCE(EXCLUDED.title, user_stories.title)
+                """, (uid, story_id, name, content, sync_timestamp, title if name == "story.md" else None))
+            cur.execute("SELECT file_name FROM user_stories WHERE uid = %s AND story_id = %s", (uid, story_id))
+            stale_names = [row[0] for row in cur.fetchall() if row[0] not in files]
+            if stale_names:
+                cur.executemany("DELETE FROM user_stories WHERE uid = %s AND story_id = %s AND file_name = %s",
+                                [(uid, story_id, name) for name in stale_names])
+        conn.commit()
+        return sync_timestamp
+    finally:
+        conn.close()
+
+
+def _read_legacy_firestore_story(uid: str, story_id: str):
+    if not db_firestore:
+        return {}, 0.0, None
+    doc = db_firestore.collection("users").document(uid).collection("stories").document(story_id).get()
+    if not doc.exists:
+        return {}, 0.0, None
+    data = doc.to_dict() or {}
+    encoded = dict(data.get("files") or {})
+    # Older single-file saves used literal dotted keys in set(..., merge=True).
+    encoded.update({key[6:]: value for key, value in data.items() if key.startswith("files.")})
+    files = {}
+    for key, content in encoded.items():
+        name = key[:-5] + ".json" if key.endswith("_json") else key[:-3] + ".md" if key.endswith("_md") else key
+        if _is_synced_story_file(name):
+            files[name] = str(content)
+    return files, float(data.get("updated_at") or 0), data.get("title")
+
+
+def _restore_story_snapshot(uid: str, story_id: str, files: dict, updated_at: float, storage: str):
+    if not files:
+        return
+    story_dir = get_story_dir(story_id, uid=uid)
+    with get_story_lock(story_id, uid):
+        state = _story_sync_state(story_dir)
+        if state.get("pending_upload"):
+            return  # A failed save left newer local work; do not overwrite it.
+        missing = any(not os.path.isfile(os.path.join(story_dir, name)) for name in files)
+        if not missing and state.get("storage", "firestore") == storage and updated_at <= _story_sync_timestamp(story_dir):
+            return
+        for name, content in files.items():
+            _atomic_write_text(os.path.join(story_dir, name), content)
+        if storage == "postgres":
+            for name in os.listdir(story_dir):
+                path = os.path.join(story_dir, name)
+                if _is_synced_story_file(name) and name not in files and os.path.isfile(path):
+                    os.remove(path)
+        _write_story_sync_timestamp(story_dir, updated_at, storage)
+        print(f"[{storage.title()} Sync] Restored {len(files)} files for story {story_id}")
 
 
 def restore_story_directory_from_firestore(uid: str, story_id: str):
-    """Restore files when cloud state is newer than this local cache."""
+    """Load the configured primary store; import Firestore-only stories when absent."""
     if not uid or uid == "default_user":
         return
-        
-    # 1. Restore from Firestore
-    if db_firestore:
-        try:
-            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-            doc = doc_ref.get()
-            if doc.exists:
-                data = doc.to_dict() or {}
-                files = data.get("files", {})
-                if files:
-                    story_dir = get_story_dir(story_id, uid=uid)
-                    os.makedirs(story_dir, exist_ok=True)
-                    remote_updated_at = float(data.get("updated_at") or 0)
-                    if not os.path.exists(os.path.join(story_dir, "story.md")) or remote_updated_at > _story_sync_timestamp(story_dir):
-                        with get_story_lock(story_id, uid):
-                            for file_key, file_content in files.items():
-                                # basename guard: never let a stored key escape the story folder
-                                file_name = os.path.basename(file_key.replace("_json", ".json").replace("_md", ".md"))
-                                _atomic_write_text(os.path.join(story_dir, file_name), str(file_content))
-                                print(f"[Firestore Sync] Restored {file_name} for story {story_id}")
-                            _write_story_sync_timestamp(story_dir, remote_updated_at)
-        except Exception as e:
-            print(f"[Firestore Restore Error] {e}")
-            
-    # 2. Restore from Postgres
-    if postgres_active and db_conn_str:
-        try:
-            import psycopg2
-            conn = psycopg2.connect(db_conn_str)
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT file_name, content, updated_at FROM user_stories
-                    WHERE uid = %s AND story_id = %s
-                """, (uid, story_id))
-                rows = cur.fetchall()
-                if rows:
-                    story_dir = get_story_dir(story_id, uid=uid)
-                    os.makedirs(story_dir, exist_ok=True)
-                    remote_updated_at = max(float(row[2] or 0) for row in rows)
-                    if not os.path.exists(os.path.join(story_dir, "story.md")) or remote_updated_at > _story_sync_timestamp(story_dir):
-                        with get_story_lock(story_id, uid):
-                            for file_name, file_content, _updated_at in rows:
-                                file_name = os.path.basename(file_name)  # never escape the story folder
-                                _atomic_write_text(os.path.join(story_dir, file_name), str(file_content))
-                                print(f"[Postgres Sync] Restored {file_name} for story {story_id}")
-                            _write_story_sync_timestamp(story_dir, remote_updated_at)
-            conn.close()
-        except Exception as e:
-            print(f"[Postgres Restore Error] {e}")
-
-def sync_story_directory_to_firestore(uid: str, story_id: str):
-    """Sync all local files for a story to Firestore or Postgres."""
-    if not uid or uid == "default_user":
+    story_dir = get_story_dir(story_id, uid=uid, create=False)
+    local_exists = os.path.isfile(os.path.join(story_dir, "story.md"))
+    if local_exists and _story_sync_state(story_dir).get("pending_upload"):
         return
-        
-    # 1. Sync to Firestore
+    if db_conn_str:
+        # Configuration selects the authority even if the startup connection failed.
+        try:
+            files, updated_at, _ = _read_postgres_story(uid, story_id)
+            if files:
+                _restore_story_snapshot(uid, story_id, files, updated_at, "postgres")
+                return
+            if _story_sync_state(story_dir).get("storage") == "postgres":
+                return  # Never resurrect a removed primary story from legacy data.
+        except Exception as exc:
+            print(f"[Postgres Restore Error] {exc}")
+            if not local_exists:
+                raise HTTPException(status_code=503, detail="Story storage is temporarily unavailable. Please try again.") from exc
+            return
+        # Only a successful empty Postgres result permits legacy migration.
+        try:
+            files, _, title = _read_legacy_firestore_story(uid, story_id)
+            if files:
+                _write_postgres_story(uid, story_id, files, title=title, only_if_absent=True)
+                files, updated_at, _ = _read_postgres_story(uid, story_id)
+                _restore_story_snapshot(uid, story_id, files, updated_at, "postgres")
+                print(f"[Postgres Migration] Imported legacy story {story_id}")
+        except Exception as exc:
+            print(f"[Story Migration Error] {exc}")
+            if not local_exists:
+                raise HTTPException(status_code=503, detail="Could not load this legacy story. Please try again.") from exc
+        return
     if db_firestore:
         try:
-            story_dir = get_story_dir(story_id, uid=uid)
-            if os.path.exists(story_dir):
-                files_payload = {}
-                for name in os.listdir(story_dir):
-                    if name.endswith(".md") or name.endswith(".json"):
-                        if name.startswith("temp_") or name in {"pending_retry.json", SYNC_META_FILE} or name.endswith(".wav") or name.endswith(".mp3"):
-                            continue
-                        file_path = os.path.join(story_dir, name)
-                        if os.path.isfile(file_path):
-                            with open(file_path, "r", encoding="utf-8") as f:
-                                file_content = f.read()
-                            file_key = name.replace(".json", "_json").replace(".md", "_md")
-                            files_payload[file_key] = file_content
-                            
-                if files_payload:
-                    doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-                    sync_timestamp = time.time()
-                    cloud_payload = {
-                        "updated_at": sync_timestamp,
-                        "files": files_payload
-                    }
-                    # update() replaces the entire files map, so files removed by
-                    # undo do not survive forever in cloud storage and reappear on
-                    # a fresh instance. Fall back to set() for a brand-new doc.
-                    existing_doc = doc_ref.get()
-                    if existing_doc.exists:
-                        doc_ref.update(cloud_payload)
-                    else:
-                        doc_ref.set(cloud_payload)
-                    _write_story_sync_timestamp(story_dir, sync_timestamp)
-                    print(f"[Firestore Sync] Saved {len(files_payload)} files for story {story_id}")
-        except Exception as e:
-            print(f"[Firestore Sync Error] {e}")
-            
-    # 2. Sync to Postgres
-    if postgres_active and db_conn_str:
-        try:
-            import psycopg2
-            story_dir = get_story_dir(story_id, uid=uid)
-            if os.path.exists(story_dir):
-                conn = psycopg2.connect(db_conn_str)
-                try:
-                    sync_timestamp = time.time()
-                    saved_file_count = 0
-                    saved_file_names = set()
-                    with conn.cursor() as cur:
-                        for name in os.listdir(story_dir):
-                            if not (name.endswith(".md") or name.endswith(".json")):
-                                continue
-                            if name.startswith("temp_") or name in {"pending_retry.json", SYNC_META_FILE} or name.endswith(".wav") or name.endswith(".mp3"):
-                                continue
-                            file_path = os.path.join(story_dir, name)
-                            if not os.path.isfile(file_path):
-                                continue
-                            with open(file_path, "r", encoding="utf-8") as handle:
-                                file_content = handle.read()
+            files, updated_at, _ = _read_legacy_firestore_story(uid, story_id)
+            if files:
+                _restore_story_snapshot(uid, story_id, files, updated_at, "firestore")
+        except Exception as exc:
+            print(f"[Firestore Restore Error] {exc}")
 
-                            title = None
-                            if name == "story.md":
-                                for line in file_content.split("\n"):
-                                    if line.startswith("# "):
-                                        title = line[2:].strip()
-                                        break
 
-                            cur.execute("""
-                                INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
-                                VALUES (%s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (uid, story_id, file_name)
-                                DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at, title = COALESCE(EXCLUDED.title, user_stories.title)
-                            """, (uid, story_id, name, file_content, sync_timestamp, title))
-                            saved_file_count += 1
-                            saved_file_names.add(name)
-
-                        cur.execute(
-                            "SELECT file_name FROM user_stories WHERE uid = %s AND story_id = %s",
-                            (uid, story_id),
-                        )
-                        stale_file_names = [row[0] for row in cur.fetchall() if row[0] not in saved_file_names]
-                        if stale_file_names:
-                            cur.executemany(
-                                "DELETE FROM user_stories WHERE uid = %s AND story_id = %s AND file_name = %s",
-                                [(uid, story_id, name) for name in stale_file_names],
-                            )
-                        conn.commit()
-                finally:
-                    conn.close()
-                if saved_file_count:
-                    _write_story_sync_timestamp(story_dir, sync_timestamp)
-                    print(f"[Postgres Sync] Saved {saved_file_count} files for story {story_id}")
-        except Exception as e:
-            print(f"[Postgres Sync Error] {e}")
+def sync_story_directory_to_firestore(uid: str, story_id: str, title: str = None):
+    """Save story files to Postgres when configured, otherwise to legacy Firestore."""
+    if not uid or uid == "default_user" or not (db_conn_str or db_firestore):
+        return
+    story_dir = get_story_dir(story_id, uid=uid, create=False)
+    storage = "postgres" if db_conn_str else "firestore"
+    try:
+        with get_story_lock(story_id, uid):
+            files = _read_local_story_files(story_dir)
+            if not files:
+                return
+            state = _story_sync_state(story_dir)
+            state["pending_upload"] = True
+            _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), state)
+            if db_conn_str:
+                sync_timestamp = _write_postgres_story(uid, story_id, files, title=title)
+            else:
+                doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
+                sync_timestamp = time.time()
+                payload = {"updated_at": sync_timestamp,
+                           "files": {name.replace(".json", "_json").replace(".md", "_md"): text for name, text in files.items()}}
+                if title:
+                    payload["title"] = title
+                if doc_ref.get().exists:
+                    doc_ref.update(payload)
+                else:
+                    doc_ref.set(payload)
+            _write_story_sync_timestamp(story_dir, sync_timestamp, storage)
+        print(f"[{storage.title()} Sync] Saved {len(files)} files for story {story_id}")
+        return True
+    except Exception as exc:
+        print(f"[{storage.title()} Sync Error] {exc}")
+        return False
 
 
 def get_story_from_firestore(uid: str, story_id: str, file_name: str) -> str:
-    """Read a specific file content from Firestore under users/{uid}/stories/{story_id}"""
-    if db_firestore and uid and uid != "default_user":
-        try:
-            doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
-            doc = doc_ref.get()
-            if doc.exists:
-                data = doc.to_dict() or {}
-                files = data.get("files", {})
-                return files.get(file_name.replace('.', '_'), "")
-        except Exception as e:
-            print(f"[Firestore Read Error] {e}")
+    """Legacy entry point: read from the configured primary store through its cache."""
+    if not uid or uid == "default_user" or not _is_synced_story_file(file_name):
+        return ""
+    restore_story_directory_from_firestore(uid, story_id)
+    path = os.path.join(get_story_dir(story_id, uid=uid, create=False), file_name)
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
     return ""
+
 
 def list_user_stories_firestore(uid: str) -> list:
     """List all stories for a specific user UID from Firestore"""
@@ -2963,7 +2998,7 @@ def _story_dir_size(story_dir: str) -> int:
 
 @app.get("/stories")
 async def list_stories(user_id: str = Depends(get_current_user_id)):
-    """List stories belonging specifically to the authenticated user (merges local disk and Firestore)."""
+    """List cached and Postgres stories, followed by Firestore-only legacy stories."""
     print(f"[Stories Route] Listing stories for user_id: {user_id}")
     stories = []
     seen_ids = set()
@@ -2987,28 +3022,17 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                 })
                 seen_ids.add(name)
 
-    # 2. Merge Firestore stories if active
-    if db_firestore and user_id != "default_user":
-        fs_stories = list_user_stories_firestore(user_id)
-        for s in fs_stories:
-            if s["id"] not in seen_ids:
-                stories.append({
-                    "id": s["id"],
-                    "name": s.get("title", s["id"].replace("-", " ").title()),
-                    "size": s.get("size", 0),
-                    "modified": s.get("updated_at", 0)
-                })
-                seen_ids.add(s["id"])
-
-    # 2.5. Merge Postgres stories if active
-    if postgres_active and user_id != "default_user":
+    postgres_listing_ready = True
+    # Postgres owns story metadata; merge legacy-only IDs afterward.
+    if db_conn_str and user_id != "default_user":
+        conn = None
         try:
             import psycopg2
-            conn = psycopg2.connect(db_conn_str)
+            conn = psycopg2.connect(db_conn_str, connect_timeout=10)
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT story_id, MAX(title) as title, MAX(updated_at) as updated_at,
-                           SUM(LENGTH(content)) as size
+                           SUM(OCTET_LENGTH(content)) as size
                     FROM user_stories
                     WHERE uid = %s
                     GROUP BY story_id
@@ -3023,9 +3047,27 @@ async def list_stories(user_id: str = Depends(get_current_user_id)):
                             "modified": updated_at
                         })
                         seen_ids.add(story_id)
-            conn.close()
         except Exception as e:
+            postgres_listing_ready = False
             print(f"[Postgres List Error] {e}")
+            if not stories:
+                raise HTTPException(status_code=503, detail="Story storage is temporarily unavailable. Please try again.") from e
+        finally:
+            if conn is not None:
+                conn.close()
+
+    # 2. Merge Firestore stories if active
+    if db_firestore and user_id != "default_user" and postgres_listing_ready:
+        fs_stories = list_user_stories_firestore(user_id)
+        for s in fs_stories:
+            if s["id"] not in seen_ids:
+                stories.append({
+                    "id": s["id"],
+                    "name": s.get("title", s["id"].replace("-", " ").title()),
+                    "size": s.get("size", 0),
+                    "modified": s.get("updated_at", 0)
+                })
+                seen_ids.add(s["id"])
 
     # Only show root unassigned stories if user is NOT logged in (default_user)
     if safe_uid == "default_user" and os.path.exists(STORIES_DIR):
@@ -3054,12 +3096,13 @@ class CreateStoryInput(BaseModel):
 
 @app.post("/stories/create")
 async def create_story(input_data: CreateStoryInput, user_info: dict = Depends(require_authenticated_user)):
-    """Create a new story locally and sync metadata to Firestore."""
+    """Create a story locally and save its complete initial snapshot to the primary store."""
     user_id = user_info["uid"]
     safe_id = sanitize_id(input_data.name)
     if not any(c.isascii() and c.isalnum() for c in input_data.name):
         raise HTTPException(status_code=422, detail="Story name must contain at least one ASCII letter or number")
 
+    restore_story_directory_from_firestore(user_id, safe_id)
     with get_story_lock(safe_id, user_id):
         story_dir = get_story_dir(safe_id, uid=user_id, create=False)
         if os.path.exists(story_dir):
@@ -3070,7 +3113,7 @@ async def create_story(input_data: CreateStoryInput, user_info: dict = Depends(r
         for cat in ELEMENT_CATEGORIES:
             _atomic_write_text(get_element_path(safe_id, cat, uid=user_id), f"## {cat.title()}\n")
 
-    # Sync to Firestore if active. Title is user input — strip HTML so a crafted name
+    # Sync to the primary store. Title is user input — strip HTML so a crafted name
     # can't become stored XSS in the story list.
     safe_title = re.sub(r"<[^>]*>", "", input_data.name or "").strip() or safe_id
     save_story_to_firestore(user_id, safe_id, "story.md", "", safe_title)
@@ -3114,8 +3157,8 @@ async def delete_story(story_id: str, user_info: dict = Depends(require_authenti
         except Exception as e:
             print(f"[Firestore Delete Error] {e}")
             
-    # 3. Delete from Postgres if active
-    if postgres_active and user_id != "default_user":
+    # 3. Delete from Postgres when configured
+    if db_conn_str and user_id != "default_user":
         try:
             import psycopg2
             conn = psycopg2.connect(db_conn_str)
