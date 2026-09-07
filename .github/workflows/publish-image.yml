@@ -1,0 +1,101 @@
+name: Build Story Weaver image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/publish-image.yml
+      - requirements.txt
+      - main.py
+      - openai_compat.py
+      - regeneration.py
+      - static/index.html
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: story-weaver-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - name: Check out the committed application
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build the deployment image
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            --tag "${IMAGE}:${REVISION}" \
+            --tag "${IMAGE}:main" .
+
+      - name: Check startup, liveness, static page, and guest access
+        run: |
+          docker run --detach --name story-weaver-smoke \
+            --publish 127.0.0.1:8000:8000 "${IMAGE}:${REVISION}"
+          trap 'docker logs story-weaver-smoke; docker rm -f story-weaver-smoke' EXIT
+          python - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = "http://127.0.0.1:8000"
+          for attempt in range(60):
+              try:
+                  with urllib.request.urlopen(base + "/ping", timeout=2) as response:
+                      assert response.status == 200
+                      assert response.read() == b"OK"
+                  break
+              except (OSError, AssertionError):
+                  time.sleep(1)
+          else:
+              raise SystemExit("Container did not become healthy within 60 attempts")
+
+          with urllib.request.urlopen(base + "/", timeout=5) as response:
+              assert response.status == 200
+              assert b"Story Weaver" in response.read()
+          with urllib.request.urlopen(base + "/openapi.json", timeout=5) as response:
+              assert "/stories/create" in json.load(response)["paths"]
+
+          request = urllib.request.Request(
+              base + "/stories/create", data=b'{"name":"image-smoke"}',
+              headers={"Content-Type": "application/json"}, method="POST",
+          )
+          try:
+              urllib.request.urlopen(request, timeout=5)
+          except urllib.error.HTTPError as error:
+              assert error.code == 403, error.code
+          else:
+              raise AssertionError("A deployed container must reject guest story creation")
+          print("Container startup, /ping, homepage, OpenAPI, and guest protection passed")
+          PY
+
+      - name: Sign in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish the verified image
+        run: |
+          docker push "${IMAGE}:${REVISION}"
+          docker push "${IMAGE}:main"
+          printf 'Image: `%s:%s`\n\nMoving main tag: `%s:main`\n' \
+            "$IMAGE" "$REVISION" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
