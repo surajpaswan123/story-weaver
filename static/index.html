@@ -970,7 +970,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     </div>
                 </div>
 
-                <!-- Story Files Tab: view + hand-edit every .md the AI reads as context -->
+                <!-- Story Files Tab: edit story context and chat_log.json -->
                 <div id="tab-files" class="flex-1 p-5 overflow-y-auto hidden thin-scroll" role="tabpanel"
                     aria-label="Story files" tabindex="-1">
                     <div class="max-w-3xl mx-auto">
@@ -981,9 +981,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                                 Refresh list</button>
                         </div>
                         <p class="text-xs text-stone-400 mb-4">
-                            Every file the AI reads as context before it writes. Editing one changes what the
-                            story model believes on the next generation. AI-maintained files are rewritten by the
-                            continuity pass after each turn, so your edit lasts until that file next changes.
+                            Edit the Markdown files the AI reads as story context, or open Chat history — chat_log.json
+                            to edit the transcript and saved Model thoughts. AI-maintained context files may change
+                            during the continuity pass after each turn.
                         </p>
 
                         <!-- File list -->
@@ -1015,7 +1015,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             <textarea id="file-textarea"
                                 class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-y bg-white text-sm story-font leading-relaxed"
                                 rows="22" spellcheck="false"
-                                aria-label="File contents, editable"></textarea>
+                                aria-label="File contents, editable" aria-describedby="file-editor-desc"></textarea>
                             <div id="file-status" class="text-xs text-stone-400 mt-1 text-center" role="status" aria-live="polite"></div>
                         </div>
                     </div>
@@ -1890,10 +1890,10 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         // ===== STORY FILES PANEL =====
-        // Lists every .md in the story folder, opens one in a textarea, saves it back.
-        // These are the exact files the AI reads as context each turn.
+        // Edit Markdown context files and the raw chat transcript in a textarea.
         let openFileName = null;      // filename currently in the editor
-        let openFileOwner = null;     // 'user' | 'ai'
+        let openFileStoryId = null;  // keep edits tied to the story that was opened
+        let openFileOwner = null;     // 'user' | 'ai' | 'app'
         let openFileOriginal = '';    // last-saved text, for the dirty check
 
         function fileStatus(msg) {
@@ -1904,6 +1904,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         function fileEditorIsDirty() {
             if (!openFileName) return false;
             return document.getElementById('file-textarea').value !== openFileOriginal;
+        }
+
+        function fileOwnerText(owner, detailed = false) {
+            if (owner === 'app') return detailed ? 'Transcript — updated when turns are added, edited, or removed' : 'Transcript';
+            if (owner === 'user') return detailed ? 'yours — the pipeline never rewrites this file' : 'yours';
+            return detailed ? 'AI-maintained — the continuity pass may change this after a turn' : 'AI-maintained';
         }
 
         async function loadFileList() {
@@ -1944,7 +1950,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                     const meta = document.createElement('p');
                     meta.className = 'text-xs text-stone-400 mt-0.5';
-                    const ownerText = f.owner === 'user' ? 'yours' : 'AI-maintained';
+                    const ownerText = fileOwnerText(f.owner);
                     meta.textContent = f.empty
                         ? `empty · ${ownerText}`
                         : `${f.lines.toLocaleString()} lines · ${f.chars.toLocaleString()} characters · ${ownerText}`;
@@ -1977,14 +1983,17 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 );
                 if (!ok) return;
             }
+            const storyId = currentStoryId;
             try {
                 fileStatus('Loading…');
                 const res = await authFetch(
-                    `/story/${encodeURIComponent(currentStoryId)}/file/${encodeURIComponent(name)}`
+                    `/story/${encodeURIComponent(storyId)}/file/${encodeURIComponent(name)}`
                 );
                 const data = await requireJsonResponse(res, `Failed to open ${name}`);
+                if (storyId !== currentStoryId) return;
 
                 openFileName = data.name;
+                openFileStoryId = storyId;
                 openFileOwner = data.owner;
                 openFileOriginal = data.text || '';
 
@@ -1998,13 +2007,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 document.getElementById('file-editor-desc').textContent = data.description || '';
                 document.getElementById('file-editor-meta').textContent =
                     `${data.lines.toLocaleString()} lines · ${data.chars.toLocaleString()} characters · ` +
-                    (data.owner === 'user'
-                        ? 'yours — the pipeline never rewrites this file'
-                        : 'AI-maintained — the continuity pass may change this after a turn');
+                    fileOwnerText(data.owner, true);
 
-                // story.md is the manuscript; deleting it here would orphan the chat log.
+                // Keep manuscript and transcript deletion in the turn controls.
                 const delBtn = document.getElementById('file-delete-btn');
-                delBtn.classList.toggle('hidden', data.name === 'story.md');
+                delBtn.classList.toggle('hidden', data.name === 'story.md' || data.name === 'chat_log.json');
 
                 wrap.classList.remove('hidden');
                 fileStatus('');
@@ -2023,28 +2030,35 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function saveOpenFile() {
             if (!openFileName) return;
+            if (openFileStoryId !== currentStoryId) {
+                fileStatus('The selected story changed. Open the file from that story before saving.');
+                return;
+            }
+            const name = openFileName;
+            const storyId = openFileStoryId;
             const text = document.getElementById('file-textarea').value;
+            const body = { text };
+            if (name === 'chat_log.json') body.expected_text = openFileOriginal;
             const saveBtn = document.getElementById('file-save-btn');
             if (saveBtn.disabled) return;   // a save is already in flight
             saveBtn.disabled = true;
             try {
                 fileStatus('Saving…');
                 const res = await authFetch(
-                    `/story/${encodeURIComponent(currentStoryId)}/file/${encodeURIComponent(openFileName)}`,
+                    `/story/${encodeURIComponent(storyId)}/file/${encodeURIComponent(name)}`,
                     {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: text }),
+                        body: JSON.stringify(body),
                     }
                 );
                 const data = await requireJsonResponse(res, `Failed to save ${openFileName}`);
+                if (currentStoryId !== storyId || openFileName !== name || openFileStoryId !== storyId) return;
                 openFileOriginal = text;
                 fileStatus(`Saved — ${data.lines.toLocaleString()} lines, ${data.chars.toLocaleString()} characters.`);
                 document.getElementById('file-editor-meta').textContent =
                     `${data.lines.toLocaleString()} lines · ${data.chars.toLocaleString()} characters · ` +
-                    (openFileOwner === 'user'
-                        ? 'yours — the pipeline never rewrites this file'
-                        : 'AI-maintained — the continuity pass may change this after a turn');
+                    fileOwnerText(openFileOwner, true);
                 announceToScreenReader(`${openFileName} saved. ${data.lines} lines.`);
                 loadFileList();
                 // Keep the tabs that mirror specific files in sync.
@@ -2052,6 +2066,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 if (openFileName === 'style.md') loadStyle();
                 if (openFileName === 'summary.md') loadSummary();
                 if (openFileName === 'consistency.md') loadConsistency();
+                if (openFileName === 'chat_log.json') await loadStory();
             } catch (err) {
                 console.error('Failed to save file:', err);
                 fileStatus(`Could not save: ${err.message}`);

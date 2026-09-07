@@ -92,12 +92,26 @@ failure, so Retry after a reload keeps the same revision instructions. The
 feature supports hosted text generation and browser-direct local text models.
 As with ordinary Regenerate, it replaces the latest completed turn.
 
+## Edit chat history
+
+In **Story Files**, open **Chat history — chat_log.json**, edit the JSON, and choose
+**Save file**. The transcript refreshes after saving. Entries require a `role` of
+`user` or `ai` and a string `text`; `model`, `time`, and `model_thoughts` must be
+strings when present. Other metadata and the original JSON formatting are preserved.
+Invalid JSON shows a line and column error without replacing the saved history.
+An edit opened before a newer turn was saved must be reloaded before saving.
+
+This edits the transcript independently of `story.md` and reference files. When
+changing AI response text, edit its matching text in `story.md` as well so Undo
+and Regenerate can still locate the response. Generation must finish before the
+chat history can be saved.
+
 ## Tests
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend.cjs
+node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend.cjs tests/test_chat_log_frontend.cjs
 ```
 
 ## Hosted deployment

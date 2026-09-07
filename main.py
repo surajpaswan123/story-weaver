@@ -3286,8 +3286,8 @@ async def get_consistency(story_id: str, user_id: str = Depends(get_current_user
         return {"text": f.read()}
 
 # --- Raw Story File Browser / Editor -------------------------------------------------
-# Lets the user list, read, and hand-edit every .md file in a story folder. These are
-# the same files the AI reads as context every turn (see STORY_FILES_MANIFEST), so a
+# Lets the user edit chat_log.json and every .md file in a story folder. The Markdown
+# files provide context every turn (see STORY_FILES_MANIFEST), so a
 # manual fix here changes what the story model believes on the very next generation.
 
 # Human-readable labels + ownership for the file panel. "user" files are authored by
@@ -3296,6 +3296,7 @@ async def get_consistency(story_id: str, user_id: str = Depends(get_current_user
 # appends to the file).
 STORY_FILE_INFO = {
     "story.md":       ("Manuscript", "The complete story text, in order.", "ai"),
+    "chat_log.json":  ("Chat history", 'The turn-by-turn transcript, including model_thoughts. Use a JSON array of entries with role "user" or "ai" and a text string. This edits chat history only; story.md and reference files stay separate. If you change AI response text, update the matching text in story.md too so Undo and Regenerate can locate it.', "app"),
     "rules.md":       ("World Rules", "Hard law for this world. Outranks everything.", "user"),
     "style.md":       ("Style Guide", "Voice, tense, person, pacing.", "user"),
     "characters.md":  ("Characters", "Cast sheet: name + stable physical description.", "ai"),
@@ -3316,15 +3317,15 @@ _STORY_FILENAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]{0,60}\.md$')
 
 
 def _resolve_story_file(story_id: str, filename: str, uid: str, create_dir: bool = False) -> str:
-    """Validate a user-supplied .md filename and resolve it inside the story folder.
+    """Validate a Markdown filename or chat_log.json inside the story folder.
 
-    Two independent checks: the name must match _STORY_FILENAME_RE (so it cannot
-    contain a separator at all), and the realpath must still sit under the story
+    Two independent checks: the name must be chat_log.json or match the Markdown
+    pattern (neither allows separators), and the realpath must sit under the story
     directory (catches symlinks and any regex gap).
     """
     name = (filename or "").strip()
-    if not _STORY_FILENAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Filename must be a simple .md name, e.g. characters.md")
+    if name != "chat_log.json" and not _STORY_FILENAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Filename must be chat_log.json or a simple .md name, e.g. characters.md")
     if name.rsplit(".", 1)[0].casefold() in WINDOWS_RESERVED_NAMES:
         raise HTTPException(status_code=400, detail="That filename is reserved by the operating system")
 
@@ -3350,13 +3351,13 @@ def _story_file_meta(name: str) -> dict:
 
 @app.get("/story/{story_id}/files")
 async def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id)):
-    """List every .md file in this story's folder, with size and line count."""
+    """List Markdown files and chat_log.json, with size and line count."""
     restore_story_directory_from_firestore(user_id, story_id)
     story_dir = get_story_dir(story_id, uid=user_id, create=False)
     files = []
     if os.path.isdir(story_dir):
         for name in os.listdir(story_dir):
-            if not name.endswith(".md"):
+            if not name.endswith(".md") and name != "chat_log.json":
                 continue
             full = os.path.join(story_dir, name)
             if not os.path.isfile(full):
@@ -3386,7 +3387,7 @@ async def list_story_files(story_id: str, user_id: str = Depends(get_current_use
 
 @app.get("/story/{story_id}/file/{filename}")
 async def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_current_user_id)):
-    """Read one .md file from the story folder verbatim."""
+    """Read one editable story file verbatim."""
     restore_story_directory_from_firestore(user_id, story_id)
     target = _resolve_story_file(story_id, filename, user_id)
     if not os.path.isfile(target):
@@ -3407,6 +3408,28 @@ async def read_story_file(story_id: str, filename: str, user_id: str = Depends(g
 
 class StoryFileInput(BaseModel):
     text: str = Field(max_length=2_000_000)
+    expected_text: Optional[str] = Field(default=None, max_length=2_000_000)
+
+
+def validate_chat_log_edit(text: str) -> None:
+    """Reject malformed transcript edits before replacing the saved file."""
+    def reject_constant(value):
+        raise ValueError(f"{value} is not a JSON value")
+
+    try:
+        entries = json.loads(text, parse_constant=reject_constant)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid chat JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(status_code=422, detail="Chat history must contain valid JSON without excessive nesting.") from exc
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=422, detail="Chat history must be a JSON array of entries.")
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict) or entry.get("role") not in ("user", "ai") or not isinstance(entry.get("text"), str):
+            raise HTTPException(status_code=422, detail=f'Chat entry {index} must have role "user" or "ai" and a text string.')
+        for field in ("model", "time", "model_thoughts"):
+            if field in entry and not isinstance(entry[field], str):
+                raise HTTPException(status_code=422, detail=f"Chat entry {index}: {field} must be a string.")
 
 
 @app.put("/story/{story_id}/file/{filename}")
@@ -3416,7 +3439,7 @@ async def write_story_file(
     input_data: StoryFileInput,
     user_info: dict = Depends(require_authenticated_user),
 ):
-    """Overwrite one .md file in the story folder with user-supplied text.
+    """Overwrite one editable story file with validated user-supplied text.
 
     Refuses while a generation is in flight, because the worker holds the story
     text in memory and would clobber the edit when it commits its turn.
@@ -3432,8 +3455,19 @@ async def write_story_file(
     name = os.path.basename(target)
 
     existed = os.path.isfile(target)
-    cleaned = clean_text(input_data.text)
+    if name == "chat_log.json":
+        validate_chat_log_edit(input_data.text)
+        cleaned = input_data.text
+    else:
+        cleaned = clean_text(input_data.text)
     with get_story_lock(story_id, user_id):
+        if name == "chat_log.json" and input_data.expected_text is not None:
+            current = ""
+            if os.path.isfile(target):
+                with open(target, "r", encoding="utf-8") as handle:
+                    current = handle.read()
+            if current != input_data.expected_text:
+                raise HTTPException(status_code=409, detail="Chat history changed since you opened it. Reload the file and apply your edit to the latest history.")
         _atomic_write_text(target, cleaned)
     sync_story_directory_to_firestore(user_id, story_id)
     print(f"[Files] {'Updated' if existed else 'Created'} {name} for story {story_id} ({len(cleaned)} chars)")
@@ -3452,7 +3486,7 @@ async def delete_story_file(
     filename: str,
     user_info: dict = Depends(require_authenticated_user),
 ):
-    """Delete one .md file. story.md is refused - use the turn-delete controls instead."""
+    """Delete a reference file; manuscript and chat history use turn-delete controls."""
     user_id = user_info["uid"]
     if story_turn_is_active(story_id, user_id):
         raise HTTPException(
@@ -3462,10 +3496,10 @@ async def delete_story_file(
     restore_story_directory_from_firestore(user_id, story_id)
     target = _resolve_story_file(story_id, filename, user_id)
     name = os.path.basename(target)
-    if name == "story.md":
+    if name in ("story.md", "chat_log.json"):
         raise HTTPException(
             status_code=400,
-            detail="story.md cannot be deleted here. Use the delete-turn controls on the Story tab.",
+            detail=f"{name} cannot be deleted here. Use the delete-turn controls on the Story tab.",
         )
     if not os.path.isfile(target):
         raise HTTPException(status_code=404, detail=f"{name} does not exist in this story")
