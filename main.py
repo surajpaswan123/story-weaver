@@ -72,6 +72,8 @@ import ipaddress
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
+from regeneration import (FeedbackUndoInput, RegenerationContext, extract_model_thoughts,
+                          without_model_thoughts, with_regeneration_feedback)
 
 load_dotenv()
 
@@ -2188,6 +2190,7 @@ class StoryInput(BaseModel):
     skip_rules_check: bool = False
     provider: Optional[str] = Field(default=None, max_length=100)
     model: Optional[str] = Field(default=None, max_length=300)
+    regeneration: Optional[RegenerationContext] = None
 
 def sanitize_filename(name: str, default: str = "uploaded_audio") -> str:
     """Keep uploads inside the story folder and strip unsafe Windows filename characters."""
@@ -2218,8 +2221,7 @@ def strip_thought_tags(text: str, filter_reasoning_lines: bool = True) -> str:
     'Let me...' are legitimate first-person narrative and must never be dropped."""
     import re as _re
     # 1. Remove XML-tagged thinking blocks
-    cleaned = _re.sub(r'<thought>.*?</thought>', '', text, flags=_re.DOTALL)
-    cleaned = _re.sub(r'<think>.*?</think>', '', cleaned, flags=_re.DOTALL)
+    cleaned = without_model_thoughts(text)
     
     if not filter_reasoning_lines:
         return cleaned.strip()
@@ -2593,7 +2595,7 @@ def get_consistency_path(story_id: str, uid: str = "default_user", create: bool 
 def get_chat_log_path(story_id: str, uid: str = "default_user", create: bool = True):
     return os.path.join(get_story_dir(story_id, uid=uid, create=create), "chat_log.json")
 
-def commit_ai_turn(story_id: str, text: str, model: str = "", uid: str = "default_user") -> str:
+def commit_ai_turn(story_id: str, text: str, model: str = "", uid: str = "default_user", model_thoughts: str = "") -> str:
     """Commit story text and its AI chat entry as one rollback-safe operation."""
     with get_story_lock(story_id, uid):
         story_path = get_story_path(story_id, uid=uid)
@@ -2613,13 +2615,15 @@ def commit_ai_turn(story_id: str, text: str, model: str = "", uid: str = "defaul
             except (OSError, json.JSONDecodeError):
                 entries = []
 
-        cleaned_text = clean_text(text)
+        saved_thoughts = clean_text(model_thoughts or extract_model_thoughts(text))
+        cleaned_text = clean_text(without_model_thoughts(text))
         updated_story = original_story + ("\n\n" if original_story else "") + cleaned_text
         entries.append({
             "role": "ai",
             "text": cleaned_text,
             "model": model,
             "time": time.strftime("%H:%M"),
+            "model_thoughts": saved_thoughts,
         })
 
         _atomic_write_text(story_path, updated_story)
@@ -2696,15 +2700,18 @@ def get_pending_retry_path(story_id: str, uid: str = "default_user") -> str:
     return os.path.join(get_story_dir(story_id, uid=uid, create=False), "pending_retry.json")
 
 
-def write_pending_retry(story_id: str, uid: str, prompt: str, error: str):
+def write_pending_retry(story_id: str, uid: str, prompt: str, error: str, regeneration: RegenerationContext = None):
     """Remember a failed generation so the UI can offer a Retry button even
     after a page reload. Cleared on the next successful turn."""
     try:
-        _atomic_write_json(get_pending_retry_path(story_id, uid=uid), {
+        data = {
             "prompt": prompt,
             "error": (error or "Generation failed.")[:500],
             "time": time.strftime("%H:%M"),
-        })
+        }
+        if regeneration is not None:
+            data["regeneration"] = regeneration.model_dump()
+        _atomic_write_json(get_pending_retry_path(story_id, uid=uid), data)
     except Exception as e:
         print(f"  Could not write pending_retry.json: {e}")
 
@@ -7031,7 +7038,7 @@ async def delete_turn(story_id: str, body: dict, user_info: dict = Depends(requi
     }
 
 @app.post("/story/{story_id}/undo")
-async def undo_last(story_id: str, user_info: dict = Depends(require_authenticated_user)):
+async def undo_last(story_id: str, user_info: dict = Depends(require_authenticated_user), feedback_input: Optional[FeedbackUndoInput] = None):
     """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
     user_id = user_info["uid"]
     if story_turn_is_active(story_id, user_id):
@@ -7062,6 +7069,8 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
     # AI+user pair instead, orphaning the failed prompt and leaving the story
     # display with a lone 'You said:' heading and no AI reply.
     if entries[-1].get("role") == "user":
+        if feedback_input is not None:
+            raise HTTPException(status_code=409, detail="The latest prompt has no completed response to regenerate.")
         dangling = entries.pop()
         try:
             _atomic_write_json(chat_path, entries)
@@ -7081,6 +7090,18 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
         raise HTTPException(status_code=400, detail="No AI response to undo")
 
     ai_text = entries[last_ai_idx]["text"]
+    model_thoughts = entries[last_ai_idx].get("model_thoughts", "") or extract_model_thoughts(ai_text)
+    regeneration = None
+    if feedback_input is not None:
+        # Validate before undo mutates any files, including legacy thought-tagged turns.
+        try:
+            regeneration = RegenerationContext(
+                turn_to_replace=without_model_thoughts(ai_text),
+                model_thoughts=model_thoughts,
+                feedback=feedback_input.feedback,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="This turn is too large or has no visible text to regenerate with feedback.") from exc
 
     # Find the user entry right before it
     restored_prompt = ""
@@ -7090,6 +7111,9 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
             last_user_idx = i
             restored_prompt = entries[i]["text"]
             break
+
+    if feedback_input is not None and not restored_prompt.strip():
+        raise HTTPException(status_code=400, detail="This turn has no original user prompt to regenerate.")
 
     # 2. Remove the AI text from the end of story.md
     with open(story_path, "r", encoding="utf-8") as f:
@@ -7131,9 +7155,14 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
 
     # Turn count is derived from chat_log.json each time (get_turn_count), which we just
     # trimmed above - no manual counter to decrement anymore.
+    if regeneration is not None:
+        write_pending_retry(story_id, user_id, restored_prompt, "Regeneration with feedback is ready to run.", regeneration)
     sync_story_directory_to_firestore(user_id, story_id)
 
-    return {"removed_text": ai_text_clean, "restored_prompt": restored_prompt}
+    result = {"removed_text": ai_text_clean, "restored_prompt": restored_prompt, "model_thoughts": model_thoughts}
+    if regeneration is not None:
+        result["regeneration"] = regeneration.model_dump()
+    return result
 
 
 @app.post("/story/{story_id}/retry")
@@ -7148,7 +7177,10 @@ async def retry_failed_prompt(story_id: str, user_info: dict = Depends(require_a
     if not data or not data.get("prompt"):
         raise HTTPException(status_code=404, detail="No failed prompt to retry")
     sync_story_directory_to_firestore(user_id, story_id)
-    return {"prompt": data["prompt"], "error": data.get("error", "")}
+    result = {"prompt": data["prompt"], "error": data.get("error", "")}
+    if data.get("regeneration"):
+        result["regeneration"] = data["regeneration"]
+    return result
 
 # ===== AUDIO UPLOAD ENDPOINT =====
 from fastapi import File, UploadFile, Form
@@ -7319,6 +7351,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
 
     def _audio_worker():
         full_response = ""
+        model_thoughts = ""
         model_used_ref = ""
         media_analysis = ""
         try:
@@ -7444,6 +7477,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 return
 
             # Strip thinking tags before saving (frontend already parsed them)
+            model_thoughts = extract_model_thoughts(full_response)
             full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
             full_response, cleanup_notes = _clean_generated_story_text(full_response)
             for note in cleanup_notes:
@@ -7474,6 +7508,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             full_response += fresh_text
                             for _tb in _thought_blocks(fresh_text):
                                 yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                    model_thoughts = extract_model_thoughts(full_response)
                     full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
                     for note in cleanup_notes:
@@ -7524,7 +7559,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
-            commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id)
+            commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
             yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
 
             # Save to audio_log.md — use Model 1's OBJECTIVE analysis, not story text
@@ -7585,7 +7620,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 # reader already saw instead of losing the whole story.
                 print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
                 try:
-                    commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id)
+                    commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
                     clear_pending_retry(story_id, uid=user_id)
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     return
@@ -7814,6 +7849,7 @@ def _trim_truncated_response(text: str) -> tuple:
 
 class LocalBeginPayload(BaseModel):
     user_input: str = Field(default="", max_length=100_000)
+    regeneration: Optional[RegenerationContext] = None
 
 
 class LocalFinishPayload(BaseModel):
@@ -7823,6 +7859,8 @@ class LocalFinishPayload(BaseModel):
     error: str = Field(default="", max_length=10_000)
     audio_name: str = Field(default="", max_length=200)
     turn_token: str = Field(min_length=16, max_length=128)
+    model_thoughts: str = Field(default="", max_length=2_000_000)
+    regeneration: Optional[RegenerationContext] = None
 
 
 class LocalTurnTokenPayload(BaseModel):
@@ -7843,7 +7881,7 @@ async def local_begin(story_id: str, payload: LocalBeginPayload, user_info: dict
         append_chat_entry(story_id, "user", payload.user_input or "", uid=user_id)
         return {
             "system_msg": ctx["system_msg"],
-            "user_msg": ctx["user_msg"],
+            "user_msg": with_regeneration_feedback(ctx["user_msg"], payload.regeneration),
             # RulesEditor material - the BROWSER runs the rules check against the
             # local model, so it needs the same prompt the server-side editor uses.
             "rules_system_prompt": RULES_EDITOR_SYSTEM_PROMPT,
@@ -7872,7 +7910,7 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, user_info: di
         if payload.error:
             print(f"[LocalFinish] Error from browser: {payload.error[:300]}")
             remove_last_user_entry(story_id, uid=user_id)
-            write_pending_retry(story_id, uid=user_id, prompt=payload.user_input, error=payload.error[:300])
+            write_pending_retry(story_id, uid=user_id, prompt=payload.user_input, error=payload.error[:300], regeneration=payload.regeneration)
             return {"ok": True, "saved": False}
 
         text = strip_thought_tags(payload.text or "", filter_reasoning_lines=False)
@@ -7881,11 +7919,12 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, user_info: di
         text = clean_text(text)
         if not text.strip():
             remove_last_user_entry(story_id, uid=user_id)
-            write_pending_retry(story_id, uid=user_id, prompt=payload.user_input, error="Local model generated no visible text.")
+            write_pending_retry(story_id, uid=user_id, prompt=payload.user_input, error="Local model generated no visible text.", regeneration=payload.regeneration)
             return {"ok": True, "saved": False, "truncated": False}
 
         model_name = (payload.model or "local").strip() or "local"
-        commit_ai_turn(story_id, text, f"Local/{model_name}", uid=user_id)
+        commit_ai_turn(story_id, text, f"Local/{model_name}", uid=user_id,
+                       model_thoughts=payload.model_thoughts or extract_model_thoughts(payload.text))
 
         # NOTE: no server-side background analysis here. When the main story is
         # generated by a local (browser-direct) model, the background analysis
@@ -8278,6 +8317,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     system_msg = f"{system_instruction}\n\n{STORY_FILES_MANIFEST}\n\n{story_context}{rules_reminder}"
 
     user_msg = f"<user_input>\n{input_data.user_input}\n</user_input>\n\nBased on your instructions, refine and expand the <user_input> above, then seamlessly continue the story."
+    user_msg = with_regeneration_feedback(user_msg, input_data.regeneration)
     print(f"DEBUG: Generating for {input_data.story_id}, system len: {len(system_msg)}, user len: {len(user_msg)}")
     print(f"DEBUG: Story text empty? {not full_story_text}")
 
@@ -8299,6 +8339,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
     def _generate_worker():
         full_response = ""
+        model_thoughts = ""
         model_used_ref = ""
         last_finish_reason = ""
         response_persisted = False
@@ -8435,11 +8476,12 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             if not full_response:
                 remove_last_user_entry(input_data.story_id, uid=user_id)
-                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no text. It might be blocked by safety filters.')
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no text. It might be blocked by safety filters.', regeneration=input_data.regeneration)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no text. It might be blocked by safety filters.'})}\n\n"
                 return
 
             # Strip thinking tags before saving (frontend already parsed them)
+            model_thoughts = extract_model_thoughts(full_response)
             full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
             full_response, cleanup_notes = _clean_generated_story_text(full_response)
             for note in cleanup_notes:
@@ -8483,6 +8525,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                                  finish_reason = str(candidates[0].finish_reason)
                             last_finish_reason = finish_reason
                             print(f"DEBUG: Empty non-visible retry chunk. Reason: {finish_reason}")
+                    model_thoughts = extract_model_thoughts(full_response)
                     full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
                     for note in cleanup_notes:
@@ -8490,7 +8533,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             if not full_response.strip():
                 remove_last_user_entry(input_data.story_id, uid=user_id)
-                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no visible text. It might be blocked by safety filters.')
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI generated no visible text. It might be blocked by safety filters.', regeneration=input_data.regeneration)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. It might be blocked by safety filters.'})}\n\n"
                 return
             
@@ -8539,7 +8582,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
                 if not full_response.strip():
                     remove_last_user_entry(input_data.story_id, uid=user_id)
-                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.')
+                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.', regeneration=input_data.regeneration)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
             else:
@@ -8554,7 +8597,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
                 if not full_response.strip():
                     remove_last_user_entry(input_data.story_id, uid=user_id)
-                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.')
+                    write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error='AI produced an empty response after post-processing.', regeneration=input_data.regeneration)
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
@@ -8569,7 +8612,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
-            commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id)
+            commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
             response_persisted = True
             yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
             
@@ -8633,7 +8676,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 if full_response and not response_persisted:
                     print(f"Stream died (errno {e.errno}), saving partial response ({len(full_response)} chars).")
                     try:
-                        commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id)
+                        commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
                         response_persisted = True
                     except Exception as save_err:
                         print(f"Failed to save partial response: {save_err}")
@@ -8644,13 +8687,13 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 print(f"STREAM ERROR: {e}")
                 _err_msg = _friendly_api_error(e)
                 remove_last_user_entry(input_data.story_id, uid=user_id)
-                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg)
+                write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg, regeneration=input_data.regeneration)
                 yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
         except Exception as e:
             print(f"STREAM ERROR: {e}")
             _err_msg = _friendly_api_error(e)
             remove_last_user_entry(input_data.story_id, uid=user_id)
-            write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg)
+            write_pending_retry(input_data.story_id, uid=user_id, prompt=input_data.user_input, error=_err_msg, regeneration=input_data.regeneration)
             yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
         finally:
             # The worker thread outlives the SSE connection, so this always runs -

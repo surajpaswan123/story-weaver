@@ -71,12 +71,33 @@ When a selected provider returns an error, Story Weaver preserves its HTTP
 status for retry handling and displays its actual reason. A rate limit (429)
 is shown as a rate limit during retries, rather than as an unavailable model.
 
+## Regenerate with feedback
+
+The latest completed turn has a **Regenerate with feedback** button. It opens a
+labelled **Enter your feedback** textbox with submit and cancel controls. Submit
+uses the normal undo operation, including the reference-file snapshot restore,
+then sends the original prompt and normal story context with three added sections:
+**Turn to replace**, **Model thoughts**, and **Feedback**. The replacement is saved
+as the new turn; the feedback and discarded draft are not appended to story prose.
+
+Thought tags actually returned by the model are saved separately in the chat
+entry and included under **Model thoughts**, preserving their tags and contents.
+They are also available in a collapsed Model thoughts section on saved turns.
+Older turns whose thoughts were discarded cannot recover that missing text; the
+regeneration states that no thoughts were saved. This feature does not request
+or reconstruct reasoning that a provider never returned.
+
+Feedback is preserved in the pending retry record after undo and on generation
+failure, so Retry after a reload keeps the same revision instructions. The
+feature supports hosted text generation and browser-direct local text models.
+As with ordinary Regenerate, it replaces the latest completed turn.
+
 ## Tests
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-node --test tests/test_model_discovery_frontend.cjs
+node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend.cjs
 ```
 
 ## Hosted deployment

@@ -1624,11 +1624,25 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 body.textContent = (entry.text || '').replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(p => p).join('\n');
                 block.appendChild(body);
 
+                if (entry.model_thoughts) {
+                    const thoughts = document.createElement('details');
+                    thoughts.className = 'px-6 pb-3';
+                    const summary = document.createElement('summary');
+                    summary.textContent = 'Model thoughts';
+                    const text = document.createElement('div');
+                    text.className = 'whitespace-pre-wrap text-sm';
+                    text.textContent = entry.model_thoughts;
+                    thoughts.appendChild(summary);
+                    thoughts.appendChild(text);
+                    block.appendChild(thoughts);
+                }
+
                 const actionBar = document.createElement('div');
                 actionBar.className = 'action-bar px-6';
                 if (isLast) {
                     actionBar.innerHTML = `
                         <button class="action-btn" onclick="regenerateStory()" title="Regenerate with same prompt">Regenerate</button>
+                        <button type="button" class="action-btn" onclick="showRegenerateFeedback(this)">Regenerate with feedback</button>
                         <button class="action-btn" onclick="editLastPrompt(this)" title="Edit your prompt and regenerate">Edit & Redo</button>
                         <button class="action-btn" onclick="copyResponse(this)" title="Copy AI response">Copy</button>
                     `;
@@ -1742,6 +1756,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         actionBar.setAttribute('aria-label', 'Story generation actions');
                         actionBar.innerHTML = `
                             <button class="action-btn" onclick="regenerateStory()" aria-label="Regenerate with same prompt" title="Regenerate with same prompt">🔄 Regenerate</button>
+                            <button type="button" class="action-btn" onclick="showRegenerateFeedback(this)">Regenerate with feedback</button>
                             <button class="action-btn" onclick="editLastPrompt(this)" aria-label="Edit your prompt and regenerate" title="Edit your prompt and regenerate">✏️ Edit & Redo</button>
                         `;
                         storyDisplay.appendChild(actionBar);
@@ -2168,7 +2183,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
 
 
-        async function submitStory(overrideText, bypassCheck = false) {
+        async function submitStory(overrideText, bypassCheck = false, regeneration = null) {
+            if (feedbackRegenerationBusy && !regeneration) return;
             const text = (typeof overrideText === 'string' ? overrideText : input.value.trim());
             if (!text) return;
             if (isGuestMode) {
@@ -2223,7 +2239,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             
                             yesBtn.onclick = () => {
                                 confirmModal.classList.add('hidden');
-                                submitStory(text, true);
+                                submitStory(text, true, regeneration);
                             };
                             noBtn.onclick = () => {
                                 confirmModal.classList.add('hidden');
@@ -2268,14 +2284,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             thinkingToggleBtn.style.cssText = 'display:none; margin:0 24px 8px;';
             thinkingToggleBtn.setAttribute('aria-expanded', 'false');
             thinkingToggleBtn.setAttribute('aria-controls', thinkingId);
-            thinkingToggleBtn.textContent = '🧠 Show Thinking';
+            thinkingToggleBtn.textContent = 'Show Model thoughts';
             storyDisplay.appendChild(thinkingToggleBtn);
 
             const thinkingPanel = document.createElement('div');
             thinkingPanel.id = thinkingId;
             thinkingPanel.style.display = 'none';
             thinkingPanel.innerHTML = `
-                <div class="thinking-panel-label">AI Thinking Process</div>
+                <div class="thinking-panel-label">Model thoughts</div>
                 <div class="thinking-panel"></div>
             `;
             storyDisplay.appendChild(thinkingPanel);
@@ -2307,16 +2323,18 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 if (providerVal === 'local') {
                     // Local provider wins even with audio attached - multimodal local
                     // models (gemma3, qwen2.5-omni) hear the audio natively.
-                    const audioInfo = attachedAudioFile ? {
+                    const audioInfo = attachedAudioFile && !regeneration ? {
                         file: attachedAudioFile,
                         name: (audioFileInput && audioFileInput.files && audioFileInput.files[0] && audioFileInput.files[0].name) || 'audio',
                         mime: attachedAudioFile.type || 'audio/mpeg'
                     } : null;
-                    attachedAudioFile = null;
-                    if (audioFileInput) audioFileInput.value = '';
-                    if (audioAttachment) audioAttachment.style.display = 'none';
-                    response = await runLocalGeneration(text, modelVal, audioInfo);
-                } else if (attachedAudioFile) {
+                    if (!regeneration) {
+                        attachedAudioFile = null;
+                        if (audioFileInput) audioFileInput.value = '';
+                        if (audioAttachment) audioAttachment.style.display = 'none';
+                    }
+                    response = await runLocalGeneration(text, modelVal, audioInfo, regeneration);
+                } else if (attachedAudioFile && !regeneration) {
                     const formData = new FormData();
                     formData.append('user_input', text);
                     formData.append('story_id', currentStoryId);
@@ -2385,7 +2403,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             story_id: currentStoryId, 
                             skip_rules_check: document.getElementById('skip-rules-check').checked,
                             provider: providerVal,
-                            model: modelVal
+                            model: modelVal,
+                            regeneration: regeneration
                         })
                     });
                 }
@@ -2576,6 +2595,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                                     actionBar.innerHTML = `
                                         <button class="action-btn" onclick="regenerateStory()" title="Regenerate with same prompt">Regenerate</button>
+                                        <button type="button" class="action-btn" onclick="showRegenerateFeedback(this)">Regenerate with feedback</button>
                                         <button class="action-btn" onclick="editLastPrompt(this)" title="Edit your prompt and regenerate">Edit & Redo</button>
                                         <button class="action-btn" onclick="copyResponse(this)" title="Copy AI response">Copy</button>
                                     `;
@@ -2642,7 +2662,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 retryBtn.type = 'button';
                 retryBtn.className = 'px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5';
                 retryBtn.textContent = '🔄 Retry Generation';
-                retryBtn.addEventListener('click', () => retryLastPrompt(text));
+                retryBtn.addEventListener('click', () => retryLastPrompt(text, regeneration));
                 const dismissBtn = document.createElement('button');
                 dismissBtn.type = 'button';
                 dismissBtn.className = 'px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors';
@@ -2676,7 +2696,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             banner.setAttribute('role', 'alert');
             const title = document.createElement('strong');
             title.className = 'block font-semibold text-red-900';
-            title.textContent = '⚠️ Last generation failed';
+            title.textContent = pending.regeneration ? 'Regeneration with feedback pending' : '⚠️ Last generation failed';
             const desc = document.createElement('span');
             desc.className = 'text-red-700 text-xs block';
             desc.textContent = (pending.error || 'The last generation failed.') + ' Your prompt is still saved - run it again.';
@@ -2686,7 +2706,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             retryBtn.type = 'button';
             retryBtn.className = 'px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors';
             retryBtn.textContent = '🔄 Retry Failed Prompt';
-            retryBtn.addEventListener('click', () => retryLastPrompt(pendingRetryPrompt));
+            retryBtn.addEventListener('click', () => retryLastPrompt(pending.prompt, pending.regeneration || null));
             const dismissBtn = document.createElement('button');
             dismissBtn.type = 'button';
             dismissBtn.className = 'px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-lg text-xs font-semibold transition-colors';
@@ -2700,7 +2720,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             storyDisplay.appendChild(banner);
         }
 
-        async function retryLastPrompt(promptText) {
+        async function retryLastPrompt(promptText, regeneration = null) {
             // The failed turn saved nothing to the story, so there's nothing to undo
             // (previous successful turns stay untouched). Just clear the server-side
             // retry marker and resubmit the prompt.
@@ -2709,6 +2729,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 if (res.ok) {
                     const data = await res.json();
                     if (data && data.prompt) promptText = data.prompt;
+                    regeneration = data.regeneration || null;
                 } else {
                     console.warn('No pending retry marker:', await res.text());
                 }
@@ -2717,14 +2738,96 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
             try {
                 await loadStory();
-                await submitStory(promptText);
+                await submitStory(promptText, false, regeneration);
             } catch (err) {
                 console.error('Retry failed:', err);
                 announceStatus('Ready');
             }
         }
 
+        let feedbackRegenerationBusy = false;
+
+        function showRegenerateFeedback(button) {
+            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGuestMode) { showGuestNagDialog(); return; }
+            const existing = document.getElementById('regeneration-feedback-input');
+            if (existing) { existing.focus(); return; }
+            const bar = button.closest('.action-bar');
+            if (!bar) return;
+            const form = document.createElement('form');
+            form.className = 'px-6 py-3 space-y-2';
+            form.setAttribute('aria-label', 'Regenerate with feedback');
+            form.dataset.storyId = currentStoryId;
+            form.innerHTML = `
+                <label for="regeneration-feedback-input" class="block font-medium">Enter your feedback</label>
+                <textarea id="regeneration-feedback-input" class="edit-inline" rows="4" required maxlength="100000" aria-describedby="regeneration-feedback-help"></textarea>
+                <p id="regeneration-feedback-help" class="text-sm">The latest turn will be replaced using your feedback. The model receives the usual context, Turn to replace, and any saved Model thoughts.</p>
+                <button type="submit" class="action-btn">Regenerate with feedback</button>
+                <button type="button" class="action-btn" data-feedback-cancel>Cancel</button>
+                <p data-feedback-status role="status" aria-live="polite"></p>`;
+            form.querySelector('[data-feedback-cancel]').addEventListener('click', () => {
+                if (feedbackRegenerationBusy) return;
+                form.remove();
+                button.focus();
+            });
+            form.addEventListener('submit', event => submitFeedbackRegeneration(event, form));
+            bar.after(form);
+            form.querySelector('textarea').focus();
+        }
+
+        async function submitFeedbackRegeneration(event, form) {
+            event.preventDefault();
+            if (isGenerating || feedbackRegenerationBusy) return;
+            const textarea = form.querySelector('textarea');
+            const feedback = textarea.value;
+            const status = form.querySelector('[data-feedback-status]');
+            if (!feedback.trim()) {
+                status.textContent = 'Enter feedback before regenerating.';
+                textarea.focus();
+                return;
+            }
+            const storyId = form.dataset.storyId;
+            if (storyId !== currentStoryId) {
+                status.textContent = 'The selected story changed. Open Regenerate with feedback on that story.';
+                return;
+            }
+            if (!document.getElementById('provider-select')?.value || !getSelectedModel()) {
+                status.textContent = 'Choose a provider and model before regenerating. Your turn has not been changed.';
+                return;
+            }
+            feedbackRegenerationBusy = true;
+            const submit = form.querySelector('[type="submit"]');
+            submit.disabled = true;
+            textarea.disabled = true;
+            input.disabled = true;
+            updateSendButtonState();
+            status.textContent = 'Preparing regeneration with feedback…';
+            try {
+                const res = await authFetch(`/story/${encodeURIComponent(storyId)}/undo`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ feedback })
+                });
+                const data = await requireJsonResponse(res, 'Could not prepare regeneration');
+                if (!data.regeneration || !data.restored_prompt) throw new Error('The server did not return a turn to regenerate. Reload the story to check its retry status.');
+                if (storyId !== currentStoryId) return;
+                await loadStory();
+                if (storyId !== currentStoryId) return;
+                await submitStory(data.restored_prompt, false, data.regeneration);
+                form.remove();
+            } catch (error) {
+                status.textContent = error.message;
+                announceToScreenReader(error.message);
+            } finally {
+                feedbackRegenerationBusy = false;
+                submit.disabled = false;
+                textarea.disabled = false;
+                input.disabled = false;
+                updateSendButtonState();
+            }
+        }
+
         async function regenerateStory() {
+            if (isGenerating || feedbackRegenerationBusy) return;
             if (!lastUserPrompt) {
                 alert('No previous prompt to regenerate.');
                 return;
@@ -2835,6 +2938,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         function editLastPrompt(btn) {
+            if (isGenerating || feedbackRegenerationBusy) return;
             if (!lastUserPrompt) {
                 alert('No previous prompt to edit.');
                 return;
@@ -2859,6 +2963,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function confirmEdit(btn) {
+            if (isGenerating || feedbackRegenerationBusy) return;
             const container = btn.closest('div').parentElement;
             const newPrompt = container.querySelector('textarea').value.trim();
             if (!newPrompt) return;
@@ -2888,6 +2993,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             actionBar.setAttribute('aria-label', 'Story generation actions');
             actionBar.innerHTML = `
                 <button class="action-btn" onclick="regenerateStory()" aria-label="Regenerate with same prompt" title="Regenerate with same prompt">🔄 Regenerate</button>
+                <button type="button" class="action-btn" onclick="showRegenerateFeedback(this)">Regenerate with feedback</button>
                 <button class="action-btn" onclick="editLastPrompt(this)" aria-label="Edit your prompt and regenerate" title="Edit your prompt and regenerate">✏️ Edit & Redo</button>
             `;
             container.replaceWith(actionBar);
@@ -2898,7 +3004,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (!panel) return;
             const isHidden = panel.style.display === 'none';
             panel.style.display = isHidden ? 'block' : 'none';
-            btn.textContent = isHidden ? '🧠 Hide Thinking' : '🧠 Show Thinking';
+            btn.textContent = isHidden ? 'Hide Model thoughts' : 'Show Model thoughts';
             btn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
             if (isHidden) {
                 announceToScreenReader('Showing AI thinking process.');
@@ -3387,7 +3493,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
-        async function runLocalGeneration(userText, modelVal, audioInfo) {
+        async function runLocalGeneration(userText, modelVal, audioInfo, regeneration = null) {
             const turnStoryId = currentStoryId;
             let turnToken = '';
             const cfg = getLocalServerConfig();
@@ -3407,7 +3513,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 beginRes = await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-begin`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_input: userText })
+                    body: JSON.stringify({ user_input: userText, regeneration })
                 });
             }
             if (!beginRes.ok) {
@@ -3470,6 +3576,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (cfg.apiKey) headers['Authorization'] = 'Bearer ' + cfg.apiKey;
 
             let fullText = '';
+            let modelThoughts = '';
             let sawChunk = false;
             let rawBody = '';
             try {
@@ -3529,6 +3636,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                         const delta = choice.delta || {};
                         const reasoning = delta.reasoning_content || delta.reasoning;
                         if (reasoning) {
+                            modelThoughts += `<thought>${String(reasoning)}</thought>`;
                             send({ type: 'chunk', text: '<thought>' });
                             send({ type: 'chunk', text: String(reasoning) });
                             send({ type: 'chunk', text: '</thought>' });
@@ -3557,6 +3665,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 // Rules check on the local model (same prompt the server-side
                 // RulesEditor uses). Failure keeps the unedited text - the rules
                 // check is a refinement, never a gate.
+                modelThoughts += (fullText.match(/<(thought|think|thoughts|thaughts)\b[^>]*>[\s\S]*?<\/\1\s*>/gi) || []).join('\n');
                 let saveText = fullText;
                 if (!skipRulesCheck && beginData.rules_system_prompt && beginData.rules_prefix && saveText.trim()) {
                     send({ type: 'finalizing', message: 'Checking rules & style...' });
@@ -3586,7 +3695,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const finishRes = await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-finish`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: saveText, user_input: userText, model: storyModel, error: '', audio_name: savedAudioName, turn_token: turnToken })
+                    body: JSON.stringify({ text: saveText, user_input: userText, model: storyModel, error: '', audio_name: savedAudioName, turn_token: turnToken, model_thoughts: modelThoughts, regeneration })
                 });
                 const finishData = await requireJsonResponse(finishRes, 'Failed to save local generation');
                 if (!finishData.ok) throw new Error(finishData.error || 'The server could not commit the local generation.');
@@ -3605,7 +3714,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     await authFetch(`/story/${encodeURIComponent(turnStoryId)}/local-finish`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ text: '', user_input: userText, model: storyModel, error: String(err && err.message ? err.message : err).slice(0, 300), audio_name: savedAudioName, turn_token: turnToken })
+                        body: JSON.stringify({ text: '', user_input: userText, model: storyModel, error: String(err && err.message ? err.message : err).slice(0, 300), audio_name: savedAudioName, turn_token: turnToken, regeneration })
                     });
                 } catch (e) {}
                 send({ type: 'error', message: (err && err.message) || 'Local generation failed' });
