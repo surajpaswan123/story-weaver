@@ -20,6 +20,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
 
 COPY main.py openai_compat.py regeneration.py ./
 COPY static/index.html ./static/index.html
+COPY static/file-editor.js ./static/file-editor.js
 
 USER 10001:10001
 EXPOSE 8000

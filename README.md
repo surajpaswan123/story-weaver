@@ -94,6 +94,34 @@ As with ordinary Regenerate, it replaces the latest completed turn.
 
 ## Edit chat history
 
+### File editor controls
+
+All files in **Story Files** share Copy selection, Copy all, Select entire file,
+Undo edit, Redo edit, and Download file controls. Find and replace searches the
+complete file, with exact, case-sensitive matches. Go to line and a line-wrap
+toggle are also available. Download includes unsaved edits.
+
+Opening a file focuses the labelled native text box. Ctrl+A selects the complete
+file, Ctrl+C copies the selection, Ctrl+Z undoes, Ctrl+Y or Ctrl+Shift+Z redoes,
+Ctrl+S saves, and Ctrl+F opens file search. Keyboard copy uses the browser's copy
+event; copy buttons await the clipboard write, with a native-copy fallback, and report failures.
+
+Files longer than 24,000 characters use sections so that browser text layout,
+keyboard selection, and screen-reader text navigation operate on a bounded amount
+of text. **Previous section** / **Next section**, or Alt+Page Up / Alt+Page Down,
+move between sections. Ctrl+Home / Ctrl+End move to the start or end of the file.
+Normal arrow-key selection stays within the visible section. Ctrl+A, Copy all,
+Save, Find, and Download still operate on the complete file, including every
+section. Pasting a large amount of text uses the same bounded display.
+
+Undo and redo span section changes and saves; opening/reloading/closing a file
+starts a new edit history. History stores edit differences, groups adjacent typing,
+and retains up to 500 operations within a 20 MiB history budget (the newest
+operation is always retained). These controls undo text edits, separately from
+the story turn's Undo action. Unsaved edits trigger the browser's leave-page prompt.
+
+### Chat transcript format
+
 In **Story Files**, open **Chat history — chat_log.json**, edit the JSON, and choose
 **Save file**. The transcript refreshes after saving. Entries require a `role` of
 `user` or `ai` and a string `text`; `model`, `time`, and `model_thoughts` must be
@@ -111,7 +139,7 @@ chat history can be saved.
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend.cjs tests/test_chat_log_frontend.cjs
+node --test tests/test_model_discovery_frontend.cjs tests/test_feedback_frontend.cjs tests/test_chat_log_frontend.cjs tests/test_file_editor.cjs
 ```
 
 ## Hosted deployment

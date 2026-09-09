@@ -12,6 +12,9 @@ on:
       - openai_compat.py
       - regeneration.py
       - static/index.html
+      - static/file-editor.js
+      - tests/test_file_editor.cjs
+      - tests/test_chat_log_frontend.cjs
   workflow_dispatch:
 
 permissions:
@@ -37,6 +40,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+
+      - name: Check file editor behavior
+        run: node --test tests/test_file_editor.cjs tests/test_chat_log_frontend.cjs
 
       - name: Build the deployment image
         run: |
@@ -74,6 +80,9 @@ jobs:
               assert b"Story Weaver" in response.read()
           with urllib.request.urlopen(base + "/openapi.json", timeout=5) as response:
               assert "/stories/create" in json.load(response)["paths"]
+          with urllib.request.urlopen(base + "/static/file-editor.js?v=1", timeout=5) as response:
+              assert response.status == 200
+              assert b"FileTextEditor" in response.read()
 
           request = urllib.request.Request(
               base + "/stories/create", data=b'{"name":"image-smoke"}',
