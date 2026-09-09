@@ -270,6 +270,7 @@ function renderUserSettingsUI() {
     }
     document.getElementById('input-openai-api-format').value = masked.openai_api_format || 'auto';
     document.getElementById('input-openai-reasoning-effort').value = masked.openai_reasoning_effort || '';
+    document.getElementById('input-openai-max-output-tokens').value = masked.openai_max_output_tokens || '';
 
     if (document.getElementById('input-story-model')) document.getElementById('input-story-model').dataset.val = masked.story_model || '';
     if (document.getElementById('input-background-model')) document.getElementById('input-background-model').dataset.val = masked.background_model || '';
@@ -314,6 +315,7 @@ async function saveUserSettings(e) {
         openai_base_url: document.getElementById('input-openai-base-url').value.trim(),
         openai_api_format: document.getElementById('input-openai-api-format').value,
         openai_reasoning_effort: document.getElementById('input-openai-reasoning-effort').value,
+        openai_max_output_tokens: document.getElementById('input-openai-max-output-tokens').value.trim(),
         openrouter_api_key: getKeyListValues('openrouter'),
         groq_api_key: getKeyListValues('groq'),
         nvidia_api_key: getKeyListValues('nvidia'),
@@ -4028,27 +4030,28 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
             <div>
                 <div class="flex justify-between items-center mb-1">
-                    <label class="block font-medium text-stone-300">OpenAI API Key (OpenAI-Style API)</label>
+                    <label class="block font-medium text-stone-300">OpenAI / Anthropic / Custom API Key</label>
                     <span id="status-openai-key" class="text-[10px] font-medium text-stone-500">Checking...</span>
                 </div>
                 <div id="keylist-openai" class="space-y-2" data-provider="openai"></div>
-                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="openai" aria-label="Add another OpenAI API key">＋ Add key</button>
+                <button type="button" class="add-key-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" data-provider="openai" aria-label="Add another OpenAI, Anthropic, or custom API key">＋ Add key</button>
             </div>
 
             <div>
-                <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI Base URL or Full Endpoint</label>
+                <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI / Anthropic Base URL or Full Endpoint</label>
                 <input type="text" id="input-openai-base-url" aria-describedby="openai-endpoint-help" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
-                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Accepts a base URL or an endpoint ending in /responses or /chat/completions. For OpenCode Zen, use https://opencode.ai/zen/v1. Story Weaver automatically chooses Chat Completions or Responses for each OpenCode model.</p>
+                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Enter your provider's own URL, including any path prefix. Accepts /v1, /responses, /chat/completions, or /messages, for example https://your-provider.com/v1/messages. For Anthropic directly, use https://api.anthropic.com/v1/messages. Save the matching key and URL together, then refresh models.</p>
             </div>
 
             <div>
-                <label for="input-openai-api-format" class="block font-medium text-stone-300 mb-1">OpenAI API Format</label>
+                <label for="input-openai-api-format" class="block font-medium text-stone-300 mb-1">API Format</label>
                 <select id="input-openai-api-format" aria-describedby="openai-format-help" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
                     <option value="auto">Auto (model or endpoint URL)</option>
                     <option value="chat_completions">Chat Completions</option>
                     <option value="responses">Responses</option>
+                    <option value="messages">Anthropic Messages</option>
                 </select>
-                <p id="openai-format-help" class="mt-1 text-xs text-stone-300">OpenCode Zen chooses the format per model, including pipeline overrides, regardless of this setting. For other providers, Auto uses Responses for a URL ending in /responses, otherwise Chat Completions.</p>
+                <p id="openai-format-help" class="mt-1 text-xs text-stone-300">Auto detects /messages as Anthropic Messages and /responses as Responses; other custom URLs use Chat Completions. For a custom /v1 base URL, select Anthropic Messages explicitly when required. OpenCode Zen chooses Chat Completions, Responses, or Messages per model, including pipeline overrides. Anthropic connections appear as Anthropic Messages in the Provider selector.</p>
             </div>
 
             <div>
@@ -4063,6 +4066,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <option value="xhigh">Extra high (xhigh)</option>
                 </select>
                 <p id="openai-reasoning-help" class="mt-1 text-xs text-stone-300">Applies to Responses story generation, background analysis, and rule refinement. Available efforts depend on the provider and model.</p>
+            </div>
+
+            <div>
+                <label for="input-openai-max-output-tokens" class="block font-medium text-stone-300 mb-1">Anthropic maximum output tokens (optional)</label>
+                <input type="number" id="input-openai-max-output-tokens" min="1" max="2147483647" step="1" aria-describedby="openai-output-help" placeholder="Automatic" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
+                <p id="openai-output-help" class="mt-1 text-xs text-stone-300">Leave empty to use the model's advertised maximum reply length. If the catalog does not publish a limit, Story Weaver requests 131,072 tokens; enter your provider's supported maximum if it rejects that value. An entered value is capped at the advertised model maximum. This only limits output, never the story context. Incomplete replies are reported as errors and are not saved as finished turns.</p>
             </div>
 
             <div>

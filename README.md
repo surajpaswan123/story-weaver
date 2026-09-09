@@ -15,23 +15,49 @@ The server binds to `127.0.0.1:8000` by default. `Start_Story_Weaver.bat` starts
 
 For an intentionally unauthenticated local-only installation, set `ALLOW_LOCAL_SUPER_ADMIN=true`. Unverified JWT decoding is allowed only on an unhosted local server without Firebase Admin; hosted runtimes always fail closed.
 
-## Responses API providers
+## Custom API providers: Chat Completions, Responses, and Anthropic Messages
 
-In Settings, use the **OpenAI API Key** section for a custom hosted provider.
-The URL accepts either a base URL or a full `/responses` or `/chat/completions`
+In Settings, use the **OpenAI / Anthropic / Custom API Key** section for a custom hosted provider.
+The URL accepts either a base URL or a full `/responses`, `/messages`, or `/chat/completions`
 endpoint. For OpenCode Zen, use `https://opencode.ai/zen/v1`. Story Weaver
 chooses the API format for each model on every request: Muse Spark (including
 Contributor Free), GPT, and Grok use Responses; Chat Completions models such
 as MiMo, DeepSeek, GLM, and MiniMax use Chat Completions. This also applies
 when the story, background, and rules models differ. Existing saved full
 URLs and format selections still work with this automatic OpenCode routing.
-OpenCode's Claude/Qwen and Gemini endpoints require other protocols; the
-OpenAI connection reports that limitation explicitly if one is selected.
+OpenCode's Claude and Qwen models use Anthropic Messages automatically.
+Its Gemini endpoints still require the Google protocol and report that limitation.
 
-For other providers, **OpenAI API Format** defaults to Auto: a URL ending in
-`/responses` uses Responses; other URLs use Chat Completions. Select Responses
-explicitly for a base URL when required. Model discovery always uses the
-base URL's `/models` route.
+For other providers, **API Format** defaults to Auto: a URL ending in
+`/responses` uses Responses, `/messages` uses Anthropic Messages, and other custom
+URLs use Chat Completions. Select the required format explicitly for a custom
+base URL such as `https://your-provider.com/v1`. The official Anthropic host also
+defaults to Messages. Model discovery uses the base URL's `/models` route.
+
+For an Anthropic-compatible connection, enter your key and the full URL supplied
+by your provider, for example `https://your-provider.com/gateway/v1/messages`.
+The `/gateway/v1` path is preserved for both generation and model discovery.
+For Anthropic directly, use `https://api.anthropic.com/v1/messages`. Save Settings,
+then select **Anthropic Messages (Custom API)** below the story input. The same
+connection is available in the story, background-analysis, and rules-model settings.
+Existing saved settings and provider-tagged model overrides remain compatible.
+
+Messages requests use `x-api-key`, `anthropic-version: 2023-06-01`, a top-level
+`system` prompt, and user/assistant `messages`. Discovery uses the same credentials
+and follows Anthropic's model-list pagination. It never substitutes a previous
+connection's model list. These formats follow the [Anthropic Messages API](https://platform.claude.com/docs/en/api/http/messages/create)
+and [Models API](https://platform.claude.com/docs/en/api/http/models/list).
+
+Anthropic requires a `max_tokens` output ceiling. Leave **Anthropic maximum output
+tokens** empty to use the model catalog's advertised maximum. If the catalog omits
+it, the default request is **131,072** output tokens. Some gateways reject this high
+value; enter the maximum your provider supports in that case. An explicit setting
+is capped at the advertised model maximum. This ceiling does not instruct the model
+to write a short answer and does not trim input context. A reply that reaches the
+ceiling, is refused, fails, or loses its stream is reported as incomplete and is
+not saved as a completed story turn. Only visible text blocks enter the story;
+native thinking/signature blocks are excluded. Audio analysis still needs a provider
+that accepts audio input; Anthropic Messages can write from the resulting text analysis.
 
 Saving a changed API key or URL refreshes the main model selector and all
 pipeline selectors from the same current catalog. Previous OpenAI pipeline
@@ -64,12 +90,21 @@ items are excluded. Incomplete, failed, refused, or interrupted Responses are
 reported as errors rather than accepted as completed output. Existing
 Chat Completions configurations continue to use their original format.
 
-These settings apply to the hosted OpenAI provider. The separate browser-direct
+These settings apply to the hosted custom provider. The separate browser-direct
 Local OpenAI-Compatible Server continues to use Chat Completions.
 
 When a selected provider returns an error, Story Weaver preserves its HTTP
 status for retry handling and displays its actual reason. A rate limit (429)
 is shown as a rate limit during retries, rather than as an unavailable model.
+
+## Story context and diagnostics
+
+Story Weaver is intended for models with at least a 1M-token context window.
+Writers receive the full manuscript, summary, and narrative reference files.
+`incidents.md` remains the record of actual story events. `consistency.md` is an
+automated diagnostic log for the user: it stays available in the file editor and
+is retained by saving and undo, but is excluded from writing, audio-story writing,
+browser-direct context, category discovery, and reference-analysis inputs.
 
 ## Regenerate with feedback
 

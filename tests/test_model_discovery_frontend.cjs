@@ -84,6 +84,47 @@ function reply(request, models, errors = {}) {
 function values(element) { return element.options.filter(option => !option.disabled).map(option => option.value).filter(Boolean); }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('Anthropic connection uses its readable name in story and pipeline selectors', async () => {
+    const app = setup();
+    const done = app.load();
+    app.requests[0].resolve({ ok: true, json: async () => ({ providers: {
+        openai: { name: 'Anthropic Messages (Custom API)', configured: true,
+            models: ['provider-model'], base_url: 'https://example.com/v1/messages' }
+    } }) });
+    await done;
+    assert.equal(app.elements['provider-select'].options.find(o => o.value === 'openai').textContent,
+        'Anthropic Messages (Custom API)');
+    for (const id of pipelineIds) assert.deepEqual(values(app.elements[id]), ['openai::provider-model']);
+    assert.match(html, /<option value="messages">Anthropic Messages<\/option>/);
+    assert.match(html, /label for="input-openai-max-output-tokens"/);
+    assert.match(html, /id="input-openai-max-output-tokens"[^>]+aria-describedby="openai-output-help"/);
+});
+
+test('settings saves the custom Messages endpoint and optional output limit together', async () => {
+    const elements = new Map();
+    const element = id => {
+        if (!elements.has(id)) elements.set(id, { value: '', checked: false, className: '', textContent: '' });
+        return elements.get(id);
+    };
+    element('input-openai-base-url').value = ' https://custom.example.com/prefix/v1/messages ';
+    element('input-openai-api-format').value = 'auto';
+    element('input-openai-max-output-tokens').value = '200000';
+    const requests = [];
+    const context = vm.createContext({
+        document: { getElementById: element }, settingsRequestVersion: 0,
+        getKeyListValues: () => '', invalidateProviderModels() {}, clearKeyListInputs() {},
+        fetchUserSettings: async () => {}, loadProvidersAndModels: async () => {}, setTimeout() {},
+        authFetch: async (url, request) => { requests.push(JSON.parse(request.body)); return { ok: true, json: async () => ({}) }; }
+    });
+    const start = html.indexOf('async function saveUserSettings(');
+    const end = html.indexOf('\n}', start) + 2;
+    vm.runInContext(html.slice(start, end), context);
+    await context.saveUserSettings();
+    assert.equal(requests[0].openai_base_url, 'https://custom.example.com/prefix/v1/messages');
+    assert.equal(requests[0].openai_api_format, 'auto');
+    assert.equal(requests[0].openai_max_output_tokens, '200000');
+});
+
 test('one catalog request updates all selectors and preserves a still-valid choice', async () => {
     const app = setup();
     app.elements['provider-select'].appendChild(Object.assign(new Element('option'), { value: 'openai', selected: true }));

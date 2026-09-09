@@ -71,7 +71,7 @@ import ipaddress
 
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
-                           ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
+                           MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
 from regeneration import (FeedbackUndoInput, RegenerationContext, extract_model_thoughts,
                           without_model_thoughts, with_regeneration_feedback)
 
@@ -565,6 +565,8 @@ def validate_openai_base_url(value: str) -> str:
 # Module-level cache of AI client instances keyed by (kind, base_url?, api_key).
 # Strong references here prevent GC from closing httpx pools mid-stream.
 _USER_CLIENT_CACHE = {}
+# Model output limits are scoped to the same URL and credential as discovery.
+_MESSAGES_MODEL_LIMITS = {}
 
 
 def _split_keys(raw) -> list:
@@ -679,15 +681,30 @@ def _clients_from_keys(user_keys: dict) -> dict:
         if kind == "openai":
             base_url, api_format = resolve_openai_endpoint(base_url, user_keys.get("openai_api_format", "auto"))
             effort = user_keys.get("openai_reasoning_effort", "")
-        ck = (kind, base_url, key, api_format, effort)
+        output_setting = user_keys.get("openai_max_output_tokens", "") if kind == "openai" else ""
+
+        def messages_output_limit(model):
+            advertised = _MESSAGES_MODEL_LIMITS.get((base_url, key), {}).get(model)
+            configured = int(output_setting) if output_setting else None
+            if advertised:
+                return min(advertised, configured) if configured else advertised
+            return configured or 131072
+
+        ck = (kind, base_url, key, api_format, effort, output_setting)
         c = cache.get(ck)
         if c is None:
-            extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
-            c = OpenAI(base_url=base_url, api_key=key, **extra)
-            if kind == "openai" and is_opencode_zen(base_url):
-                c = OpenCodeClient(c, effort)
-            elif api_format == "responses":
-                c = ResponsesClient(c, effort)
+            if api_format == "messages" and not is_opencode_zen(base_url):
+                c = MessagesClient(Anthropic(base_url=base_url, api_key=key, auth_token="",
+                                             http_client=AnthropicHttpxClient(follow_redirects=False)), messages_output_limit)
+            else:
+                extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
+                c = OpenAI(base_url=base_url, api_key=key, **extra)
+                if kind == "openai" and is_opencode_zen(base_url):
+                    messages_sdk = Anthropic(base_url=base_url, api_key=key, auth_token="",
+                                             http_client=AnthropicHttpxClient(follow_redirects=False))
+                    c = OpenCodeClient(c, effort, messages_sdk, messages_output_limit)
+                elif api_format == "responses":
+                    c = ResponsesClient(c, effort)
             cache[ck] = c
         return c
 
@@ -802,6 +819,7 @@ def load_user_keys(uid: str) -> dict:
         "openai_base_url": "https://api.openai.com/v1",
         "openai_api_format": "auto",
         "openai_reasoning_effort": "",
+        "openai_max_output_tokens": "",
         "openrouter_api_key": "",
         "groq_api_key": "",
         "nvidia_api_key": "",
@@ -872,7 +890,7 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
             keys[key] = ""
 
     # Non-secret fields can be set to empty (to clear a model override)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     for k in keys:
@@ -884,6 +902,9 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
                 raise ValueError("Invalid OpenAI API format")
             if k == "openai_reasoning_effort" and val not in REASONING_EFFORTS:
                 raise ValueError("Invalid OpenAI reasoning effort")
+            if k == "openai_max_output_tokens" and val:
+                if not val.isascii() or not val.isdigit() or not 1 <= int(val) <= 2147483647:
+                    raise ValueError("Anthropic maximum output tokens must be a positive whole number, or empty for automatic")
             if val:
                 # Always accept non-empty values
                 keys[k] = val
@@ -2018,6 +2039,7 @@ def nvidia_model_thinks(model: str) -> bool:
 # Provider clients come from each user's Settings keys via
 # get_effective_ai_clients - no provider is initialized from server .env.
 from openai import OpenAI, DefaultHttpxClient
+from anthropic import Anthropic, DefaultHttpxClient as AnthropicHttpxClient
 nvidia_client = None
 openrouter_client = None
 groq_client = None
@@ -2927,11 +2949,6 @@ what each file governs, so you know which one to trust for what.)
   reached. Never jump backward unless the user explicitly asks for a flashback,
   and never re-anchor to a morning or a meal the story has already moved past.
   Let hours pass when the action would take hours.
-
-- CONSISTENCY NOTES (consistency.md) - FLAGGED CONTRADICTIONS
-  Problems an earlier automated check found. Treat each entry as a correction
-  you must respect from now on. Resolve it naturally inside the prose - never
-  repeat the mistake, and never write a note about it in your output.
 
 - AUDIO LOG (audio_log.md) - SHARED MUSIC
   Songs the user has played for you and what each one evoked. Shared history
@@ -4270,7 +4287,7 @@ def verify_reference_files(story_id: str, user_id: str = "default_user", user_in
     # --- Discover files to verify ---
     files_to_verify = []
     for file in os.listdir(story_dir):
-        if file.endswith(".md") and file not in IGNORE_FILES:
+        if file.endswith(".md") and file.casefold() not in IGNORE_FILES:
             files_to_verify.append(file)
 
     if not files_to_verify:
@@ -6006,7 +6023,7 @@ def auto_spawn_categories(story_dir: str, new_text: str, existing_categories: se
         known_character_names = set()
 
         for md_file in sorted(os.listdir(story_dir)):
-            if not md_file.endswith(".md"):
+            if not md_file.endswith(".md") or md_file.casefold() == "consistency.md":
                 continue
             filepath = os.path.join(story_dir, md_file)
             if not os.path.isfile(filepath):
@@ -6090,7 +6107,7 @@ def _discover_custom_categories(story_id: str, uid: str) -> list:
     IGNORE_FILES = {"story.md", "summary.md", "consistency.md", "rules.md", "style.md", "context.md", "audio_log.md"}
     custom_categories = []
     for file in os.listdir(story_dir):
-        if file.endswith(".md") and file not in IGNORE_FILES:
+        if file.endswith(".md") and file.casefold() not in IGNORE_FILES:
             custom_categories.append(file.replace(".md", ""))
     # If no default categories exist yet, provide a baseline to start auto-generating
     if not custom_categories:
@@ -7326,7 +7343,6 @@ async def generate_with_audio(
         "items.md": "ITEMS",
         "villains.md": "VILLAINS",
         "incidents.md": "KEY INCIDENTS",
-        "consistency.md": "CONSISTENCY NOTES",
         "audio_log.md": "AUDIO LOG (songs/music the user has shared — remember these)",
         "style.md": "STYLE GUIDE (follow these writing rules)",
         "time.md": "STORY TIMELINE (day, time, and event order)",
@@ -7336,9 +7352,9 @@ async def generate_with_audio(
     # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
-                          "incidents.md", "consistency.md", "audio_log.md", "style.md",
+                          "incidents.md", "audio_log.md", "style.md",
                           "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
+    SKIP_FILES = {"rules.md", "context.md", "story.md", "consistency.md"}  # Diagnostics stay out of model context.
 
     story_context_parts = []
     rules_text = ""
@@ -7355,7 +7371,7 @@ async def generate_with_audio(
 
     ordered_files = CONTEXT_FILE_ORDER + sorted(all_md_files - set(CONTEXT_FILE_ORDER) - SKIP_FILES)
     for md_file in ordered_files:
-        if md_file not in all_md_files or md_file in SKIP_FILES:
+        if md_file not in all_md_files or md_file.casefold() in SKIP_FILES:
             continue
         filepath = os.path.join(story_dir, md_file)
         try:
@@ -7759,7 +7775,6 @@ def _build_generate_messages(story_id: str, uid: str, user_input: str) -> dict:
         "items.md": "ITEMS",
         "villains.md": "VILLAINS",
         "incidents.md": "KEY INCIDENTS",
-        "consistency.md": "CONSISTENCY NOTES",
         "audio_log.md": "AUDIO LOG (songs/music the user has shared — remember these)",
         "style.md": "STYLE GUIDE (follow these writing rules)",
         "time.md": "STORY TIMELINE (day, time, and event order)",
@@ -7769,9 +7784,9 @@ def _build_generate_messages(story_id: str, uid: str, user_input: str) -> dict:
     # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
-                          "incidents.md", "consistency.md", "audio_log.md", "style.md",
+                          "incidents.md", "audio_log.md", "style.md",
                           "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
+    SKIP_FILES = {"rules.md", "context.md", "story.md", "consistency.md"}  # Diagnostics stay out of model context.
 
     story_context_parts = []
     rules_text = ""
@@ -7785,7 +7800,7 @@ def _build_generate_messages(story_id: str, uid: str, user_input: str) -> dict:
 
     ordered_files = CONTEXT_FILE_ORDER + sorted(all_md_files - set(CONTEXT_FILE_ORDER) - SKIP_FILES)
     for md_file in ordered_files:
-        if md_file not in all_md_files or md_file in SKIP_FILES:
+        if md_file not in all_md_files or md_file.casefold() in SKIP_FILES:
             continue
 
         filepath = os.path.join(story_dir, md_file)
@@ -8260,7 +8275,6 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
         "items.md": "ITEMS",
         "villains.md": "VILLAINS",
         "incidents.md": "KEY INCIDENTS",
-        "consistency.md": "CONSISTENCY NOTES",
         "audio_log.md": "AUDIO LOG (songs/music the user has shared — remember these)",
         "style.md": "STYLE GUIDE (follow these writing rules)",
         "time.md": "STORY TIMELINE (day, time, and event order)",
@@ -8270,9 +8284,9 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
     # so the full story text (added last, below) sits closest to where generation begins -
     # that's where a model's attention is strongest, and it's the actual continuation point.
     CONTEXT_FILE_ORDER = ["characters.md", "positions.md", "locations.md", "items.md", "villains.md",
-                          "incidents.md", "consistency.md", "audio_log.md", "style.md",
+                          "incidents.md", "audio_log.md", "style.md",
                           "time.md", "summary.md"]
-    SKIP_FILES = {"rules.md", "context.md", "story.md"}  # both injected separately below (rules last, full story last)
+    SKIP_FILES = {"rules.md", "context.md", "story.md", "consistency.md"}  # Diagnostics stay out of model context.
 
     story_context_parts = []
     rules_text = ""
@@ -8286,7 +8300,7 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
 
     ordered_files = CONTEXT_FILE_ORDER + sorted(all_md_files - set(CONTEXT_FILE_ORDER) - SKIP_FILES)
     for md_file in ordered_files:
-        if md_file not in all_md_files or md_file in SKIP_FILES:
+        if md_file not in all_md_files or md_file.casefold() in SKIP_FILES:
             continue
 
         filepath = os.path.join(story_dir, md_file)
@@ -8950,14 +8964,14 @@ class ModelDiscoveryError(ValueError):
     """A safe, actionable catalog error that can be returned to the browser."""
 
 
-def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False):
+def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False, api_format: str = "auto"):
     keys = _split_keys(api_key if api_key is not None else os.getenv("OPENAI_API_KEY"))
     if not keys:
         return None
     try:
         default_base_url = os.getenv("OPENAI_BASE_URL") if api_key is None else None
         safe_base_url = validate_openai_base_url(base_url or default_base_url or "https://api.openai.com/v1")
-        safe_base_url, _ = resolve_openai_endpoint(safe_base_url)
+        safe_base_url, protocol = resolve_openai_endpoint(safe_base_url, api_format)
     except ValueError as exc:
         if strict:
             raise ModelDiscoveryError("Invalid provider base URL. Check the HTTPS API URL in Settings.") from exc
@@ -8965,17 +8979,39 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
     error = "Could not reach the provider's /models endpoint. Check the URL and try refreshing models."
     empty_result = False
     for key in keys:
+        _MESSAGES_MODEL_LIMITS.pop((safe_base_url, key), None)
         try:
-            req = urllib.request.Request(safe_base_url + "/models", headers={
-                "Authorization": f"Bearer {key}", "User-Agent": "StoryWeaver/1.0"
-            })
-            with _NO_REDIRECT_OPENER.open(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
-                raise ValueError("Missing model list")
-            models = [{"id": m["id"], "created": _created_ts(m.get("created"))}
-                      for m in data["data"]
-                      if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"].strip()]
+            headers = {"User-Agent": "StoryWeaver/1.0"}
+            if protocol == "messages" and not is_opencode_zen(safe_base_url):
+                headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+            else:
+                headers["Authorization"] = f"Bearer {key}"
+            models, limits, cursors = [], {}, set()
+            catalog_url = safe_base_url + "/models"
+            # Never follow a provider-supplied next URL with this credential.
+            for _page in range(20):
+                req = urllib.request.Request(catalog_url, headers=headers)
+                with _NO_REDIRECT_OPENER.open(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                    raise ValueError("Missing model list")
+                for m in data["data"]:
+                    if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"].strip():
+                        continue
+                    models.append({"id": m["id"], "created": _created_ts(m.get("created_at") or m.get("created"))})
+                    limit = m.get("max_tokens")
+                    if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+                        limits[m["id"]] = limit
+                if protocol != "messages" or not data.get("has_more"):
+                    break
+                cursor = data.get("last_id")
+                if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                    raise ValueError("Invalid model pagination cursor")
+                cursors.add(cursor)
+                catalog_url = safe_base_url + "/models?" + urllib.parse.urlencode({"after_id": cursor})
+            else:
+                raise ValueError("Model pagination exceeded its limit")
+            _MESSAGES_MODEL_LIMITS[(safe_base_url, key)] = limits
             if models:
                 return "openai", models
             empty_result = True
@@ -9003,7 +9039,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
 
 def _user_openai_models(user_keys):
     """Automatic candidates belong to the current key and URL, never another user."""
-    live = fetch_openai_live_models(user_keys.get("openai_api_key", ""), user_keys.get("openai_base_url"))
+    live = fetch_openai_live_models(user_keys.get("openai_api_key", ""), user_keys.get("openai_base_url"),
+                                    api_format=user_keys.get("openai_api_format", "auto"))
     return [model for model in _dropdown_models("openai", live)
             if not any(hint in model.lower() for hint in NON_CHAT_MODEL_HINTS)]
 
@@ -9316,7 +9353,12 @@ async def get_providers_and_models(user_info: dict = Depends(get_current_user_in
     for pkey, keyname, display, fetcher in configured:
         try:
             if pkey == "openai":
-                live = fetcher(user_keys[keyname], user_keys.get("openai_base_url"), strict=True)
+                base_url = user_keys.get("openai_base_url") or "https://api.openai.com/v1"
+                resolved_url, protocol = resolve_openai_endpoint(base_url, user_keys.get("openai_api_format", "auto"))
+                if protocol == "messages" and not is_opencode_zen(resolved_url):
+                    display = "Anthropic Messages (Custom API)"
+                live = fetcher(user_keys[keyname], base_url, strict=True,
+                               api_format=user_keys.get("openai_api_format", "auto"))
             else:
                 live = fetcher(user_keys[keyname])
         except ModelDiscoveryError as exc:
@@ -9350,6 +9392,7 @@ class UserKeysPayload(BaseModel):
     openai_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_base_url: Optional[str] = Field(default=None, max_length=2048)
     openai_api_format: Optional[str] = Field(default=None, max_length=32)
+    openai_max_output_tokens: Optional[str] = Field(default=None, max_length=10)
     openai_reasoning_effort: Optional[str] = Field(default=None, max_length=16)
     openrouter_api_key: Optional[str] = Field(default=None, max_length=4096)
     groq_api_key: Optional[str] = Field(default=None, max_length=4096)
@@ -9385,7 +9428,7 @@ async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         }
     keys = load_user_keys(uid)
     # Non-secret fields that should be returned in full (not masked)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     masked_keys = {}
