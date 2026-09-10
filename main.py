@@ -20,7 +20,7 @@ class LogInterceptor:
             for line in message.splitlines():
                 cleaned = line.strip()
                 if cleaned:
-                    SERVER_LOGS.append(f"[{timestamp}] {cleaned}")
+                    SERVER_LOGS.append(f"[{timestamp}] {cleaned[:4096]}" + (" [truncated]" if len(cleaned) > 4096 else ""))
 
     def flush(self):
         try:
@@ -48,7 +48,7 @@ sys.stderr = LogInterceptor(sys.stderr)
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 import os
 import json
@@ -69,6 +69,7 @@ from difflib import SequenceMatcher
 import hashlib
 import ipaddress
 
+from runtime_support import HistoryChanged, read_chat_page, relay_stream, heartbeat_stream
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -1006,11 +1007,22 @@ def _read_local_story_files(story_dir: str) -> dict:
     return files
 
 
-def _read_postgres_story(uid: str, story_id: str):
+def _read_postgres_story(uid: str, story_id: str, local_dir: str = None):
     import psycopg2
     conn = psycopg2.connect(db_conn_str, connect_timeout=10)
     try:
         with conn.cursor() as cur:
+            state = _story_sync_state(local_dir) if local_dir else {}
+            if state.get("storage") == "postgres":
+                # A lightweight manifest proves the cached snapshot is current.
+                # Read all file bodies only for a cold, changed, or missing cache.
+                cur.execute("SELECT file_name, updated_at FROM user_stories WHERE uid = %s AND story_id = %s", (uid, story_id))
+                manifest = cur.fetchall()
+                timestamp = max((float(row[1] or 0) for row in manifest), default=0.0)
+                if (manifest and timestamp <= float(state.get("remote_updated_at", 0))
+                        and all(os.path.isfile(os.path.join(local_dir, name))
+                                for name, _ in manifest if _is_synced_story_file(name))):
+                    return None, timestamp, None
             cur.execute("""SELECT file_name, content, updated_at, title FROM user_stories
                            WHERE uid = %s AND story_id = %s""", (uid, story_id))
             rows = cur.fetchall()
@@ -1096,6 +1108,12 @@ def _restore_story_snapshot(uid: str, story_id: str, files: dict, updated_at: fl
 
 
 def restore_story_directory_from_firestore(uid: str, story_id: str):
+    # Coalesce concurrent panel loads with saves for the same account/story.
+    with get_story_lock(story_id, uid):
+        return _restore_story_directory(uid, story_id)
+
+
+def _restore_story_directory(uid: str, story_id: str):
     """Load the configured primary store; import Firestore-only stories when absent."""
     if not uid or uid == "default_user":
         return
@@ -1106,7 +1124,9 @@ def restore_story_directory_from_firestore(uid: str, story_id: str):
     if db_conn_str:
         # Configuration selects the authority even if the startup connection failed.
         try:
-            files, updated_at, _ = _read_postgres_story(uid, story_id)
+            files, updated_at, _ = _read_postgres_story(uid, story_id, local_dir=story_dir)
+            if files is None:
+                return  # Manifest matched: no large payload was transferred or parsed.
             if files:
                 _restore_story_snapshot(uid, story_id, files, updated_at, "postgres")
                 return
@@ -3014,7 +3034,7 @@ def _story_dir_size(story_dir: str) -> int:
     return total
 
 @app.get("/stories")
-async def list_stories(user_id: str = Depends(get_current_user_id)):
+def list_stories(user_id: str = Depends(get_current_user_id)):
     """List cached and Postgres stories, followed by Firestore-only legacy stories."""
     print(f"[Stories Route] Listing stories for user_id: {user_id}")
     stories = []
@@ -3190,36 +3210,43 @@ async def delete_story(story_id: str, user_info: dict = Depends(require_authenti
     return {"success": True}
 
 @app.get("/story/{story_id}/chat")
-async def get_chat_log(story_id: str, last: int = 10, user_id: str = Depends(get_current_user_id)):
+def get_chat_log(story_id: str, last: int = 40, before: int = None, after: int = None,
+                 revision: str = None, user_id: str = Depends(get_current_user_id)):
+    """Return a bounded, revision-checked page without loading all chat into RAM."""
+    if (before is not None and before < 0) or (after is not None and after < 0):
+        raise HTTPException(status_code=422, detail="History positions cannot be negative")
     restore_story_directory_from_firestore(user_id, story_id)
-    """Get recent chat messages for display."""
     path = get_chat_log_path(story_id, uid=user_id, create=False)
-    entries = []
-    
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                entries = json.load(f)
-        except (json.JSONDecodeError, Exception):
-            entries = []
-    
-    # Fallback: if no chat log but story.md has content, show it as one AI message
-    if not entries:
-        story_path = get_story_path(story_id, uid=user_id, create=False)
-        if os.path.exists(story_path):
-            with open(story_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if content:
-                # Show last ~2000 chars to keep it manageable
-                display_text = content[-2000:] if len(content) > 2000 else content  # type: ignore
-                if len(content) > 2000:
-                    display_text = "...\n\n" + display_text
-                entries = [{"role": "ai", "text": display_text, "model": "", "time": ""}]
-    
-    return {"messages": entries[-last:], "pending_retry": read_pending_retry(story_id, uid=user_id)}
+    with get_story_lock(story_id, user_id):
+        page = {"messages": [], "start_index": 0, "end_index": 0, "total_entries": 0,
+                "total_turns": 0, "revision": "", "last_user_prompt": ""}
+        if os.path.exists(path):
+            try:
+                page = read_chat_page(path, last=last, before=before, after=after, revision=revision)
+            except HistoryChanged as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=422, detail="Could not read chat history. Open chat_log.json in Story Files to check its format.") from exc
+        # Only stories without a transcript use the manuscript preview.
+        if not page["total_entries"]:
+            story_path = get_story_path(story_id, uid=user_id, create=False)
+            if os.path.exists(story_path):
+                with open(story_path, "r", encoding="utf-8") as source:
+                    tail = deque(maxlen=2000)
+                    length = 0
+                    while chunk := source.read(65536):
+                        length += len(chunk)
+                        tail.extend(chunk)
+                content = ''.join(tail).strip()
+                if content:
+                    page.update(messages=[{"role": "ai", "text": ("...\n\n" if length > 2000 else "") + content,
+                                           "model": "", "time": "", "turn_index": 0}],
+                                end_index=1, total_entries=1, total_turns=1)
+        page["pending_retry"] = read_pending_retry(story_id, uid=user_id)
+        return JSONResponse(page, headers={"Cache-Control": "no-store"})
 
 @app.get("/story/{story_id}")
-async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_current_user_id)):
+def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     """Get story content. Only returns the last `tail` characters by default to avoid memory issues."""
     path = get_story_path(story_id, uid=user_id, create=False)
@@ -3241,7 +3268,7 @@ async def get_story(story_id: str, tail: int = 3000, user_id: str = Depends(get_
     return {"content": truncated_content, "total_length": total_length, "truncated": True}
 
 @app.get("/story/{story_id}/full")
-async def get_full_story(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_full_story(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     """Get the full story content (for export/download)."""
     path = get_story_path(story_id, uid=user_id, create=False)
@@ -3251,7 +3278,7 @@ async def get_full_story(story_id: str, user_id: str = Depends(get_current_user_
         return {"content": f.read()}
 
 @app.get("/story/{story_id}/elements")
-async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_elements(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     """Get all extracted story elements."""
     elements = {}
@@ -3263,7 +3290,7 @@ async def get_elements(story_id: str, user_id: str = Depends(get_current_user_id
     return elements
 
 @app.get("/story/{story_id}/summary")
-async def get_summary(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_summary(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     """Get the AI-maintained story summary."""
     path = get_summary_path(story_id, uid=user_id, create=False)
@@ -3293,7 +3320,7 @@ class TextInput(BaseModel):
 
 # --- Style Guide ---
 @app.get("/story/{story_id}/style")
-async def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_style(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_style_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -3315,7 +3342,7 @@ async def update_style(story_id: str, input_data: TextInput, user_info: dict = D
 
 # --- World Rules ---
 @app.get("/story/{story_id}/rules")
-async def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_rules(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_rules_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -3337,7 +3364,7 @@ async def update_rules(story_id: str, input_data: TextInput, user_info: dict = D
 
 # --- Consistency Log ---
 @app.get("/story/{story_id}/consistency")
-async def get_consistency(story_id: str, user_id: str = Depends(get_current_user_id)):
+def get_consistency(story_id: str, user_id: str = Depends(get_current_user_id)):
     restore_story_directory_from_firestore(user_id, story_id)
     path = get_consistency_path(story_id, uid=user_id, create=False)
     if not os.path.exists(path):
@@ -3410,7 +3437,7 @@ def _story_file_meta(name: str) -> dict:
 
 
 @app.get("/story/{story_id}/files")
-async def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id)):
+def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id)):
     """List Markdown files and chat_log.json, with size and line count."""
     restore_story_directory_from_firestore(user_id, story_id)
     story_dir = get_story_dir(story_id, uid=user_id, create=False)
@@ -3446,7 +3473,7 @@ async def list_story_files(story_id: str, user_id: str = Depends(get_current_use
 
 
 @app.get("/story/{story_id}/file/{filename}")
-async def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_current_user_id)):
+def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_current_user_id)):
     """Read one editable story file verbatim."""
     restore_story_directory_from_firestore(user_id, story_id)
     target = _resolve_story_file(story_id, filename, user_id)
@@ -4859,69 +4886,11 @@ _HEARTBEAT = object()
 
 
 def _heartbeat_stream(stream, interval=15):
-    """Wrap a provider stream so the connection can't go idle.
-
-    Thinking models (e.g. Google Gemini with a dynamic budget) can ponder for
-    minutes before emitting the first chunk. During that silence a reverse
-    proxy or the browser can kill the SSE connection - which on Windows
-    surfaces as 'OSError: [Errno 9] Bad file descriptor' mid-generation and
-    loses the whole story. This wrapper pumps the stream in a background
-    thread and yields a _HEARTBEAT sentinel whenever no chunk arrives within
-    `interval` seconds, so the caller can emit an SSE 'heartbeat' event.
-    Real stream errors still propagate to the caller as normal exceptions."""
-    it = iter(stream)
-    q = queue.Queue(maxsize=16)
-
-    def _pump():
-        try:
-            for chunk in it:
-                q.put((False, chunk))
-        except Exception as exc:  # noqa: BLE001 - must forward any stream failure
-            q.put((True, exc))
-        q.put((False, None))
-
-    threading.Thread(target=_pump, daemon=True).start()
-    while True:
-        try:
-            is_error, item = q.get(timeout=interval)
-        except queue.Empty:
-            yield _HEARTBEAT
-            continue
-        if is_error:
-            raise item
-        if item is None:
-            return
-        yield item
+    yield from heartbeat_stream(stream, _HEARTBEAT, interval=interval)
 
 
 def _relay_stream(gen):
-    """Run a generator in a background thread and relay its items over a queue.
-
-    This decouples generation from the SSE connection: if the client disconnects
-    (browser closed, tab killed, network drop), the relay stops reading but the
-    worker thread keeps running to completion - the story still gets saved, the
-    chat entry logged, and Firestore synced. Without this, closing the browser
-    aborted the turn mid-generation and lost everything after the last chunk.
-    The queue is unbounded: once the client is gone the events just accumulate
-    until the worker finishes (a whole story is only a few hundred KB)."""
-    q = queue.Queue()
-
-    def _pump():
-        try:
-            for item in gen:
-                q.put(("item", item))
-        except Exception as exc:  # noqa: BLE001 - surface worker bugs to the client
-            q.put(("error", exc))
-        q.put(("done", None))
-
-    threading.Thread(target=_pump, daemon=True).start()
-    while True:
-        kind, item = q.get()
-        if kind == "done":
-            return
-        if kind == "error":
-            raise item
-        yield item
+    yield from relay_stream(gen)
 
 
 def _thought_blocks(text: str):
@@ -9315,7 +9284,7 @@ def refresh_live_provider_models():
 
 
 @app.get("/api/providers-models")
-async def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
+def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
     """Returns available AI providers and models based on the user's Settings keys."""
     uid = user_info.get("uid", "default_user")
     user_keys = load_user_keys(uid)
@@ -9412,7 +9381,7 @@ class UserKeysPayload(BaseModel):
     clear_keys: List[str] = Field(default_factory=list, max_length=16)
 
 @app.get("/api/user/settings")
-async def get_user_settings(user_info: dict = Depends(get_current_user_info)):
+def get_user_settings(user_info: dict = Depends(get_current_user_info)):
     """Retrieve user settings, role, and masked custom API keys."""
     uid = user_info["uid"]
     if user_info.get("is_guest"):

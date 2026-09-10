@@ -6,6 +6,7 @@
 !main.py
 !openai_compat.py
 !regeneration.py
+!runtime_support.py
 !static/
 !static/index.html
 !static/file-editor.js

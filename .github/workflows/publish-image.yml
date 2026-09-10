@@ -11,10 +11,13 @@ on:
       - main.py
       - openai_compat.py
       - regeneration.py
+      - runtime_support.py
       - static/index.html
       - static/file-editor.js
       - tests/test_file_editor.cjs
       - tests/test_chat_log_frontend.cjs
+      - tests/test_story_loading_frontend.cjs
+      - tests/test_feedback_frontend.cjs
   workflow_dispatch:
 
 permissions:
@@ -41,8 +44,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check file editor behavior
-        run: node --test tests/test_file_editor.cjs tests/test_chat_log_frontend.cjs
+      - name: Check story switching, history, feedback, and file editor behavior
+        run: node --test tests/test_file_editor.cjs tests/test_chat_log_frontend.cjs tests/test_story_loading_frontend.cjs tests/test_feedback_frontend.cjs
 
       - name: Build the deployment image
         run: |

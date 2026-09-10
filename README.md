@@ -230,3 +230,20 @@ A 10-minute schedule is intended to keep incoming requests below that idle
 interval. An initial cold start or deployment restart can still exceed the cron
 timeout; after the app has finished waking, subsequent pings can return the small
 response. Regular pings do not override Render's restarts or account limits.
+
+## Loading large stories
+
+Story history loads up to 40 messages at a time. Use the labelled **Older turns**
+and **Newer turns** buttons to browse; each page replaces the previous page.
+Full turns and saved model thoughts remain intact, and writer context still uses
+the full manuscript. Switching stories clears the previous view immediately;
+late history, panel, and generation responses cannot update the new view.
+
+`GET /story/{story_id}/chat` accepts `last` (default 40, maximum 100), either
+`before` or `after` (message positions), and `revision` from the preceding response.
+Pages also have a soft 256,000-character content budget, always retaining at least
+one complete message. A changed revision returns 409 so clients can reload the
+latest page. Responses are not cached. The server parses transcripts incrementally,
+checks Postgres metadata before downloading unchanged files, and bounds stream
+queues. Disconnecting the browser releases queued UI events while the generation
+worker continues its save steps.

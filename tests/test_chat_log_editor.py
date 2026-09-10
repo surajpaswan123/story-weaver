@@ -46,7 +46,7 @@ def test_list_read_edit_and_reload_preserves_thoughts_metadata_and_manuscript(ed
     assert result.status_code == 200, result.text
     assert result.json()["chars"] == len(edited)
     assert client.get(URL).json()["text"] == edited
-    assert client.get("/story/editor/chat").json()["messages"] == entries
+    assert client.get("/story/editor/chat").json()["messages"] == [dict(entry, turn_index=0) for entry in entries]
     assert (folder / "story.md").read_text(encoding="utf-8") == "Mira waited."
     assert synced == [("responses-test", "editor")]
 

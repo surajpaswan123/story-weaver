@@ -18,7 +18,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && mkdir /app/stories \
     && chown storyweaver:storyweaver /app/stories
 
-COPY main.py openai_compat.py regeneration.py ./
+COPY main.py openai_compat.py regeneration.py runtime_support.py ./
 COPY static/index.html ./static/index.html
 COPY static/file-editor.js ./static/file-editor.js
 

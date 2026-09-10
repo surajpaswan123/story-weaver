@@ -33,6 +33,7 @@ function setup() {
     const button = Object.assign(new Control(), { closest: () => bar });
     const response = data => ({ ok: true, json: async () => data });
     const context = vm.createContext({
+        AbortController, storyViewEpoch: 0, storyReads: new Map(),
         document: {
             getElementById(id) {
                 if (id === 'provider-select') return provider;
@@ -53,7 +54,8 @@ function setup() {
         loadStory: async () => { calls.push({ load: true }); },
         submitStory: async (...args) => { generations.push(args); },
     });
-    vm.runInContext(feedbackCode + '\n' + retryCode, context);
+    const readHelpers = html.slice(html.indexOf('        function beginStoryRead('), html.indexOf('        function resetStoryView('));
+    vm.runInContext(readHelpers + feedbackCode + '\n' + retryCode, context);
     const open = () => { context.showRegenerateFeedback(button); return activeForm; };
     const submit = form => context.submitFeedbackRegeneration({ preventDefault() {} }, form);
     return { context, open, submit, button, provider, input, calls, generations, announcements, response };

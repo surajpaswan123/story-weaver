@@ -14,6 +14,7 @@ class Postgres:
     def __init__(self):
         self.rows = {}
         self.connections = []
+        self.queries = []
         self.fail_connect = self.fail_commit = False
 
     def seed(self, name, text, timestamp=20.0, title=None, story="test"):
@@ -36,6 +37,7 @@ class Postgres:
                 pass
             def execute(self, sql, params):
                 sql = " ".join(sql.split())
+                database.queries.append(sql)
                 if "pg_advisory_xact_lock" in sql:
                     self.result = []
                 elif sql.startswith("INSERT INTO user_stories"):
@@ -58,6 +60,8 @@ class Postgres:
                         self.result = [(1,)] if rows else []
                     elif sql.startswith("SELECT file_name FROM"):
                         self.result = [(r[0],) for r in rows]
+                    elif sql.startswith("SELECT file_name, updated_at"):
+                        self.result = [(r[0], r[2]) for r in rows]
                     else:
                         self.result = rows
                 else:
@@ -226,7 +230,7 @@ def test_empty_cache_listing_during_postgres_outage_does_not_show_stale_firestor
     pg, fs, _ = storage
     pg.fail_connect = True
     with pytest.raises(main.HTTPException) as error:
-        asyncio.run(main.list_stories("storage-user"))
+        main.list_stories("storage-user")
     assert error.value.status_code == 503
     assert fs.lists == 0
 
@@ -235,7 +239,7 @@ def test_story_listing_prefers_postgres_title_and_utf8_size(storage):
     pg, fs, _ = storage
     pg.seed("story.md", "कहानी", title="Primary title")
     fs.docs["legacy"] = {"files": {"story_md": "Legacy"}, "title": "Legacy title"}
-    stories = asyncio.run(main.list_stories("storage-user"))["stories"]
+    stories = main.list_stories("storage-user")["stories"]
     assert next(story for story in stories if story["id"] == "test")["name"] == "Primary title"
     assert next(story for story in stories if story["id"] == "test")["size"] == len("कहानी".encode("utf-8"))
     assert {story["id"] for story in stories} == {"test", "legacy"}
@@ -252,3 +256,20 @@ def test_create_saves_initial_files_and_cold_duplicate_cannot_overwrite_primary(
         asyncio.run(main.create_story(main.CreateStoryInput(name="existing"), user))
     assert error.value.status_code == 409
     assert pg.rows[("storage-user", "existing", "story.md")][0] == "Existing manuscript"
+
+
+def test_warm_restore_reads_only_metadata_but_fetches_new_or_missing_files(storage):
+    pg, fs, folder = storage
+    pg.seed("story.md", "Current manuscript")
+    pg.seed("summary.md", "Current summary")
+    main.restore_story_directory_from_firestore("storage-user", "test")
+    pg.queries.clear()
+    main.restore_story_directory_from_firestore("storage-user", "test")
+    assert len(pg.queries) == 1 and pg.queries[0].startswith("SELECT file_name, updated_at")
+    pg.seed("story.md", "Newer manuscript", timestamp=30)
+    main.restore_story_directory_from_firestore("storage-user", "test")
+    assert (folder / "story.md").read_text(encoding="utf-8") == "Newer manuscript"
+    (folder / "summary.md").unlink()
+    main.restore_story_directory_from_firestore("storage-user", "test")
+    assert (folder / "summary.md").read_text(encoding="utf-8") == "Current summary"
+    assert fs.gets == 0

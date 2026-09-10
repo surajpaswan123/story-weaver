@@ -7,3 +7,4 @@ openai>=1.68,<4
 firebase-admin>=6.5,<8
 psycopg2-binary>=2.9,<3
 anthropic>=0.125,<1
+ijson>=3.3,<4
