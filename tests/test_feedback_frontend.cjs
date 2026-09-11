@@ -34,6 +34,7 @@ function setup() {
     const response = data => ({ ok: true, json: async () => data });
     const context = vm.createContext({
         AbortController, storyViewEpoch: 0, storyReads: new Map(),
+        observedGeneration: null, generationStatusRequest: null,
         document: {
             getElementById(id) {
                 if (id === 'provider-select') return provider;

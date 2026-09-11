@@ -1,12 +1,98 @@
 """Bounded history reads and stream delivery for small hosting instances."""
 
 import hashlib
+import json
 import os
 import queue
 import threading
+import time
 from collections import deque
 
 import ijson
+
+
+class TurnProgress:
+    """Small process-local status records; never retain prompts or streamed text."""
+
+    def __init__(self, max_finished=128, finished_ttl=3600):
+        self.records = {}
+        self.lock = threading.RLock()
+        self.max_finished = max_finished
+        self.finished_ttl = finished_ttl
+
+    def _prune(self):
+        now = time.time()
+        finished = sorted((r['updated_at'], key) for key, r in self.records.items() if not r['active'])
+        for index, (updated, key) in enumerate(finished):
+            if now - updated > self.finished_ttl or index < len(finished) - self.max_finished:
+                self.records.pop(key, None)
+
+    def start(self, key, token, execution='server'):
+        with self.lock:
+            self._prune()
+            now = time.time()
+            self.records[key] = dict(token=token, run_id=hashlib.sha256(token.encode()).hexdigest()[:20],
+                                     active=True, worker=False, state='starting', outcome=None,
+                                     execution=execution, started_at=now, updated_at=now)
+
+    def update(self, key, token, state=None, outcome=None, worker=None):
+        with self.lock:
+            record = self.records.get(key)
+            if not record or record['token'] != token or not record['active']:
+                return
+            if state and state != record['state']:
+                record.update(state=state, updated_at=time.time())
+            if outcome:
+                record['outcome'] = outcome
+            if worker is not None:
+                record['worker'] = worker
+
+    def worker_is_running(self, key, token):
+        with self.lock:
+            record = self.records.get(key)
+            return bool(record and record['token'] == token and record['active'] and record['worker'])
+
+    def finish(self, key, token, outcome=None):
+        with self.lock:
+            record = self.records.get(key)
+            if record and record['token'] == token and record['active']:
+                record.update(active=False, worker=False, state=outcome or record['outcome'] or 'interrupted', updated_at=time.time())
+            self._prune()
+
+    def status(self, key, active_token=None):
+        with self.lock:
+            self._prune()
+            record = self.records.get(key)
+            if not record or (active_token and record['token'] != active_token):
+                return {'active': bool(active_token), 'state': 'generating' if active_token else 'idle', 'run_id': ''}
+            if not active_token and record['active']:
+                self.finish(key, record['token'], outcome='interrupted')
+            return {name: record[name] for name in ('active', 'state', 'run_id', 'execution', 'started_at', 'updated_at')}
+
+    def track(self, key, token, source):
+        self.update(key, token, state='generating', worker=True)
+        try:
+            for event in source:
+                # Chunk payloads can be large. Their text never enters status storage.
+                if isinstance(event, str) and event.startswith('data: {"type": "chunk"'):
+                    self.update(key, token, state='generating')
+                elif isinstance(event, str) and event.startswith('data: '):
+                    try:
+                        kind = json.loads(event[6:]).get('type')
+                    except (ValueError, AttributeError):
+                        kind = None
+                    if kind in {'finalizing', 'retrying'}:
+                        self.update(key, token, state=kind)
+                    elif kind in {'done', 'error', 'stopped'}:
+                        outcome = {'done': 'completed', 'error': 'failed', 'stopped': 'stopped'}[kind]
+                        # The worker still needs to finish its final storage sync.
+                        self.update(key, token, state='finalizing', outcome=outcome)
+                yield event
+        finally:
+            self.update(key, token, worker=False)
+            close = getattr(source, 'close', None)
+            if close:
+                close()
 
 
 class HistoryChanged(ValueError):

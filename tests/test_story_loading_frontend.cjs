@@ -15,7 +15,8 @@ const response = data => ({ ok: true, status: 200, json: async () => data });
 const page = (text, start = 0, end = 1, total = 1) => ({ messages: [{ role: 'ai', text, turn_index: start }], start_index: start, end_index: end, total_entries: total, revision: 'revision', last_user_prompt: text });
 
 function setup() {
-    const elements = new Map(), notices = [], calls = [];
+    const elements = new Map(), notices = [], calls = [], timers = new Map(), storage = new Map();
+    let nextTimer = 0;
     class Element {
         constructor() {
             this.children = []; this.dataset = {}; this.attributes = {}; this.value = ''; this.disabled = false;
@@ -45,7 +46,11 @@ function setup() {
         createDocumentFragment: () => Object.assign(new Element(), { fragment: true }), querySelectorAll: () => [] };
     const context = vm.createContext({
         document, window: { confirm: () => true }, AbortController, URLSearchParams, TextDecoder,
-        setTimeout, clearTimeout, clearInterval, console: { error() {}, warn() {}, log() {} },
+        setTimeout: (fn, delay) => { timers.set(++nextTimer, { fn, delay }); return nextTimer; },
+        clearTimeout: id => timers.delete(id), clearInterval, console: { error() {}, warn() {}, log() {} },
+        currentUser: { uid: 'test-user' },
+        localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+        observedGeneration: null, generationStatusTimer: null, generationStatusRequest: null, generationStatusFailures: 0, historyGenerationRunId: '',
         currentStoryId: 'A', storyViewEpoch: 0, storySubmissionSeq: 0, storyLoadSeq: 0, storyReads: new Map(),
         activeReader: null, activeStoryId: null, isGenerating: false, isGuestMode: false,
         allChatEntries: [], renderedStartIndex: 0, historyStart: 0, historyEnd: 0, historyTotal: 0,
@@ -64,10 +69,11 @@ function setup() {
     });
     elements.get('provider-select').value = 'openai';
     for (const name of ['beginStoryRead', 'isCurrentStoryRead', 'resetStoryView', 'setGenerating', 'updateSendButtonState', 'updateHistoryControls',
-        'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'stopGeneration', 'regenerateStory']) {
+        'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'stopGeneration', 'regenerateStory',
+        'resetGenerationMonitor', 'generationRecoveryControls', 'showGenerationRecovery', 'scheduleGenerationCheck', 'applyGenerationStatus', 'checkGenerationStatus', 'stopRecoveredGeneration', 'rememberSelectedStory', 'restoreSelectedStory']) {
         vm.runInContext(source(name), context);
     }
-    return { context, elements, notices, calls };
+    return { context, elements, notices, calls, timers, storage };
 }
 
 test('switch clears old state immediately, including editor and panels; scrolling cannot revive it', async () => {
@@ -194,4 +200,125 @@ test('late streaming events and cleanup cannot touch the new story or its active
     assert.equal(c.isGenerating, true);
     assert.equal(c.input.disabled, true);
     assert.ok(cancelled >= 1);
+});
+
+test('reopening a running turn reports progress and does not call its prompt interrupted', async () => {
+    const app = setup(), c = app.context;
+    c.authFetch = async () => response({ ...page(''), messages: [{ role: 'user', text: 'Continue', turn_index: 0 }], generation: { active: true, state: 'generating', execution: 'server', run_id: 'run-1' } });
+    await c.loadStory();
+    assert.match(app.elements.get('generation-recovery-message').textContent, /still generating on the server/);
+    assert.match(c.storyDisplay.textContent, /generation in progress/);
+    assert.doesNotMatch(c.storyDisplay.textContent, /interrupted|Discard prompt/);
+    assert.equal(c.input.disabled, true);
+    c.input.value = 'A second prompt';
+    c.updateSendButtonState();
+    assert.equal(c.sendBtn.disabled, true);
+    const calls = [];
+    c.authFetch = (...args) => calls.push(args);
+    await c.submitStory('Must not start another generation', true);
+    assert.equal(calls.length, 0);
+    assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [3000]);
+});
+
+test('completion after reconnect reloads the saved turn exactly once and stops polling', async () => {
+    const app = setup(), c = app.context;
+    c.applyGenerationStatus({ active: true, state: 'finalizing', execution: 'server', run_id: 'run-1' });
+    c.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        const generation = { active: false, state: 'completed', run_id: 'run-1' };
+        return response(url.endsWith('/generation-status') ? generation : { ...page('Saved finished turn'), generation });
+    };
+    await c.checkGenerationStatus();
+    assert.equal(app.calls.filter(call => call.url.includes('/chat?')).length, 1);
+    assert.match(c.storyDisplay.textContent, /Saved finished turn/);
+    assert.match(app.elements.get('generation-recovery-message').textContent, /Generation completed/);
+    assert.equal(c.input.disabled, false);
+    assert.equal(app.timers.size, 0);
+    await c.checkGenerationStatus();
+    assert.equal(app.calls.filter(call => call.url.includes('/chat?')).length, 1);
+});
+
+test('a status network failure keeps the turn unconfirmed, blocks resubmission, and backs off', async () => {
+    const app = setup(), c = app.context;
+    c.applyGenerationStatus({ active: true, state: 'generating', run_id: 'run-1' });
+    c.authFetch = async () => { throw new Error('offline'); };
+    await c.checkGenerationStatus();
+    assert.match(app.elements.get('generation-recovery-message').textContent, /may still be running/);
+    assert.equal(c.observedGeneration.active, true);
+    assert.equal(c.sendBtn.disabled, true);
+    assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [6000]);
+    await c.checkGenerationStatus();
+    assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [12000]);
+});
+
+test('slow status requests never overlap and an old story response cannot lock the new story', async () => {
+    const app = setup(), c = app.context, pending = deferred();
+    let calls = 0;
+    c.authFetch = () => { calls++; return pending.promise; };
+    const first = c.checkGenerationStatus();
+    await c.checkGenerationStatus();
+    assert.equal(calls, 1);
+    c.resetStoryView(); c.currentStoryId = 'B';
+    pending.resolve(response({ active: true, state: 'generating', run_id: 'old-A' }));
+    await first;
+    assert.equal(c.observedGeneration, null);
+    assert.equal(c.input.disabled, false);
+    assert.equal(app.timers.size, 0);
+});
+
+test('only the same signed-in account restores its previous story, without overriding a selection', () => {
+    const app = setup(), c = app.context;
+    c.rememberSelectedStory();
+    c.currentStoryId = '';
+    const selected = [];
+    c.switchStory = (id, name) => { selected.push(id); c.currentStoryId = id; };
+    c.restoreSelectedStory([{ id: 'A', name: 'Story A' }]);
+    assert.deepEqual(selected, ['A']);
+    c.currentStoryId = 'B';
+    c.restoreSelectedStory([{ id: 'A', name: 'Story A' }]);
+    assert.deepEqual(selected, ['A']);
+    c.currentStoryId = ''; c.currentUser = { uid: 'another-account' };
+    c.restoreSelectedStory([{ id: 'A', name: 'Story A' }]);
+    assert.deepEqual(selected, ['A']);
+});
+
+test('browser-direct turns are described as waiting for that browser rather than server execution', () => {
+    const app = setup(), c = app.context;
+    c.applyGenerationStatus({ active: true, state: 'starting', execution: 'browser', run_id: 'browser-run' });
+    assert.match(app.elements.get('generation-recovery-message').textContent, /depends on that browser staying open/);
+    assert.doesNotMatch(app.elements.get('generation-recovery-message').textContent, /still generating on the server/);
+});
+
+test('hidden views poll less often and switching stories releases their timer', () => {
+    const app = setup(), c = app.context;
+    c.document.hidden = true;
+    c.applyGenerationStatus({ active: true, state: 'retrying', run_id: 'run-1' });
+    assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [15000]);
+    c.resetStoryView();
+    assert.equal(app.timers.size, 0);
+});
+
+test('an idle status never enables guest writing controls', () => {
+    const { context: c } = setup();
+    c.isGuestMode = true;
+    c.input.value = 'A prompt';
+    c.applyGenerationStatus({ active: false, state: 'idle' });
+    assert.equal(c.input.disabled, true);
+    assert.equal(c.sendBtn.disabled, true);
+});
+
+test('a recovered turn can be stopped, then its saved history is reloaded', async () => {
+    const app = setup(), c = app.context;
+    c.applyGenerationStatus({ active: true, state: 'generating', run_id: 'run-1' });
+    c.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        const generation = { active: false, state: 'stopped', run_id: 'run-1' };
+        return response(url.endsWith('/stop') ? { stopped: true } : url.endsWith('/generation-status') ? generation : { ...page('Earlier saved turn'), generation });
+    };
+    await c.stopRecoveredGeneration();
+    assert.equal(app.calls[0].url, '/story/A/stop');
+    assert.equal(app.calls[0].options.method, 'POST');
+    assert.match(c.storyDisplay.textContent, /Earlier saved turn/);
+    assert.equal(app.elements.get('generation-stop').hidden, true);
+    assert.equal(c.input.disabled, false);
 });

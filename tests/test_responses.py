@@ -229,6 +229,9 @@ def test_generate_api_persists_only_completed_responses(completed, configured_us
                 "user_input": "Continue.", "story_id": "test-story", "provider": "openai",
                 "model": MODEL, "skip_rules_check": True,
             })
+            status = app.get('/story/test-story/generation-status').json()
+            assert status['active'] is False
+            assert status['state'] == ('completed' if completed else 'failed')
         assert result.status_code == 200
         messages = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith("data: ")]
         if completed:

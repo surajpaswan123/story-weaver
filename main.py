@@ -69,7 +69,7 @@ from difflib import SequenceMatcher
 import hashlib
 import ipaddress
 
-from runtime_support import HistoryChanged, read_chat_page, relay_stream, heartbeat_stream
+from runtime_support import HistoryChanged, read_chat_page, relay_stream, heartbeat_stream, TurnProgress
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -420,6 +420,7 @@ _story_locks: dict[tuple[str, str], threading.RLock] = {}
 _story_locks_guard = threading.Lock()
 _active_story_turns: dict[tuple[str, str], tuple[str, float]] = {}
 _active_story_turns_guard = threading.Lock()
+_turn_progress = TurnProgress()
 STORY_TURN_TTL_SECONDS = 30 * 60
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -435,16 +436,17 @@ def get_story_lock(story_id: str, uid: str = "default_user") -> threading.RLock:
         return lock
 
 
-def begin_story_turn(story_id: str, uid: str = "default_user") -> str:
+def begin_story_turn(story_id: str, uid: str = "default_user", execution: str = "server") -> str:
     """Reserve a story turn or reject a concurrent generation from another tab."""
     key = (sanitize_id(uid or "default_user"), sanitize_id(story_id or "untitled"))
     now = time.time()
     with _active_story_turns_guard:
         current = _active_story_turns.get(key)
-        if current and now - current[1] < STORY_TURN_TTL_SECONDS:
+        if current and (now - current[1] < STORY_TURN_TTL_SECONDS or _turn_progress.worker_is_running(key, current[0])):
             raise HTTPException(status_code=409, detail="Another generation is already running for this story")
         token = uuid.uuid4().hex
         _active_story_turns[key] = (token, now)
+        _turn_progress.start(key, token, execution)
         return token
 
 
@@ -454,6 +456,7 @@ def end_story_turn(story_id: str, uid: str, token: str) -> None:
         current = _active_story_turns.get(key)
         if current and current[0] == token:
             _active_story_turns.pop(key, None)
+            _turn_progress.finish(key, token)
 
 
 # --- Generation stop/cancel support -------------------------------------------------
@@ -502,10 +505,26 @@ def story_turn_is_active(story_id: str, uid: str = "default_user") -> bool:
         current = _active_story_turns.get(key)
         if not current:
             return False
-        if time.time() - current[1] >= STORY_TURN_TTL_SECONDS:
+        if time.time() - current[1] >= STORY_TURN_TTL_SECONDS and not _turn_progress.worker_is_running(key, current[0]):
             _active_story_turns.pop(key, None)
             return False
         return True
+
+
+
+def current_generation_status(story_id: str, uid: str):
+    key = _stop_key(story_id, uid)
+    story_turn_is_active(story_id, uid)  # Expire an abandoned reservation, never a live worker.
+    with _active_story_turns_guard:
+        current = _active_story_turns.get(key)
+        return _turn_progress.status(key, current[0] if current else None)
+
+
+def tracked_story_stream(source, story_id: str, uid: str, token: str):
+    try:
+        yield from _turn_progress.track(_stop_key(story_id, uid), token, source)
+    finally:
+        end_story_turn(story_id, uid, token)
 
 
 def validate_story_turn_token(story_id: str, uid: str, token: str) -> None:
@@ -3209,6 +3228,12 @@ async def delete_story(story_id: str, user_info: dict = Depends(require_authenti
             
     return {"success": True}
 
+@app.get("/story/{story_id}/generation-status")
+def get_generation_status(story_id: str, user_info: dict = Depends(require_authenticated_user)):
+    """Read only process-local progress: no story files, provider, or cloud queries."""
+    return JSONResponse(current_generation_status(story_id, user_info['uid']), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/story/{story_id}/chat")
 def get_chat_log(story_id: str, last: int = 40, before: int = None, after: int = None,
                  revision: str = None, user_id: str = Depends(get_current_user_id)):
@@ -3243,6 +3268,7 @@ def get_chat_log(story_id: str, last: int = 40, before: int = None, after: int =
                                            "model": "", "time": "", "turn_index": 0}],
                                 end_index=1, total_entries=1, total_turns=1)
         page["pending_retry"] = read_pending_retry(story_id, uid=user_id)
+        page["generation"] = current_generation_status(story_id, user_id)
         return JSONResponse(page, headers={"Cache-Control": "no-store"})
 
 @app.get("/story/{story_id}")
@@ -7409,7 +7435,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     def event_stream():
         # Same background-thread treatment as /generate: closing the browser stops
         # the SSE relay but the audio pipeline keeps running to completion.
-        yield from _relay_stream(_audio_worker())
+        yield from _relay_stream(tracked_story_stream(_audio_worker(), story_id, user_id, turn_token))
 
     def _audio_worker():
         full_response = ""
@@ -7934,7 +7960,7 @@ async def local_begin(story_id: str, payload: LocalBeginPayload, user_info: dict
     snapshot for undo, log the user's prompt, and return the assembled prompts
     for the BROWSER to stream against the user's local OpenAI-compatible server."""
     user_id = user_info["uid"]
-    turn_token = begin_story_turn(story_id, user_id)
+    turn_token = begin_story_turn(story_id, user_id, execution="browser")
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         ctx = _build_generate_messages(story_id, user_id, payload.user_input or "")
@@ -8020,6 +8046,7 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, user_info: di
                 print(f"  WARNING: Could not update audio_log.md: {log_err}")
 
         clear_pending_retry(story_id, uid=user_id)
+        _turn_progress.update(_stop_key(story_id, user_id), payload.turn_token, state="finalizing", outcome="completed")
         keep_turn_active = True
         return {"ok": True, "saved": True, "truncated": was_truncated}
     except Exception as e:
@@ -8031,6 +8058,7 @@ async def local_finish(story_id: str, payload: LocalFinishPayload, user_info: di
         except Exception as sync_err:
             print(f"  Final Firestore sync failed: {sync_err}")
         if not keep_turn_active:
+            _turn_progress.update(_stop_key(story_id, user_id), payload.turn_token, outcome="failed")
             end_story_turn(story_id, user_id, payload.turn_token)
 
 
@@ -8123,7 +8151,7 @@ async def local_audio_begin(story_id: str, user_input: str = Form("", max_length
     for future context and returns the assembled prompts. No cloud transcription
     happens - the model hears the audio directly."""
     user_id = user_info["uid"]
-    turn_token = begin_story_turn(story_id, user_id)
+    turn_token = begin_story_turn(story_id, user_id, execution="browser")
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         story_dir = get_story_dir(story_id, uid=user_id)
@@ -8206,7 +8234,9 @@ async def stop_generation(story_id: str, user_info: dict = Depends(require_authe
     # Release the active-turn reservation immediately regardless of token.
     key = (sanitize_id(user_id or "default_user"), sanitize_id(story_id or "untitled"))
     with _active_story_turns_guard:
-        _active_story_turns.pop(key, None)
+        stopped_turn = _active_story_turns.pop(key, None)
+        if stopped_turn:
+            _turn_progress.finish(key, stopped_turn[0], outcome="stopped")
 
     return {"stopped": True, "removed_dangling": removed}
 
@@ -8395,7 +8425,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         # Run the whole turn in a background thread (see _relay_stream): if the
         # browser is closed mid-generation, the worker keeps going - the story is
         # still saved, chat-logged, synced, and the retry marker is updated.
-        yield from _relay_stream(_generate_worker())
+        yield from _relay_stream(tracked_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token))
 
     def _generate_worker():
         full_response = ""

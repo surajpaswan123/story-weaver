@@ -1167,6 +1167,150 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let storySubmissionSeq = 0;
         const storyReads = new Map();
 
+        let observedGeneration = null;
+        let historyGenerationRunId = '';
+        let generationStatusTimer = null;
+        let generationStatusRequest = null;
+        let generationStatusFailures = 0;
+
+        function resetGenerationMonitor() {
+            clearTimeout(generationStatusTimer);
+            generationStatusTimer = null;
+            generationStatusRequest?.controller.abort();
+            generationStatusRequest = null;
+            observedGeneration = null;
+            historyGenerationRunId = '';
+            generationStatusFailures = 0;
+            const banner = document.getElementById('generation-recovery');
+            if (banner) banner.hidden = true;
+            const stop = document.getElementById('generation-stop');
+            if (stop) stop.disabled = false;
+        }
+
+        function generationRecoveryControls() {
+            let banner = document.getElementById('generation-recovery');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'generation-recovery';
+                banner.className = 'px-6 py-3 text-sm border-b border-stone-200';
+                banner.setAttribute('role', 'region');
+                banner.setAttribute('aria-label', 'Generation status');
+                banner.innerHTML = '<p id="generation-recovery-message" role="status" aria-live="polite"></p><button type="button" id="generation-check" class="action-btn">Check generation status</button> <button type="button" id="generation-stop" class="action-btn">Stop generation</button>';
+                storyDisplay.before(banner);
+                document.getElementById('generation-check').onclick = () => checkGenerationStatus();
+                document.getElementById('generation-stop').onclick = stopRecoveredGeneration;
+            }
+            return banner;
+        }
+
+        function showGenerationRecovery(message, active) {
+            const banner = generationRecoveryControls();
+            banner.hidden = !message;
+            const text = document.getElementById('generation-recovery-message');
+            if (text.textContent !== message) text.textContent = message;
+            document.getElementById('generation-stop').hidden = !active;
+        }
+
+        function scheduleGenerationCheck() {
+            clearTimeout(generationStatusTimer);
+            const storyId = currentStoryId, epoch = storyViewEpoch;
+            const delay = generationStatusFailures ? Math.min(30000, 3000 * 2 ** generationStatusFailures) : (document.hidden ? 15000 : 3000);
+            generationStatusTimer = setTimeout(() => {
+                if (storyId === currentStoryId && epoch === storyViewEpoch && !isGenerating) checkGenerationStatus();
+            }, delay);
+        }
+
+        function applyGenerationStatus(status) {
+            if (isGenerating) return;
+            observedGeneration = status || { active: false, state: 'idle' };
+            let message = '';
+            if (observedGeneration.active) {
+                if (observedGeneration.execution === 'browser') {
+                    message = 'Waiting for a turn started in another browser connection. This turn depends on that browser staying open. If it closed, stop this turn before retrying.';
+                } else {
+                    const phases = { starting: 'Starting generation', generating: 'The story turn is still generating on the server', retrying: 'The provider is busy; the server is retrying', finalizing: 'The turn is still running: saving the story and updating its memory' };
+                    message = (phases[observedGeneration.state] || 'The story turn is still running on the server') + '. The saved result will load here when it finishes.';
+                }
+                scheduleGenerationCheck();
+            } else {
+                clearTimeout(generationStatusTimer);
+                const finished = { completed: 'Generation completed. Your saved story is loaded below.', failed: 'Generation failed. Check the saved story and retry information below.', stopped: 'Generation stopped. Your saved story is loaded below.', interrupted: 'The previous turn is no longer running. Check the saved story before retrying.' };
+                message = finished[observedGeneration.state] || '';
+            }
+            input.disabled = isGuestMode || Boolean(observedGeneration.active);
+            showGenerationRecovery(message, observedGeneration.active);
+            updateSendButtonState();
+        }
+
+        async function checkGenerationStatus(reloadOnFinish = true) {
+            if (isGuestMode || !currentStoryId || currentStoryId === 'default' || isGenerating || generationStatusRequest) return;
+            clearTimeout(generationStatusTimer);
+            const request = beginStoryRead('generation-status');
+            generationStatusRequest = request;
+            updateSendButtonState();
+            const timeout = setTimeout(() => request.controller.abort(), 12000);
+            let refresh = false;
+            try {
+                const res = await authFetch(`/story/${encodeURIComponent(request.storyId)}/generation-status`, { signal: request.controller.signal, cache: 'no-store' });
+                const status = await requireJsonResponse(res, 'Could not check generation status');
+                if (!isCurrentStoryRead(request)) return;
+                refresh = reloadOnFinish && !status.active && Boolean(observedGeneration?.active || (status.run_id && status.run_id !== historyGenerationRunId));
+                generationStatusFailures = 0;
+                applyGenerationStatus(status);
+            } catch (error) {
+                if (request.epoch !== storyViewEpoch || request.storyId !== currentStoryId || generationStatusRequest !== request) return;
+                generationStatusFailures++;
+                // A network error cannot prove that the server stopped working.
+                observedGeneration = { ...observedGeneration, active: true, state: 'unknown' };
+                input.disabled = true;
+                showGenerationRecovery('Could not reach the server to confirm this turn’s status. It may still be running. Retrying automatically; you can also check again.', true);
+                scheduleGenerationCheck();
+            } finally {
+                clearTimeout(timeout);
+                if (generationStatusRequest === request) {
+                    generationStatusRequest = null;
+                    updateSendButtonState();
+                }
+            }
+            if (refresh && isCurrentStoryRead(request)) await loadStory();
+        }
+
+        async function stopRecoveredGeneration() {
+            if (!observedGeneration?.active || isGenerating) return;
+            const request = beginStoryRead('recovered-stop');
+            const button = document.getElementById('generation-stop');
+            button.disabled = true;
+            try {
+                await requireJsonResponse(await authFetch(`/story/${encodeURIComponent(request.storyId)}/stop`, { method: 'POST' }), 'Could not stop generation');
+                if (!isCurrentStoryRead(request)) return;
+                await checkGenerationStatus();
+            } catch (error) {
+                if (!isCurrentStoryRead(request)) return;
+                showGenerationRecovery('Could not confirm that generation stopped. Check the status again before retrying.', true);
+            } finally {
+                if (isCurrentStoryRead(request)) button.disabled = false;
+            }
+        }
+
+        function rememberSelectedStory() {
+            if (!currentUser?.uid || isGuestMode) return;
+            try {
+                const key = `story-weaver:last-story:${currentUser.uid}`;
+                if (currentStoryId && currentStoryId !== 'default') localStorage.setItem(key, currentStoryId);
+                else localStorage.removeItem(key);
+            } catch (error) { /* Storage can be unavailable in private browsing. */ }
+        }
+
+        function restoreSelectedStory(stories) {
+            if (!currentUser?.uid || isGuestMode || (currentStoryId && currentStoryId !== 'default')) return;
+            try {
+                const savedId = localStorage.getItem(`story-weaver:last-story:${currentUser.uid}`);
+                const saved = stories.find(story => story.id === savedId);
+                if (saved) switchStory(saved.id, saved.name);
+            } catch (error) { /* Manual story selection remains available. */ }
+        }
+
+
         function beginStoryRead(channel) {
             storyReads.get(channel)?.controller.abort();
             const request = { storyId: currentStoryId, epoch: storyViewEpoch, controller: new AbortController() };
@@ -1180,6 +1324,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         function resetStoryView() {
             storyViewEpoch++;
+            resetGenerationMonitor();
             storySubmissionSeq++;
             for (const request of storyReads.values()) request.controller.abort();
             storyReads.clear();
@@ -1246,6 +1391,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         function setGenerating(bool) {
             isGenerating = bool;
+            if (bool) resetGenerationMonitor();
             if (bool) {
                 sendBtn.innerHTML = STOP_SVG;
                 sendBtn.setAttribute('aria-label', 'Stop generation');
@@ -1397,6 +1543,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                     storyList.appendChild(div);
                 });
+                restoreSelectedStory(data.stories);
             } catch (err) { if (!isCurrentStoryRead(request)) return;
                 console.error('Failed to load stories:', err);
                 storyList.innerHTML = '<div class="text-xs text-stone-400 text-center py-4 cursor-pointer" onclick="loadStoryList()">Failed to load. Click to retry.</div>';
@@ -1555,6 +1702,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const wasGenerating = isGenerating;
             resetStoryView();
             currentStoryId = storyId;
+            rememberSelectedStory();
             storyTitle.textContent = name || storyId || '—';
             document.querySelectorAll('.sidebar-item').forEach(el => {
                 const isActive = el.dataset.id === storyId;
@@ -1715,7 +1863,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 // mid-generation (deploy restart, crash) - graceful failures clean
                 // up after themselves, hard deaths leave this stranded. Offer a
                 // discard button instead of leaving a permanent broken turn.
-                const isDangling = isLast && entry.role === 'user';
+                const isDangling = isLast && entry.role === 'user' && !observedGeneration?.active;
+                if (isLast && observedGeneration?.active) headerLabel.textContent = `Turn ${turnNumber} — You said: (generation in progress)`;
                 if (isDangling && !isGuestMode) {
                     headerLabel.textContent = `Turn ${turnNumber} — You said: (no reply — generation was interrupted)`;
                     header.className += ' text-red-700 italic';
@@ -1829,6 +1978,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
                 const data = await requireJsonResponse(response, 'Could not load story');
                 if (!isCurrentStoryRead(request) || seq !== storyLoadSeq) return;
+                applyGenerationStatus(data.generation);
+                historyGenerationRunId = data.generation?.run_id || '';
                 allChatEntries = data.messages || [];
                 historyStart = data.start_index ?? 0;
                 historyEnd = data.end_index ?? allChatEntries.length;
@@ -1838,7 +1989,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.innerHTML = '';
                 if (allChatEntries.length) renderBatch(0, allChatEntries.length, false);
                 else storyDisplay.innerHTML = '<p class="text-stone-500 italic p-6">The page is blank. Waiting for your first words…</p>';
-                if (historyEnd >= historyTotal) showPendingRetryBanner(data.pending_retry);
+                if (historyEnd >= historyTotal && !observedGeneration?.active) showPendingRetryBanner(data.pending_retry);
                 storyDisplay.scrollTop = page.before !== undefined || page.after !== undefined ? 0 : storyDisplay.scrollHeight;
             } catch (error) {
                 if (!isCurrentStoryRead(request) || seq !== storyLoadSeq) return;
@@ -1855,6 +2006,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 storyDisplay.innerHTML = '';
                 storyDisplay.appendChild(alert);
                 storyDisplay.appendChild(retry);
+                checkGenerationStatus(false);
             } finally {
                 if (isCurrentStoryRead(request) && seq === storyLoadSeq) {
                     historyLoading = false;
@@ -2398,7 +2550,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
 
         async function submitStory(overrideText, bypassCheck = false, regeneration = null) {
-            if (isGenerating || historyLoading) return;
+            if (isGenerating || historyLoading || observedGeneration?.active || generationStatusRequest) return;
             const generationStoryId = currentStoryId;
             const generationEpoch = storyViewEpoch;
             const submission = ++storySubmissionSeq;
@@ -2924,6 +3076,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 updateSendButtonState();
                 announceStatus('Ready');
                 if (completed) await loadStory();
+                else checkGenerationStatus();
             }
         }
 
@@ -2960,6 +3113,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function retryLastPrompt(promptText, regeneration = null) {
+            if (observedGeneration?.active || generationStatusRequest) return;
             // The failed turn saved nothing to the story, so there's nothing to undo
             // (previous successful turns stay untouched). Just clear the server-side
             // retry marker and resubmit the prompt.
@@ -2991,7 +3145,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let feedbackRegenerationBusy = false;
 
         function showRegenerateFeedback(button) {
-            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             if (isGuestMode) { showGuestNagDialog(); return; }
             const existing = document.getElementById('regeneration-feedback-input');
             if (existing) { existing.focus(); return; }
@@ -3020,7 +3174,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function submitFeedbackRegeneration(event, form) {
             event.preventDefault();
-            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             const request = beginStoryRead('feedback');
             const textarea = form.querySelector('textarea');
             const feedback = textarea.value;
@@ -3074,7 +3228,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function regenerateStory() {
             const request = beginStoryRead('turn-action');
-            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             if (!lastUserPrompt) {
                 alert('No previous prompt to regenerate.');
                 return;
@@ -3104,6 +3258,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function deleteDanglingPrompts() {
+            if (observedGeneration?.active || generationStatusRequest) return;
             const request = beginStoryRead('turn-action');
             const ok = window.confirm(
                 'Discard this unanswered prompt? It never received an AI response (generation was interrupted), so no story text is lost.'
@@ -3135,6 +3290,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function deleteTurn(turnIndex) {
+            if (observedGeneration?.active || generationStatusRequest) return;
             const request = beginStoryRead('turn-action');
             const humanTurn = turnIndex + 1;
             const ok = window.confirm(
@@ -3196,7 +3352,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         function editLastPrompt(btn) {
-            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             if (!lastUserPrompt) {
                 alert('No previous prompt to edit.');
                 return;
@@ -3222,7 +3378,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
         async function confirmEdit(btn) {
             const request = beginStoryRead('turn-action');
-            if (isGenerating || feedbackRegenerationBusy) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             const container = btn.closest('div').parentElement;
             const newPrompt = container.querySelector('textarea').value.trim();
             if (!newPrompt) return;
@@ -4132,9 +4288,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         function updateSendButtonState() {
             // During generation the button becomes Stop and must stay enabled
             // regardless of the (cleared) text box.
-            sendBtn.disabled = isGenerating ? false : (historyLoading || input.disabled || input.value.trim().length === 0);
+            sendBtn.disabled = isGenerating ? false : Boolean(historyLoading || observedGeneration?.active || generationStatusRequest || input.disabled || input.value.trim().length === 0);
         }
         input.addEventListener('input', updateSendButtonState);
+        window.addEventListener('focus', () => checkGenerationStatus());
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) checkGenerationStatus(); });
         updateSendButtonState();
     
 </script>
