@@ -36,7 +36,7 @@
   - [Core Writing Features at a Glance](#core-writing-features-at-a-glance)
   - [The Story Bible at a Glance](#the-story-bible-at-a-glance)
   - [How "Regenerate with Feedback" Works](#how-regenerate-with-feedback-works)
-  - [Speaking Your Story (Voice Dictation & Audio Logs)](#speaking-your-story-voice-dictation--audio-logs)
+  - [Multimodal Audio Attachments & Song Logs](#multimodal-audio-attachments--song-logs)
   - [Background Lore Analysis & Story Repair](#background-lore-analysis--story-repair)
   - [Step-by-Step: Writing Your First Chapter](#step-by-step-writing-your-first-chapter)
 - [3. ⌨️ Keyboard Shortcuts Cheat Sheet](#3-️-keyboard-shortcuts-cheat-sheet)
@@ -124,7 +124,7 @@ Generating cohesive, multi-chapter fiction using large language models is fundam
 │                                                                        │
 │   [ Story Bible ]          [ Author Studio ]        [ Smart Memory ]   │
 │   • Characters             • Live Manuscript        • Never forgets    │
-│   • World Rules            • Voice Recording          plot points      │
+│   • World Rules            • Audio Attachments        plot points      │
 │   • Locations & Items      • Feedback Loops         • Tracks active    │
 │   • Incident History       • Undo / Redo              character locs   │
 └────────────────────────────────────────────────────────────────────────┘
@@ -148,7 +148,7 @@ Think of Story Weaver not as an automated chatbot, but as your **tireless AI co-
 | **Photographic Memory** | Continuity across hundreds of pages. Characters never forget their pasts or swap eye colors. | Automatic on every turn. |
 | **Regenerate with Feedback** | Direct the AI to revise a scene without deleting your chapter or starting over. | Click **Regenerate with feedback** on the latest turn. |
 | **Story Bible Sidebar** | Instant visual access to your character dossiers, inventory, timeline, and lore. | Click **Story Files** in the navigation bar. |
-| **Voice Dictation** | Speak your brainstorms or narrate dialogue; the AI turns spoken notes into prose. | Click the **Microphone** icon beside the prompt box. |
+| **Audio Attachments** | Attach audio files (up to 25 MB) containing spoken notes, music, or dialogue for multimodal analysis. | Click the **Attach audio** button (`#audio-btn`) beside the prompt box. |
 | **Full-Story Undo / Redo** | Reverses the last turn across the story text, character sheets, and incident logs. | Click **Undo** beneath the latest AI response. |
 | **Sectioned Editor** | Fast, lag-free text editing even on 200,000-word manuscripts. | Open any file in the **Story Files** tab. |
 | **Background Lore Sweeper** | The AI automatically updates inventory, character injuries, and timeline in the background. | Automatic, or manually trigger via **Run Analysis**. |
@@ -188,11 +188,12 @@ In Story Weaver:
 
 ---
 
-### Speaking Your Story (Voice Dictation & Audio Logs)
+### Multimodal Audio Attachments & Song Logs
 
-1. Click the **Microphone** button next to the prompt area.
-2. Speak your instructions, dictate character dialogue, or upload an audio file (up to 25 MB in MP3, WAV, or M4A format).
-3. The built-in **3-Stage Media Pipeline** transcribes your audio with zero story bias, captures any song or musical references into `audio_log.md`, and feeds the parsed instructions to the writer model to author the scene.
+1. Click the **Attach audio** button (paperclip / audio waveform icon) beside the prompt area.
+2. Select any audio file from your device (up to 25 MB in MP3, WAV, M4A, or OGG format) containing spoken voice memos, recorded dialogue, or background music.
+3. An audio attachment badge appears displaying the filename with a quick-remove button (`×`).
+4. When you generate, Story Weaver's **3-Stage Media Pipeline** uploads the file, transcribes spoken cues without hallucinating past plot, saves musical themes into `audio_log.md`, and feeds the parsed notes to the story model to weave into the narrative prose.
 
 ---
 
@@ -418,6 +419,7 @@ Machine-readable array of all prompt and response turns, including captured reas
    - Kills any orphan background instances to avoid port conflicts.
    - Activates or creates the `.venv` virtual environment.
    - Launches the FastAPI backend on port `8000`.
+   - **100% Self-Contained**: Creates a dedicated `./stories` folder directly inside the project directory and saves all your manuscripts, characters, and Story Bible files as plain Markdown directly on your hard drive. No hidden files, no cloud requirements!
 3. Open **`http://127.0.0.1:8000`** in your browser.
 
 ---
@@ -454,8 +456,8 @@ PORT=8000
 HOST=127.0.0.1
 ```
 
-* **Zero Authentication**: Automatically logs in as local super-admin.
-* **Disk-Based Storage**: All stories and files save directly to `./stories/local_admin/`.
+* **Zero Cloud Authentication**: Automatically logs in as local super-admin.
+* **100% Local Disk Storage**: All stories and files save directly to `./stories/local_admin/` on your computer as raw, editable Markdown files.
 
 ---
 
