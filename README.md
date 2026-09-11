@@ -7,6 +7,7 @@
 <p align="center">
   <a href="#-for-writers--storytellers-non-technical-guide"><strong>Writer's Guide (Non-Technical)</strong></a> •
   <a href="#-for-developers--engineers-technical-architecture"><strong>Developer's Blueprint (Technical)</strong></a> •
+  <a href="#-keyboard-shortcuts-cheat-sheet"><strong>Shortcuts</strong></a> •
   <a href="#-quick-start-guide"><strong>Quick Start</strong></a> •
   <a href="#-custom-ai-models--providers"><strong>Model Routing</strong></a> •
   <a href="#-deployment--self-hosting"><strong>Deployment</strong></a> •
@@ -32,27 +33,33 @@
   - [Core Writing Features at a Glance](#core-writing-features-at-a-glance)
   - [Your Story Bible (The Reference Files)](#your-story-bible-the-reference-files)
   - [How "Regenerate with Feedback" Works](#how-regenerate-with-feedback-works)
-  - [Speaking Your Story (Voice-to-Prose)](#speaking-your-story-voice-to-prose)
+  - [Speaking Your Story (Voice-to-Prose & Music Logging)](#speaking-your-story-voice-to-prose--music-logging)
+  - [Background Lore Analysis & Automated Repair](#background-lore-analysis--automated-repair)
   - [Step-by-Step: Writing Your First Chapter](#step-by-step-writing-your-first-chapter)
+- [⌨️ Keyboard Shortcuts Cheat Sheet](#️-keyboard-shortcuts-cheat-sheet)
 - [⚡ Quick Start Guide](#-quick-start-guide)
   - [Running Locally on Windows (One-Click)](#running-locally-on-windows-one-click)
   - [Running Locally via Terminal (Windows, macOS, Linux)](#running-locally-via-terminal-windows-macos-linux)
   - [Local Super-Admin Mode (No Accounts or Cloud Setup Needed)](#local-super-admin-mode-no-accounts-or-cloud-setup-needed)
 - [🧠 For Developers & Engineers (Technical Architecture)](#-for-developers--engineers-technical-architecture)
   - [System Architecture Diagram](#system-architecture-diagram)
-  - [Multi-Provider Routing Engine](#multi-provider-routing-engine)
-  - [Context Assembly & Recency Pipeline](#context-assembly--recency-pipeline)
+  - [Multi-Provider Routing Engine & Protocol Unification](#multi-provider-routing-engine--protocol-unification)
+  - [The 3-Tier Context Pipeline & Recency Mechanics](#the-3-tier-context-pipeline--recency-mechanics)
+  - [The 3-Stage Media Pipeline (Audio Processing)](#the-3-stage-media-pipeline-audio-processing)
   - [Diagnostic Isolation Architecture](#diagnostic-isolation-architecture)
   - [Streaming, Concurrency & Disconnect Survivability](#streaming-concurrency--disconnect-survivability)
   - [Virtual Sectioned File Editor (24k Char Viewport)](#virtual-sectioned-file-editor-24k-char-viewport)
+  - [Raw JSON Chat History Editor & Schema Validation](#raw-json-chat-history-editor--schema-validation)
   - [Storage Layer & ACID Transactional Persistence](#storage-layer--acid-transactional-persistence)
   - [Incremental JSON History Paging (ijson)](#incremental-json-history-paging-ijson)
   - [Security, Tenant Isolation & SSRF Mitigation](#security-tenant-isolation--ssrf-mitigation)
+  - [Live Server Log Interceptor & Diagnostics](#live-server-log-interceptor--diagnostics)
 - [🔌 Custom AI Models & Providers](#-custom-ai-models--providers)
   - [Supported LLM Gateways](#supported-llm-gateways)
   - [OpenCode Zen Dynamic Routing](#opencode-zen-dynamic-routing)
   - [Anthropic Messages API Integration](#anthropic-messages-api-integration)
   - [Browser-Direct Local Models (Ollama, LM Studio, vLLM)](#browser-direct-local-models-ollama-lm-studio-vllm)
+  - [Rate-Limit Resilience & 429 Exponential Backoff](#rate-limit-resilience--429-exponential-backoff)
   - [Multi-Key Rotation & Key Masking](#multi-key-rotation--key-masking)
 - [🛠️ Configuration & Environment Variables](#️-configuration--environment-variables)
 - [🚀 Deployment & Self-Hosting](#-deployment--self-hosting)
@@ -68,7 +75,7 @@
 
 ## Overview
 
-**Story Weaver** is an open-source, full-stack creative writing studio and long-form narrative intelligence engine. Unlike generic chat interfaces that suffer from memory amnesia, context drift, and plot hallucinations after a few thousand words, Story Weaver is engineered from the foundation up for **full-length novels, multi-chapter fiction, serialized episodic sagas, and interactive tabletop campaigns**.
+**Story Weaver** is an open-source, full-stack creative writing studio and long-form narrative intelligence engine. Unlike generic chat interfaces that suffer from memory amnesia, context drift, and plot hallucinations after a few thousand words, Story Weaver is engineered from the ground up for **full-length novels, multi-chapter fiction, serialized episodic sagas, and interactive tabletop campaigns**.
 
 It pairs frontier LLMs (Google Gemini, Anthropic Claude, OpenAI, Grok, DeepSeek, and local offline models) with an automated **Story Bible**, real-time **consistency tracking**, **transactional multi-file undo/redo**, and **resilient background generation**.
 
@@ -113,7 +120,7 @@ Standard AI chat apps treat writing like an ephemeral text chat: as the conversa
 | **Long-Form Memory** | Automatically maintains continuity over hundreds of pages. Characters stay in character; established lore remains intact. |
 | **Regenerate with Feedback** | Don't like how a scene turned out? Click one button, type *"Make the villain more menacing and reveal John's secret"*, and watch the AI seamlessly revise the scene. |
 | **Story Bible Sidebar** | Quick-access tabs to view and edit your Characters, Locations, Rules, Items, and Timeline on the fly. |
-| **Voice Dictation** | Record your voice directly inside the app to draft beats, dictate dialogue, or brainstorm out loud. |
+| **Voice Dictation & Audio Logs** | Record your voice directly inside the app to draft beats, dictate dialogue, or preserve background songs in your story world. |
 | **Instant Undo / Redo** | Made a wrong turn? Hit Undo to restore both your story text and your reference files to the exact state before that turn. |
 | **Distraction-Free Editor** | A clean, dark-mode writing interface with full search & replace, copy selection, full-file export, and keyboard shortcuts. |
 | **Crash & Refresh Proof** | If your browser closes or your internet blips while the AI is generating, don't panic! The server keeps writing in the background and saves your work safely. |
@@ -134,6 +141,7 @@ Inside every story, Story Weaver automatically organizes your narrative universe
 * **`time.md`**: The narrative timeline (day, hour, season, chronology).
 * **`style.md`**: Your authorial voice instructions (e.g., *"Third-person limited, gritty noir tone, avoid clichés, focus on sensory prose"*).
 * **`summary.md`**: A living, evolving synopsis of everything that has unfolded so far.
+* **`audio_log.md`**: Tracks songs, musical themes, and audio files shared during the story.
 * **`consistency.md`**: An automated diagnostic audit that spots timeline or logic paradoxes for you without cluttering the AI's creative train of thought.
 
 ---
@@ -154,11 +162,21 @@ In Story Weaver:
 
 ---
 
-### Speaking Your Story (Voice-to-Prose)
+### Speaking Your Story (Voice-to-Prose & Music Logging)
 
 1. Click the **Microphone** icon beside the prompt box.
-2. Speak naturally: describe the scene, dictate dialogue, or brainstorm a plot twist.
-3. Stop recording. Multimodal AI models (such as Gemini 2.0 or GPT-4o Audio) transcribe your audio and immediately synthesize it into vivid literary narrative matching your book's existing style.
+2. Speak naturally: describe the scene, dictate dialogue, or brainstorm a plot twist. You can even upload audio files up to 25 MB (MP3, WAV, M4A).
+3. Multimodal AI models (such as Gemini 2.0 or GPT-4o Audio) analyze the audio, capture any song or mood notes into `audio_log.md`, and synthesize your thoughts into prose matching your book's established style.
+
+---
+
+### Background Lore Analysis & Automated Repair
+
+As your story grows, Story Weaver runs background intelligence sweeps to keep your Story Bible up to date:
+* **Automatic Sweeps**: After each turn, a secondary model analyzes the latest scene and updates inventory, positions, and character statuses.
+* **Manual Story Repair**: If your files ever fall behind or you paste in existing chapters from another app, click **Run Analysis** in the toolbar:
+  - **Last N turns**: Updates lore based on recent events.
+  - **Whole Story (`turns=0`)**: Performs a comprehensive audit across your entire book to reconstruct missing character dossiers and incident logs.
 
 ---
 
@@ -173,13 +191,32 @@ In Story Weaver:
 
 ---
 
+## ⌨️ Keyboard Shortcuts Cheat Sheet
+
+Inside the **Story Files Editor**, Story Weaver provides native, desktop-class keyboard controls designed for power writers:
+
+| Shortcut | Action | Scope |
+| :--- | :--- | :--- |
+| `Ctrl + S` | **Save File** | Saves entire document to database/disk atomically |
+| `Ctrl + A` | **Select All** | Selects the **entire file** across all sections |
+| `Ctrl + Z` | **Undo Edit** | Reverses last text edit (groups adjacent typing) |
+| `Ctrl + Y` / `Ctrl + Shift + Z` | **Redo Edit** | Redoes previously undone edit |
+| `Ctrl + F` | **Find & Replace** | Opens search bar (finds matches across section boundaries) |
+| `Alt + Page Down` | **Next Section** | Advances to next 24,000-character viewport |
+| `Alt + Page Up` | **Previous Section** | Moves to preceding 24,000-character viewport |
+| `Ctrl + Home` | **Top of File** | Jumps to character 0 of the entire manuscript |
+| `Ctrl + End` | **Bottom of File** | Jumps to the very end of the entire manuscript |
+| `Enter` (in Find/Line box) | **Execute Search / Jump** | Finds next match or jumps to exact line number |
+
+---
+
 ## ⚡ Quick Start Guide
 
 ### Running Locally on Windows (One-Click)
 
 1. Clone or download this repository.
 2. Double-click **`Start_Story_Weaver.bat`**.
-   - The batch script automatically checks your environment, activates the virtual environment, installs dependencies, and launches the web app.
+   - The batch script automatically checks for running instances, activates the virtual environment, installs dependencies, and launches the web app.
 3. Open **`http://127.0.0.1:8000`** in your browser.
 
 ---
@@ -248,7 +285,9 @@ flowchart TB
         RouterHub["Multi-Provider AI Router (openai_compat.py)"]
         ContextAssembler["Context Pipeline & Recency Assembler"]
         HistoryPaginator["ijson Incremental Transcript Parser"]
+        MediaPipeline["3-Stage Audio Processing Pipeline"]
         LivenessProbe["/ping Liveness Probe (Zero I/O, <5ms)"]
+        LogBuffer["Circular In-Memory Log Interceptor (500 lines)"]
     end
 
     subgraph Storage ["Persistence Layer"]
@@ -277,16 +316,19 @@ flowchart TB
     RouterHub --> OpenAIGateway
     RouterHub --> OpenCodeZen
     RouterHub --> CloudGroq
+    Router --> MediaPipeline
+    MediaPipeline --> RouterHub
     TurnMgr -->|Atomic Multi-File Commit| PG
     PG -.->|Initial Import Fallback| FSFallback
     TurnMgr -->|Local Sync| DiskCache
     Router --> HistoryPaginator
     HistoryPaginator --> PG
+    Router --> LogBuffer
 ```
 
 ---
 
-### Multi-Provider Routing Engine
+### Multi-Provider Routing Engine & Protocol Unification
 
 Story Weaver features a custom-built protocol abstraction layer located in `openai_compat.py`. It transparently adapts disparate LLM protocols into unified asynchronous Python generators:
 
@@ -306,7 +348,7 @@ Story Weaver features a custom-built protocol abstraction layer located in `open
 
 ---
 
-### Context Assembly & Recency Pipeline
+### The 3-Tier Context Pipeline & Recency Mechanics
 
 In long-form generative fiction, attention degradation over long context windows is a known vulnerability. Story Weaver counters this by employing a **strict reciprocal attention ordering**:
 
@@ -325,6 +367,15 @@ In long-form generative fiction, attention degradation over long context windows
 ```
 
 By placing the actual continuous prose of `story.md` immediately adjacent to the completion point, the model's self-attention heads prioritize recent stylistic cadence, vocabulary, and scene pacing over background reference material.
+
+---
+
+### The 3-Stage Media Pipeline (Audio Processing)
+
+When generating narrative from voice or audio recordings (`POST /generate-audio`):
+1. **Stage 1 (Media Analyzer)**: An audio-capable model (`input-audio-model`) evaluates the uploaded audio file (up to 25 MB). To eliminate hallucinations, this stage receives **zero story context** and focuses exclusively on high-fidelity speech transcription, lyric extraction, vocal mood, and acoustic cues.
+2. **Stage 2 (Story Generator)**: The primary writer model (`input-story-model`) ingests the parsed audio breakdown alongside the complete Story Bible context to write the narrative continuation.
+3. **Stage 3 (Rules & Style Editor)**: A rules refinement model checks the generated prose against `rules.md` and `style.md` to ensure structural and tonal compliance.
 
 ---
 
@@ -352,7 +403,9 @@ Unlike conventional web applications where closing a browser tab triggers an imm
    - Prevents race conditions, double-submissions, and interleaving file writes.
 2. **Worker Independence**:
    - The generation pipeline runs inside an asynchronous background task.
-   - Text chunks are dispatched to a bounded queue (`queue.Queue(maxsize=100)`) consumed by the SSE streaming generator.
+   - Text chunks are dispatched to a bounded queue (`queue.Queue(maxsize=100)`) consumed by the SSE streaming generator with 15-second heartbeat keepalive pings (`: ping
+
+`).
    - If the user closes the tab, loses Wi-Fi, or refreshes the page, the consumer stream closes cleanly, but the **background worker keeps running until completion**, cleanly committing the finished turn and file snapshots to PostgreSQL.
 3. **Live Turn Status Polling (`/story/{id}/generation-status`)**:
    - Reopening the page queries the lightweight status endpoint.
@@ -368,12 +421,22 @@ Browsers suffer severe layout thrashing and DOM slowdowns when rendering monolit
 
 Story Weaver implements a zero-dependency **Sectioned Virtual File Viewport** in `static/file-editor.js`:
 * **24,000-Character Viewport Windows**: Large files are transparently split into navigable viewports.
+* **Astal Plane & Surrogate Protection**: The section boundary calculation explicitly prevents splitting Unicode surrogate pairs (emojis) or Windows CRLF line endings.
 * **Bounded Layout Cost**: The browser DOM only renders a single section at a time, eliminating typing lag and cursor jitter.
 * **Atomic Global Operations**: 
   - `Ctrl + A` and **Copy All** grab the entire multi-million character file.
   - **Find & Replace** searches across section boundaries.
   - **Save** and **Download** always commit the complete, assembled document.
 * **Diff-Based Undo Stack**: In-memory edit history stores character deltas rather than full-document clones, capping memory consumption at 20 MiB for up to 500 undo operations.
+
+---
+
+### Raw JSON Chat History Editor & Schema Validation
+
+Story Weaver allows advanced users to inspect and directly edit the turn-by-turn chat history via `chat_log.json` in the file editor:
+* **Schema Validation**: Entries enforce strict typing: `role` must be `"user"` or `"ai"`; `text` must be a string; optional `model`, `time`, and `model_thoughts` must be strings.
+* **Syntax Guardrails**: Malformed JSON triggers an explicit error badge displaying the exact line and column number, preventing accidental overwrites.
+* **Sync Integrity**: When altering AI responses in `chat_log.json`, the editor reminds the author to update matching excerpts in `story.md` so the Undo and Regenerate engine can accurately resolve snapshots.
 
 ---
 
@@ -424,6 +487,15 @@ Story Weaver uses `ijson` for **incremental stream-parsing** in `runtime_support
    - Rejects non-HTTP(S) schemes.
 2. **Tenant Isolation**: Every API endpoint enforces authentication via Firebase Admin cryptographically verified JWT tokens. All SQL queries and file paths are strictly scoped to the authenticated user's `uid`.
 3. **Fail-Closed Production Deployment**: `ALLOW_UNVERIFIED_JWT` and `ALLOW_LOCAL_SUPER_ADMIN` are strictly prohibited in production containers (`HOST=0.0.0.0`). Unauthenticated requests fail closed with HTTP `401 / 403`.
+
+---
+
+### Live Server Log Interceptor & Diagnostics
+
+Story Weaver incorporates a custom stream interceptor (`LogInterceptor`) wrapping standard output and standard error:
+* **Circular Buffer**: Maintains the latest 500 log lines in a thread-safe `collections.deque(maxlen=500)`.
+* **Truncation Safeguard**: Individual log messages exceeding 4,096 characters are truncated to protect memory.
+* **UI Diagnostic Slide-Out**: The live server logs can be toggled directly from the web interface via `GET /api/logs`, facilitating zero-SSH troubleshooting on managed hosting platforms.
 
 ---
 
@@ -485,6 +557,15 @@ For 100% free, private, offline generation:
    - **LM Studio**: Start Local Server on `http://localhost:1234/v1`
 2. In Story Weaver, select **Local OpenAI-Compatible Server**.
 3. **Zero Backend Overhead**: The browser communicates directly with your local server via CORS. No prompts, manuscripts, or tokens pass through the Python backend!
+
+---
+
+### Rate-Limit Resilience & 429 Exponential Backoff
+
+When LLM providers return rate-limit spikes (HTTP 429):
+* **Status Preservation**: Story Weaver preserves the original 429 status code rather than misreporting the model as missing or broken.
+* **UI Backoff Display**: The UI displays an active countdown showing when the provider can be safely re-queried.
+* **Persistent Instructions**: Feedback and uncommitted prompts remain cached, ensuring that clicking **Retry** after the cooldown resumes generation without losing user input.
 
 ---
 
@@ -584,7 +665,12 @@ When hosting on free platforms like Render where idle containers sleep after 15 
 | `POST` | `/story/{story_id}/stop` | Immediately cancel active generation for this story. |
 | `POST` | `/story/{story_id}/undo` | Atomic undo: rolls back manuscript, reference files, and transcript to previous turn snapshot. |
 | `POST` | `/story/{story_id}/retry` | Retry the last failed or interrupted generation turn. |
-| `POST` | `/generate-audio` | Upload audio recording for transcription and story synthesis. |
+| `POST` | `/generate-audio` | Upload audio recording (up to 25 MB) for 3-stage media analysis and story synthesis. |
+| `POST` | `/analyze/{story_id}` | Trigger manual background Story Bible extraction (`turns=0` for whole story repair). |
+| `GET` | `/analyze/{story_id}/status` | Check the progress and status of active background lore analysis. |
+| `POST` | `/story/{story_id}/cancel-analysis` | Terminate in-flight background lore analysis. |
+| `POST` | `/story/{story_id}/delete-dangling` | Clean up dangling user prompts that failed before completion. |
+| `POST` | `/story/{story_id}/delete-turn` | Delete an arbitrary turn from history and synchronize reference files. |
 | `GET` | `/story/{story_id}/files` | List all markdown reference files inside the Story Bible. |
 | `GET` | `/story/{story_id}/file/{filename}` | Retrieve raw content of a specific reference file. |
 | `PUT` | `/story/{story_id}/file/{filename}` | Update raw content of a reference file. |
@@ -646,6 +732,12 @@ Story Weaver has been tested with manuscripts exceeding 200,000 words (over 1.5 
 <summary><strong>Q: What happens if my internet disconnects mid-generation?</strong></summary>
 <br />
 Your work is safe! The server continues executing the story generation in the background. When your connection returns, simply reload the page—Story Weaver reconnects to the turn status and renders the completed chapter.
+</details>
+
+<details>
+<summary><strong>Q: How does Story Weaver prevent characters from teleporting or forgetting items?</strong></summary>
+<br />
+Through dedicated <code>positions.md</code> and <code>items.md</code> tracking! In the context pipeline, current positions are explicitly prioritized over past narrative text, ensuring that if a hero is in the dungeon, the AI won't accidentally depict them sitting in the throne room in the very next sentence.
 </details>
 
 ---
