@@ -126,7 +126,7 @@ Generating cohesive, multi-chapter fiction using large language models is fundam
 │   • Characters             • Live Manuscript        • Never forgets    │
 │   • World Rules            • Audio Attachments        plot points      │
 │   • Locations & Items      • Feedback Loops         • Tracks active    │
-│   • Incident History       • Undo / Redo              character locs   │
+│   • Incident History       • Regenerate / Redo        character locs   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -136,7 +136,7 @@ Think of Story Weaver not as an automated chatbot, but as your **tireless AI co-
 
 * **It Remembers Everything**: Before writing each scene, Story Weaver studies your entire book manuscript, your plot summary, your characters' current physical locations, and your world rules.
 * **You Remain the Director**: You have complete creative authority. Edit the manuscript directly, rewrite scenes with plain-English feedback, or manually update character sheets whenever inspiration strikes.
-* **Never Lose Work**: Every turn is saved atomically. If you don't like where a scene went, one click of **Undo** reverts both your story prose and your background lore files to their exact previous state.
+* **Never Lose Work**: Every turn is saved atomically. If you don't like where a scene went, use **Regenerate with feedback**, **Edit & Redo**, or **Regenerate** to roll back both your story prose and your background lore files to craft a fresh revision.
 * **Total Freedom**: Write on your personal laptop completely offline using free local models (via Ollama or LM Studio), or connect frontier models like Claude 3.5 Sonnet, Gemini 2.0 Flash, or GPT-4o.
 
 ---
@@ -146,11 +146,12 @@ Think of Story Weaver not as an automated chatbot, but as your **tireless AI co-
 | Feature | What It Delivers | How to Use It |
 | :--- | :--- | :--- |
 | **Photographic Memory** | Continuity across hundreds of pages. Characters never forget their pasts or swap eye colors. | Automatic on every turn. |
-| **Regenerate with Feedback** | Direct the AI to revise a scene without deleting your chapter or starting over. | Click **Regenerate with feedback** on the latest turn. |
+| **Regenerate with Feedback** | Direct the AI to revise a scene without deleting your chapter or starting over. | Click **Regenerate with feedback** beneath the latest turn. |
+| **Edit & Redo** | Tweak your previous prompt in an editable box and re-run the turn cleanly. | Click **Edit & Redo** beneath the latest turn. |
+| **Quick Regenerate** | Re-run the scene with the same prompt while rolling back previous changes. | Click **Regenerate** beneath the latest turn. |
 | **Story Bible Sidebar** | Instant visual access to your character dossiers, inventory, timeline, and lore. | Click **Story Files** in the navigation bar. |
 | **Audio Attachments** | Attach audio files (up to 25 MB) containing spoken notes, music, or dialogue for multimodal analysis. | Click the **Attach audio** button (`#audio-btn`) beside the prompt box. |
-| **Full-Story Undo / Redo** | Reverses the last turn across the story text, character sheets, and incident logs. | Click **Undo** beneath the latest AI response. |
-| **Sectioned Editor** | Fast, lag-free text editing even on 200,000-word manuscripts. | Open any file in the **Story Files** tab. |
+| **Sectioned File Editor** | Fast, lag-free text editing even on 200,000-word manuscripts with multi-level undo (`Ctrl+Z`). | Open any file in the **Story Files** tab. |
 | **Background Lore Sweeper** | The AI automatically updates inventory, character injuries, and timeline in the background. | Automatic, or manually trigger via **Run Analysis**. |
 
 ---
