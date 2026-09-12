@@ -273,6 +273,10 @@ class MessagesTextStream:
 
 class MessagesCompletions:
     def __init__(self, client, max_output_tokens=131072):
+        # anthropic treats an empty auth_token as present and emits the invalid
+        # header `Authorization: Bearer `. Normalize it before any request.
+        if getattr(client, "auth_token", None) == "":
+            client.auth_token = None
         self.client = client
         self.max_output_tokens = max_output_tokens
 
