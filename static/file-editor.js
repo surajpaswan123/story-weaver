@@ -1,8 +1,20 @@
 /* Plain-text editing with a bounded native textarea for large documents. */
 (function (root) {
     'use strict';
-    const SECTION_SIZE = 24000;
+    const SECTION_SIZE = 8000;
+    // Leave room for native typing: resetting textarea.value after every added
+    // character rebuilds Chrome's accessible text and disrupts screen readers.
+    const MAX_VISIBLE_SIZE = 12000;
     const HISTORY_LIMIT = 20 * 1024 * 1024;
+
+    function independentText(text) {
+        // V8 can keep an entire old manuscript alive behind a tiny substring.
+        // Materialize history text instead of retaining slices of those versions.
+        // JSON round-tripping preserves UTF-16, including unpaired surrogates.
+        return text ? JSON.parse(JSON.stringify(text)) : '';
+    }
+
+    function normalizeNewlines(text) { return text.replace(/\r\n?/g, '\n'); }
 
     // Never split a surrogate pair or a CRLF at a viewport boundary.
     function boundary(text, offset) {
@@ -24,8 +36,10 @@
         }
         breakGroup() { this.group++; }
         edit(start, end, inserted, typing = false) {
-            const removed = this.text.slice(start, end);
+            let removed = this.text.slice(start, end);
             if (removed === inserted) return false;
+            removed = independentText(removed);
+            inserted = independentText(inserted);
             const now = Date.now();
             const last = this.undoStack.at(-1);
             this.historyBytes -= this.redoStack.reduce((n, op) => n + op.bytes, 0);
@@ -83,7 +97,9 @@
             this.bind();
         }
         load(text, name = '') {
-            this.buffer.reset(text);
+            // The native textarea always normalizes CRLF/CR. Normalize once so
+            // reading or navigating a Windows file cannot manufacture an edit.
+            this.buffer.reset(normalizeNewlines(text));
             this.name = name;
             this.allSelected = false;
             this.show(0);
@@ -99,10 +115,10 @@
             this.end += next.length - this.visible.length;
             this.visible = next;
             this.allSelected = false;
-            if (!this.composing && next.length > SECTION_SIZE) {
+            if (!this.composing && next.length > MAX_VISIBLE_SIZE) {
                 const caret = this.start + this.area.selectionEnd;
                 this.show(Math.max(0, caret - Math.floor(SECTION_SIZE / 2)), caret, caret);
-            } else this.updateControls();
+            } else this.updateControls(true);
         }
         show(start, selectionStart = start, selectionEnd = selectionStart) {
             const text = this.buffer.text;
@@ -122,7 +138,7 @@
             this.updateControls();
         }
         reveal(start, end = start) {
-            if (start < this.start || end > this.end || this.area.value.length > SECTION_SIZE) {
+            if (start < this.start || end > this.end || this.area.value.length > MAX_VISIBLE_SIZE) {
                 this.show(Math.max(0, start - Math.floor(SECTION_SIZE / 4)), start, end);
             } else {
                 this.allSelected = false;
@@ -131,17 +147,34 @@
             }
             this.area.focus();
         }
-        updateControls() {
-            this.el('file-undo-btn').disabled = !this.buffer.undoStack.length;
-            this.el('file-redo-btn').disabled = !this.buffer.redoStack.length;
-            this.el('file-previous-btn').disabled = this.start === 0;
-            this.el('file-next-btn').disabled = this.end >= this.buffer.text.length;
-            this.el('file-section-controls').hidden = this.buffer.text.length <= SECTION_SIZE;
+        updateControls(deferDescription = false) {
+            for (const [id, disabled] of [
+                ['file-undo-btn', !this.buffer.undoStack.length],
+                ['file-redo-btn', !this.buffer.redoStack.length],
+                ['file-previous-btn', this.start === 0],
+                ['file-next-btn', this.end >= this.buffer.text.length],
+            ]) {
+                const control = this.el(id);
+                if (control.disabled !== disabled) control.disabled = disabled;
+            }
+            const sectionControls = this.el('file-section-controls');
+            const hidden = this.start === 0 && this.end >= this.buffer.text.length;
+            if (sectionControls.hidden !== hidden) sectionControls.hidden = hidden;
+            if (deferDescription) {
+                if (this.descriptionTimer == null) this.descriptionTimer = root.setTimeout(() => {
+                    this.descriptionTimer = null;
+                    this.updateControls();
+                }, 250);
+                return;
+            }
+            root.clearTimeout(this.descriptionTimer);
+            this.descriptionTimer = null;
             const info = this.allSelected ? 'Entire file selected. Copy, cut, typing, or paste applies to the entire file.' :
-                this.buffer.text.length > SECTION_SIZE ?
+                !hidden ?
                     `Showing characters ${(this.start + 1).toLocaleString()}–${this.end.toLocaleString()} of ${this.buffer.text.length.toLocaleString()}. Save and Copy all include every section.` :
                     `Whole file shown. ${this.buffer.text.length.toLocaleString()} characters.`;
-            this.el('file-section-info').textContent = info;
+            const description = this.el('file-section-info');
+            if (description.textContent !== info) description.textContent = info;
         }
         selection() {
             return this.allSelected ? { start: 0, end: this.buffer.text.length } :
@@ -163,6 +196,7 @@
         }
         replaceSelection(text) {
             this.flush();
+            text = normalizeNewlines(text);
             const { start, end } = this.selection();
             this.buffer.breakGroup();
             this.buffer.edit(start, end, text);
@@ -292,7 +326,7 @@
             this.area.addEventListener('compositionend', () => {
                 this.composing = false;
                 this.flush();
-                if (this.visible.length > SECTION_SIZE) this.show(this.start);
+                if (this.visible.length > MAX_VISIBLE_SIZE) this.show(this.start);
             });
             this.area.addEventListener('pointerdown', () => {
                 this.allSelected = false;
@@ -320,7 +354,6 @@
                     }
                     this.allSelected = false;
                     this.buffer.breakGroup();
-                    this.updateControls();
                 }
             });
             this.area.addEventListener('beforeinput', event => {
@@ -346,7 +379,7 @@
             this.area.addEventListener('paste', event => {
                 if (!event.clipboardData) return;
                 event.preventDefault();
-                this.replaceSelection(event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n'));
+                this.replaceSelection(event.clipboardData.getData('text/plain'));
                 this.status('Text pasted.' + (this.buffer.undoStack.length ? ' Undo is available.' : ''));
             });
             // Do not let dropping a large file bypass the bounded-textarea paste path.
@@ -356,6 +389,6 @@
             });
         }
     }
-    root.StoryFileEditor = { FileTextEditor, TextBuffer, SECTION_SIZE };
+    root.StoryFileEditor = { FileTextEditor, TextBuffer, SECTION_SIZE, MAX_VISIBLE_SIZE };
     if (typeof module !== 'undefined' && module.exports) module.exports = root.StoryFileEditor;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

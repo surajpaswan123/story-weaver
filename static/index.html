@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Story Weaver</title>
-    <script src="/static/file-editor.js?v=1"></script>
+    <script src="/static/file-editor.js?v=2"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Firebase SDKs -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
@@ -1064,7 +1064,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             <textarea id="file-textarea"
                                 class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-y bg-white text-sm story-font leading-relaxed"
                                 rows="22" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"
-                                aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help file-section-info"></textarea>
+                                aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help"></textarea>
                             <div id="file-status" class="text-xs text-stone-400 mt-1 text-center" role="status" aria-live="polite"></div>
                         </div>
                     </div>
@@ -1357,6 +1357,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             fileEditorSession++;
             openFileName = openFileStoryId = openFileOwner = null;
             openFileOriginal = '';
+            openFileServerText = '';
             if (fileEditorInstance) fileEditorInstance.load('');
             document.getElementById('file-editor-wrap').classList.add('hidden');
             document.getElementById('file-save-btn').disabled = false;
@@ -2210,7 +2211,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let openFileName = null;      // filename currently in the editor
         let openFileStoryId = null;  // keep edits tied to the story that was opened
         let openFileOwner = null;     // 'user' | 'ai' | 'app'
-        let openFileOriginal = '';    // last-saved text, for the dirty check
+        let openFileOriginal = '';    // normalized last-saved text, for the dirty check
+        let openFileServerText = '';  // exact server text, for transcript conflict checks
         let fileEditorInstance = null;
         let fileEditorSession = 0;
         let fileOpenRequest = 0;
@@ -2331,12 +2333,13 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 openFileName = data.name;
                 openFileStoryId = storyId;
                 openFileOwner = data.owner;
-                openFileOriginal = data.text || '';
+                openFileServerText = data.text || '';
                 fileEditorSession++;
 
                 const wrap = document.getElementById('file-editor-wrap');
                 const ta = document.getElementById('file-textarea');
-                getFileEditor().load(openFileOriginal, data.name);
+                getFileEditor().load(openFileServerText, data.name);
+                openFileOriginal = getFileEditor().getText();
                 ta.setAttribute('aria-label', `Contents of ${data.name}, editable`);
 
                 document.getElementById('file-editor-heading').textContent =
@@ -2375,7 +2378,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const text = getFileEditor().getText();
             getFileEditor().buffer.breakGroup();
             const body = { text };
-            if (name === 'chat_log.json') body.expected_text = openFileOriginal;
+            if (name === 'chat_log.json') body.expected_text = openFileServerText;
             const saveBtn = document.getElementById('file-save-btn');
             if (saveBtn.disabled) return;   // a save is already in flight
             saveBtn.disabled = true;
@@ -2392,6 +2395,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const data = await requireJsonResponse(res, `Failed to save ${openFileName}`);
                 if (currentStoryId !== storyId || openFileName !== name || openFileStoryId !== storyId || session !== fileEditorSession) return;
                 openFileOriginal = text;
+                openFileServerText = text;
                 fileStatus(`Saved — ${data.lines.toLocaleString()} lines, ${data.chars.toLocaleString()} characters.` +
                     (fileEditorIsDirty() ? ' Newer edits are still unsaved.' : ''));
                 document.getElementById('file-editor-meta').textContent =
@@ -2438,6 +2442,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             fileOpenRequest++;
             openFileOwner = null;
             openFileOriginal = '';
+            openFileServerText = '';
             getFileEditor().load('');
             document.getElementById('file-editor-wrap').classList.add('hidden');
             fileStatus('');
@@ -2469,6 +2474,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 fileOpenRequest++;
                 openFileOwner = null;
                 openFileOriginal = '';
+                openFileServerText = '';
                 getFileEditor().load('');
                 document.getElementById('file-editor-wrap').classList.add('hidden');
                 fileStatus('');

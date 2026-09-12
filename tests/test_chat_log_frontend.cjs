@@ -46,7 +46,7 @@ test('chat history opens with accessible description and saves with a stale-edit
     await app.context.openStoryFile('chat_log.json');
     assert.equal(app.element('file-textarea').value, original);
     assert.equal(app.element('file-textarea').attributes['aria-label'], 'Contents of chat_log.json, editable');
-    assert.match(html, /aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help file-section-info"/);
+    assert.match(html, /aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help"/);
     assert.equal(app.element('file-textarea').focused, true);
     assert.equal(app.element('file-delete-btn').classList.values.has('hidden'), true);
     assert.match(app.element('file-editor-meta').textContent, /Transcript/);
@@ -123,4 +123,29 @@ test('an older file load cannot replace a newer open request', async () => {
     await first;
     assert.equal(app.context.getFileEditor().getText(), 'new rules');
     assert.match(app.element('file-editor-heading').textContent, /rules.md/);
+});
+
+test('CRLF transcripts stay clean on open and use exact server text for conflict checks', async () => {
+    const app = setup();
+    const serverText = '[\r\n' + original.slice(1, -1) + '\r\n]';
+    app.context.authFetch = async () => ({ ok: true, data: {
+        name: 'chat_log.json', owner: 'app', label: 'Chat history',
+        text: serverText, lines: 3, chars: serverText.length,
+    } });
+    await app.context.openStoryFile('chat_log.json');
+    assert.equal(app.context.fileEditorIsDirty(), false);
+    assert.equal(app.context.getFileEditor().buffer.undoStack.length, 0);
+    assert.equal(app.context.getFileEditor().getText(), serverText.replace(/\r\n/g, '\n'));
+    const edited = serverText.replace(/\r\n/g, '\n').replace('Mira waited.', 'Mira stayed.');
+    app.element('file-textarea').value = edited;
+    const saved = [];
+    app.context.authFetch = async (url, options) => {
+        saved.push(JSON.parse(options.body));
+        return { ok: true, data: { lines: 3, chars: edited.length } };
+    };
+    await app.context.saveOpenFile();
+    assert.deepEqual(saved[0], { text: edited, expected_text: serverText });
+    assert.equal(app.context.fileEditorIsDirty(), false);
+    await app.context.saveOpenFile();
+    assert.equal(saved[1].expected_text, edited);
 });

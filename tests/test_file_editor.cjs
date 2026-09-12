@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { FileTextEditor, TextBuffer, SECTION_SIZE } = require('../static/file-editor.js');
+const { FileTextEditor, TextBuffer, SECTION_SIZE, MAX_VISIBLE_SIZE } = require('../static/file-editor.js');
 
 function setup(text) {
     const nodes = new Map(), messages = [], documentEvents = new Map();
@@ -225,4 +225,114 @@ test('blocked clipboard APIs do not claim that anything was copied', async t => 
     assert.equal(await app.editor.copy(true), false);
     assert.match(app.messages.at(-1), /blocked/);
     assert.equal(app.editor.getText(), 'preserve this text');
+});
+
+test('small undo differences do not retain dozens of complete old manuscripts', () => {
+    const { execFileSync } = require('node:child_process');
+    const source = require.resolve('../static/file-editor.js');
+    // An isolated process and explicit GC measure retained strings, not timing or
+    // temporary allocations from other tests. Old sliced history retained 61 MB.
+    const measurement = execFileSync(process.execPath, ['--expose-gc', '-e', `
+        const { TextBuffer } = require(${JSON.stringify(source)});
+        global.gc();
+        const initial = process.memoryUsage().heapUsed;
+        const buffer = new TextBuffer(('हिन्दी text for a memory probe.\\n').repeat(16000));
+        for (let i = 0; i < 60; i++) {
+            const start = 10000 + i * 37;
+            buffer.edit(start, start + 24, 'replacement-' + String(i).padStart(12, '0'));
+        }
+        global.gc();
+        console.log(JSON.stringify({ entries: buffer.undoStack.length,
+            retained: process.memoryUsage().heapUsed - initial }));
+    `], { encoding: 'utf8', timeout: 15000 });
+    const result = JSON.parse(measurement);
+    assert.equal(result.entries, 60);
+    assert.ok(result.retained < 12 * 1024 * 1024, `Retained ${result.retained} bytes for small differences`);
+});
+
+test('independent history strings preserve Unicode and unmatched UTF-16 surrogates', () => {
+    const original = 'हिन्दी 🐉 \ud800 ' + 'prefix '.repeat(30) + ' \udc00 end';
+    const inserted = 'changed \ud800 हिन्दी 🐉 \udc00';
+    const buffer = new TextBuffer(original);
+    buffer.edit(0, original.length, inserted);
+    assert.equal(buffer.text, inserted);
+    buffer.undo();
+    assert.equal(buffer.text, original);
+    buffer.redo();
+    assert.equal(buffer.text, inserted);
+});
+
+test('typing in a full section keeps the native textbox until its headroom is used', () => {
+    const original = 'x'.repeat(30000);
+    const { editor, fire } = setup(original);
+    let nativeValue = editor.area.value, rewrites = 0;
+    Object.defineProperty(editor.area, 'value', {
+        get: () => nativeValue,
+        set: value => { rewrites++; nativeValue = value; },
+    });
+    editor.area.setSelectionRange(100, 100);
+    let expected = original;
+    function nativeType(text) {
+        const at = editor.area.selectionStart, absolute = editor.start + at;
+        nativeValue = nativeValue.slice(0, at) + text + nativeValue.slice(at);
+        editor.area.setSelectionRange(at + text.length, at + text.length);
+        expected = expected.slice(0, absolute) + text + expected.slice(absolute);
+        fire('input', { inputType: 'insertText' });
+        assert.equal(editor.getText(), expected);
+        assert.equal(editor.selection().end, absolute + text.length);
+    }
+    for (const letter of 'हिन्दी typing without a textbox rebuild') nativeType(letter);
+    assert.equal(rewrites, 0);
+    nativeType('a'.repeat(MAX_VISIBLE_SIZE - nativeValue.length));
+    assert.equal(rewrites, 0);
+    nativeType('!');
+    assert.equal(rewrites, 1);
+    assert.ok(editor.area.value.length <= SECTION_SIZE);
+    const operations = editor.buffer.undoStack.length;
+    for (let i = 0; i < operations; i++) editor.history(false);
+    assert.equal(editor.getText(), original);
+    for (let i = 0; i < operations; i++) editor.history(true);
+    assert.equal(editor.getText(), expected);
+});
+
+test('selection leaves descriptions alone and a typing burst shares one update', async () => {
+    const { editor, fire, doc } = setup('hello');
+    const info = doc.getElementById('file-section-info');
+    let content = info.textContent, writes = 0;
+    Object.defineProperty(info, 'textContent', {
+        get: () => content, set: value => { writes++; content = value; },
+    });
+    for (let i = 0; i < 100; i++) {
+        fire('keydown', { key: 'ArrowDown', ctrlKey: true, shiftKey: true });
+        editor.updateControls();
+    }
+    assert.equal(writes, 0);
+    for (let i = 0; i < 100; i++) {
+        editor.area.value += 'a';
+        fire('input', { inputType: 'insertText' });
+    }
+    assert.equal(writes, 0);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(writes, 1);
+    assert.match(content, /105 characters/);
+    editor.area.value += '!';
+    fire('input', { inputType: 'insertText' });
+    editor.load('second file');
+    assert.equal(editor.descriptionTimer, null);
+    assert.match(content, /11 characters/);
+});
+
+test('Windows and CR line endings normalize once without phantom edits or offset drift', () => {
+    const original = 'हिन्दी 🐉\r\nnext\rthird\n'.repeat(2000);
+    const normalized = original.replace(/\r\n?/g, '\n');
+    const { editor } = setup(original);
+    editor.navigate(1);
+    assert.equal(editor.getText(), normalized);
+    assert.equal(editor.buffer.undoStack.length, 0);
+    editor.area.setSelectionRange(2, 4);
+    const { start, end } = editor.selection();
+    editor.replaceSelection('new\r\nline\r');
+    assert.equal(editor.getText(), normalized.slice(0, start) + 'new\nline\n' + normalized.slice(end));
+    editor.history(false);
+    assert.equal(editor.getText(), normalized);
 });

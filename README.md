@@ -51,7 +51,7 @@ unpublished development changes are not promises about the running application.
 | Separate stories | Keeps story directories and requests associated with an account and story ID. |
 | Turn revision | Regenerates the latest completed turn with the same prompt, an edited prompt, or explicit feedback. |
 | Editable memory | Lets you edit Markdown reference files and `chat_log.json`. |
-| Large-file editing | Keeps approximately 24,000 characters in the native textarea while retaining the complete document in a JavaScript buffer. |
+| Large-file editing | Keeps approximately 8,000 characters in the native textarea while retaining the complete document in a JavaScript buffer. |
 | Provider compatibility | Supports native Google GenAI and server-side Chat Completions, Responses, and Anthropic Messages connections. |
 | Local inference | Lets the browser call a local OpenAI-compatible Chat Completions server. |
 | Audio input | Accepts uploaded audio, with separate hosted and browser-direct processing paths. |
@@ -309,9 +309,18 @@ Markdown syntax remains editable text.
 ### Large documents and selection
 
 The complete document stays in an in-memory text buffer. The native textarea
-shows a bounded section of approximately 24,000 characters. Section boundaries
-avoid splitting UTF-16 surrogate pairs and Windows CRLF newlines. A single huge
-line is still divided into bounded sections.
+shows a bounded section of approximately 8,000 characters. Windows CRLF and CR newlines
+are normalized to LF when a file is opened, matching native browser text editing.
+Opening the file alone does not create an undo entry or mark it as edited.
+Section boundaries avoid splitting UTF-16 surrogate pairs. A single huge line
+is still divided into bounded sections.
+
+Native typing can grow the visible section to 12,000 characters before it is
+recentered around the cursor. This avoids repeatedly replacing the textbox text
+while typing. Section descriptions update only when their text changes; typing
+updates are coalesced, and ordinary selection keys do not rewrite descriptions.
+The changing section counter is separate from the textbox description to reduce
+repeated accessibility updates. Section navigation still announces its position.
 
 **Ctrl+A selects the complete file logically**, even though only one section is
 displayed. The status text announces that selection. Ctrl+C copies the complete
@@ -363,8 +372,9 @@ works from the buffer. If the browser blocks clipboard access, focus the editor
 and use Ctrl+C, or download the file. Copying an entire book still allocates a
 large clipboard payload even though the textarea is sectioned.
 
-The undo stack stores changed text, groups adjacent typing, and trims older
-operations around a 20 MiB accounting budget or 500 operations. The newest
+The undo stack stores independent copies of changed text, so small history entries
+do not retain entire older document strings. It groups adjacent typing and trims
+older operations around a 20 MiB accounting budget or 500 operations. The newest
 operation is retained even if it alone exceeds that budget. This is not a hard
 cap on all browser memory. Opening another file or reloading resets editor
 history; it is distinct from story-turn undo.
@@ -1608,7 +1618,7 @@ be cleared with empty strings.
 | Chat parsing | `ijson` processes entries incrementally | A page read still scans the transcript; it is not an indexed turn database. |
 | Streaming delivery | Default queue capacity is 16 events | The generation pipeline still assembles a complete response for saving. |
 | Stream painting | Frontend batches normal stream display updates around 100 ms | Long final text and large history entries still need rendering. |
-| File textarea | Approximately 24,000 characters visible | The complete buffer and edits remain in browser memory. |
+| File textarea | Approximately 8,000 characters visible, with typing room up to 12,000 | The complete buffer and edits remain in browser memory. |
 | Editor undo | Older edits trimmed around 20 MiB or 500 operations | One newest large edit can exceed the accounting target. |
 | Remote restore | Warm-cache filename/timestamp check | A changed/cold story still downloads its file snapshot. |
 | Logs | Latest 500 lines, each message line truncated around 4,096 characters | Redaction and buffering are not comprehensive monitoring or isolation. |
