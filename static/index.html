@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Story Weaver</title>
-    <script src="/static/file-editor.js?v=2"></script>
+    <script src="/static/file-editor.js?v=3"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Firebase SDKs -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
@@ -1050,21 +1050,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                             <p id="file-editor-help" class="text-xs text-stone-600 mb-2">
                                 Ctrl+A selects the entire file; Ctrl+C copies it. Ctrl+Z undoes an edit;
                                 Ctrl+Y or Ctrl+Shift+Z redoes it. Ctrl+S saves; Ctrl+F finds text.
-                                Large files open in sections to keep editing responsive. Normal arrow-key
-                                selection stays within the visible section. Alt+Page Down and Alt+Page Up
-                                move between sections. Ctrl+Home and Ctrl+End move to the start or end of the file.
+                                Ctrl+Left/Right moves word by word; add Shift to select words.
+                                Shift+Up/Down selects displayed lines; Ctrl+Shift+Up/Down selects paragraphs.
+                                Home/End moves within a line; Ctrl+Home/End moves through the whole file.
+                                Tab leaves the editor and moves to the next control.
                             </p>
-                            <div id="file-section-controls" class="flex gap-2 mb-2 flex-wrap" hidden>
-                                <button type="button" id="file-previous-btn">Previous section</button>
-                                <button type="button" id="file-next-btn">Next section</button>
-                            </div>
-                            <p id="file-section-info" class="text-xs text-stone-600 mb-2"></p>
                             <label class="block mb-2"><input type="checkbox" id="file-wrap-input" checked> Wrap long lines</label>
-                            <label for="file-textarea" class="block text-sm font-medium mb-1">File contents</label>
-                            <textarea id="file-textarea"
-                                class="w-full p-4 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-stone-500 resize-y bg-white text-sm story-font leading-relaxed"
-                                rows="22" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"
-                                aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help"></textarea>
+                            <p class="block text-sm font-medium mb-1">File contents</p>
+                            <div id="file-editor-host" class="story-font"></div>
                             <div id="file-status" class="text-xs text-stone-400 mt-1 text-center" role="status" aria-live="polite"></div>
                         </div>
                     </div>
@@ -2207,7 +2200,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         // ===== STORY FILES PANEL =====
-        // Edit Markdown context files and the raw chat transcript in a textarea.
+        // Edit Markdown context files and the raw chat transcript as continuous documents.
         let openFileName = null;      // filename currently in the editor
         let openFileStoryId = null;  // keep edits tied to the story that was opened
         let openFileOwner = null;     // 'user' | 'ai' | 'app'
@@ -2216,6 +2209,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let fileEditorInstance = null;
         let fileEditorSession = 0;
         let fileOpenRequest = 0;
+        let openFileNeedsReload = false;
 
         function getFileEditor() {
             if (!fileEditorInstance) fileEditorInstance = new StoryFileEditor.FileTextEditor(document, {
@@ -2330,6 +2324,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const data = await requireJsonResponse(res, `Failed to open ${name}`);
                 if (storyId !== currentStoryId || requestId !== fileOpenRequest) return;
 
+                openFileNeedsReload = false;
                 openFileName = data.name;
                 openFileStoryId = storyId;
                 openFileOwner = data.owner;
@@ -2337,10 +2332,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 fileEditorSession++;
 
                 const wrap = document.getElementById('file-editor-wrap');
-                const ta = document.getElementById('file-textarea');
                 getFileEditor().load(openFileServerText, data.name);
                 openFileOriginal = getFileEditor().getText();
-                ta.setAttribute('aria-label', `Contents of ${data.name}, editable`);
 
                 document.getElementById('file-editor-heading').textContent =
                     `Editing ${data.label} — ${data.name}`;
@@ -2355,8 +2348,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
                 wrap.classList.remove('hidden');
                 fileStatus('');
-                // Start in the native edit field so selection shortcuts target file text.
-                ta.focus();
+                // Focus the editor so Windows editing keys act on the file.
+                getFileEditor().focus();
                 announceToScreenReader(`Opened ${data.label}, ${data.name}, for editing. ${data.lines} lines.`);
             } catch (err) {
                 if (storyId !== currentStoryId || requestId !== fileOpenRequest) return;
@@ -2366,8 +2359,19 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
         }
 
+        function invalidateFileAfterUndo(storyId) {
+            if (openFileStoryId !== storyId || !openFileName) return;
+            fileOpenRequest++;
+            openFileNeedsReload = true;
+            fileStatus('Undo restored the story files. This editor still contains the previous version. Copy or download any unsaved edits, then use Reload file before saving.');
+        }
+
         async function saveOpenFile() {
             if (!openFileName) return;
+            if (openFileNeedsReload) {
+                fileStatus('Reload this file before saving: Undo restored an earlier version on the server. Copy or download any unsaved edits first.');
+                return;
+            }
             if (openFileStoryId !== currentStoryId) {
                 fileStatus('The selected story changed. Open the file from that story before saving.');
                 return;
@@ -2376,7 +2380,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             const storyId = openFileStoryId;
             const session = fileEditorSession;
             const text = getFileEditor().getText();
-            getFileEditor().buffer.breakGroup();
+            getFileEditor().breakHistoryGroup();
             const body = { text };
             if (name === 'chat_log.json') body.expected_text = openFileServerText;
             const saveBtn = document.getElementById('file-save-btn');
@@ -3214,6 +3218,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const data = await requireJsonResponse(res, 'Could not prepare regeneration');
                 if (!data.regeneration || !data.restored_prompt) throw new Error('The server did not return a turn to regenerate. Reload the story to check its retry status.');
                 if (!isCurrentStoryRead(request) || storyId !== currentStoryId) return;
+                invalidateFileAfterUndo(storyId);
                 await loadStory();
                 if (!isCurrentStoryRead(request) || storyId !== currentStoryId) return;
                 await submitStory(data.restored_prompt, false, data.regeneration);
@@ -3252,6 +3257,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
                 // Reload story display to remove old text, then regenerate
                 if (!isCurrentStoryRead(request)) return;
+                invalidateFileAfterUndo(request.storyId);
                 await loadStory();
                 if (!isCurrentStoryRead(request)) return;
                 submitStory(promptToRegenerate);
@@ -3397,6 +3403,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     throw new Error(err.detail || 'Undo failed');
                 }
                 if (!isCurrentStoryRead(request)) return;
+                invalidateFileAfterUndo(request.storyId);
                 await loadStory();
                 if (!isCurrentStoryRead(request)) return;
                 submitStory(newPrompt);

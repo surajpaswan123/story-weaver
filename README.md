@@ -7,7 +7,7 @@ connection; Story Weaver assembles the context, streams the response, saves the
 turn, and updates the story's reference material.
 
 The backend is Python/FastAPI. The interface is HTML and JavaScript, with a
-sectioned plain-text editor and keyboard-accessible controls. It can run on a
+plain-text editor with standard Windows navigation and keyboard-accessible controls. It can run on a
 Windows PC or in one hosted application instance, including Render or ClawCloud
 Run. PostgreSQL is the primary story store when configured; local files remain
 the working copy used by the application.
@@ -51,7 +51,7 @@ unpublished development changes are not promises about the running application.
 | Separate stories | Keeps story directories and requests associated with an account and story ID. |
 | Turn revision | Regenerates the latest completed turn with the same prompt, an edited prompt, or explicit feedback. |
 | Editable memory | Lets you edit Markdown reference files and `chat_log.json`. |
-| Large-file editing | Keeps approximately 8,000 characters in the native textarea while retaining the complete document in a JavaScript buffer. |
+| Large-file editing | CodeMirror renders the visible part of a continuous document and manages selection across the complete file. |
 | Provider compatibility | Supports native Google GenAI and server-side Chat Completions, Responses, and Anthropic Messages connections. |
 | Local inference | Lets the browser call a local OpenAI-compatible Chat Completions server. |
 | Audio input | Accepts uploaded audio, with separate hosted and browser-direct processing paths. |
@@ -231,8 +231,8 @@ restored on every failure.
 2. Enter the desired changes in the labelled feedback textbox.
 3. Submit the feedback form. Cancelling the form leaves the turn alone.
 4. The server obtains the original prompt and the removed AI response, checks
-   that undo is safe, removes that response, and restores the latest available
-   reference snapshot.
+   that its backup matches, then restores the manuscript, transcript, and all
+   reference files saved before that turn.
 5. The next request includes the normal context and these explicit sections:
 
 ```text
@@ -265,21 +265,28 @@ preserved by every adapter.
 
 ### Undo boundaries
 
-Undo checks that the latest saved AI prose can be removed safely from the end of
-`story.md`. If you changed that prose directly, it can return HTTP 409 instead of
-guessing which text to delete. Keep matching AI text in `chat_log.json` and
-`story.md` consistent when editing them manually.
+Undo checks that the current manuscript and transcript match the completed turn's
+checkpoint. Direct edits to either file can invalidate earlier history and return
+HTTP 409 rather than guess what to remove. New completed turns save new backups.
 
-Reference snapshots are stored in the local `_snapshots` directory. There is one
-latest snapshot, not one for every historical turn. It records reference
-Markdown files before generation and removes newly created reference files when
-restoring that snapshot. The manuscript is rolled back using the matching
-transcript response, rather than being read from that reference snapshot.
+Completed turns now keep a matching reference-file checkpoint in `_turn_undo.json`,
+which travels with the story through PostgreSQL or Firestore sync. Starting a
+request writes a separate candidate; a failed request cannot replace the previous
+completed turn's backup. The newest 20 checkpoints are retained, with older ones
+trimmed when encoded reference history exceeds 8 MiB. The newest checkpoint is
+kept even when it exceeds that target. Reference data is compressed; the full
+manuscript is not copied into every checkpoint.
 
-Snapshots are not included in the normal PostgreSQL story-file sync. After a
-host loses its local disk, saved story text may return from PostgreSQL while the
-old reference snapshot is unavailable. Undo is therefore not a substitute for
-backups or a full revision-history feature.
+Undo validates the current manuscript/transcript and the reference backup before
+changing files. It restores the earlier manuscript, transcript and reference-file
+set together, including removing files created by the undone turn. A local
+transaction journal permits rollback if a file write fails or the process stops
+mid-operation. Each successive Undo consumes the matching checkpoint.
+
+Old turns whose backups were never saved, unavailable history, and changed or
+corrupted checkpoints return a conflict without partially undoing the story.
+The app cannot reconstruct an exact historical reference state from missing
+backups. Generate a new completed turn to begin reliable checkpoint history.
 
 ### Failed, dangling, and deleted turns
 
@@ -289,8 +296,8 @@ response. Feedback regeneration requires a completed response and rejects that
 state. The cleanup action can remove trailing dangling prompts separately.
 
 The pending retry file can retain a failed prompt and its feedback regeneration
-context. It is local transient state, so it is not guaranteed to survive a
-deployment restart. A retry creates a new provider request; it does not resume
+context. It is included in normal story sync, so a successful cloud save preserves
+it across a deployment restart. A retry creates a new provider request; it does not resume
 an upstream model from its last streamed token.
 
 Deleting an older turn does not restore the latest reference snapshot, because
@@ -301,83 +308,51 @@ are not automatically rewritten around the deletion.
 
 ## File editor and keyboard reference
 
-Open Story Files and select a Markdown file or `chat_log.json`. The editor offers
-Copy, Copy all, Select all, Undo, Redo, Find, Replace, line navigation, word wrap,
-section navigation, Save, and Download file. These are plain-text operations;
-Markdown syntax remains editable text.
+Open Story Files and select a Markdown file or `chat_log.json`. The editor uses
+CodeMirror 6 for plain-text editing, selection, clipboard operations and undo/redo.
+The document is continuous: scrolling and selection work across the entire file,
+while the editor renders a viewport instead of a huge textarea. Markdown remains
+editable text; no code-completion, syntax highlighting, or line-number gutter is enabled.
 
-### Large documents and selection
+### Keyboard controls
 
-The complete document stays in an in-memory text buffer. The native textarea
-shows a bounded section of approximately 8,000 characters. Windows CRLF and CR newlines
-are normalized to LF when a file is opened, matching native browser text editing.
-Opening the file alone does not create an undo entry or mark it as edited.
-Section boundaries avoid splitting UTF-16 surrogate pairs. A single huge line
-is still divided into bounded sections.
-
-Native typing can grow the visible section to 12,000 characters before it is
-recentered around the cursor. This avoids repeatedly replacing the textbox text
-while typing. Section descriptions update only when their text changes; typing
-updates are coalesced, and ordinary selection keys do not rewrite descriptions.
-The changing section counter is separate from the textbox description to reduce
-repeated accessibility updates. Section navigation still announces its position.
-
-**Ctrl+A selects the complete file logically**, even though only one section is
-displayed. The status text announces that selection. Ctrl+C copies the complete
-selection; cut, typing, and paste can replace the whole document. Arrow keys or
-Escape leave that whole-file selection state. Ordinary selections made inside
-the textarea refer to the visible section.
-
-Use the dedicated whole-file selection and navigation controls for very long
-documents. The app does not promise that every operating-system paragraph
-selection gesture crosses section boundaries. For example, Ctrl+Shift+Down is
-still influenced by the browser's native textarea behavior.
-
-### Keyboard shortcuts
-
-These bindings apply while the file textarea has focus. On platforms with a
-Command key, the code also accepts that modifier for the Ctrl bindings.
-
-| Shortcut | Result |
+| Shortcut | Action |
 | --- | --- |
-| Ctrl+A | Select the entire buffered file. |
-| Ctrl+C | Copy the selected text, including a logical whole-file selection. |
-| Ctrl+X | Cut the selection when the browser supplies clipboard access. |
-| Ctrl+V | Paste plain text; a whole-file selection replaces the whole file. |
-| Ctrl+Z | Undo a text edit in the current editor session. |
-| Ctrl+Y or Ctrl+Shift+Z | Redo an undone text edit. |
-| Ctrl+S | Call the file Save action. |
-| Ctrl+F | Open the editor's find controls and focus the search field. |
-| Alt+PageDown / Alt+PageUp | Move to the next / previous section. |
-| Ctrl+Home / Ctrl+End | Move to the beginning / end of the complete file. |
-| Enter in the Find field | Find the next match. |
-| Enter in the line-number field | Jump to that line. |
+| Ctrl+Left / Ctrl+Right | Move word by word using Windows word-navigation behavior. |
+| Ctrl+Shift+Left / Ctrl+Shift+Right | Select word by word. |
+| Shift+Up / Shift+Down | Extend selection by displayed lines. |
+| Ctrl+Up / Ctrl+Down | Move by paragraphs (hard line breaks). |
+| Ctrl+Shift+Up / Ctrl+Shift+Down | Select by paragraphs, preserving the selection anchor. |
+| Home / End | Move to the start/end of the displayed line. |
+| Ctrl+Home / Ctrl+End | Move to the start/end of the document; add Shift to select. |
+| PageUp / PageDown | Move by a page; add Shift to select. |
+| Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V | Select all, copy, cut, and paste. |
+| Ctrl+Z | Undo an edit. |
+| Ctrl+Y / Ctrl+Shift+Z | Redo an edit. |
+| Ctrl+S | Save the full file. |
+| Ctrl+F | Focus the labelled Find controls. |
+| Tab / Shift+Tab | Leave the editor for the next/previous control. |
 
-Find searches the full buffer and can reveal a match in another section. Replace
-changes the selected matching occurrence; it is not an undocumented Replace all
-operation. A screen reader may need its normal forms/editing mode to pass these
-keys to the textarea.
+Copy, Copy all, Select all, Undo, Redo, Find, Replace, Go to line, Wrap long lines,
+Save, and Download file are also available as labelled controls. There are no
+manual section controls or separate whole-file selection flags.
 
-### Saving, downloading, and undo history
+### Saving, downloading, and history
 
-Save sends the complete buffer, not just the visible section. Markdown saves pass
-through the app's text-cleaning function; transcript JSON is validated before
-replacement. The raw file-save endpoint accepts up to **2,000,000 characters**.
-That is a limit of this editing request, not a promise about maximum book length
-or a provider's context window.
+Save, Copy all, and Download file include the entire current document. Saving does
+not clear editing history. Undo/redo uses CodeMirror's history, grouping adjacent
+typing and keeping approximately 100 recent edit groups. Opening or reloading a
+file resets that history. This is separate from story-turn Undo and regeneration.
 
-Download file includes the complete current buffer, including unsaved edits.
-Downloading does not save those edits back into the story. Copy all likewise
-works from the buffer. If the browser blocks clipboard access, focus the editor
-and use Ctrl+C, or download the file. Copying an entire book still allocates a
-large clipboard payload even though the textarea is sectioned.
+Windows CRLF and CR newlines normalize to LF on opening. Opening alone does not
+mark a file as edited. Chat JSON conflict checks retain the exact original server
+text separately. The file-save endpoint accepts at most 2,000,000 characters.
 
-The undo stack stores independent copies of changed text, so small history entries
-do not retain entire older document strings. It groups adjacent typing and trims
-older operations around a 20 MiB accounting budget or 500 operations. The newest
-operation is retained even if it alone exceeds that budget. This is not a hard
-cap on all browser memory. Opening another file or reloading resets editor
-history; it is distinct from story-turn undo.
+The editor's readable source is `frontend/file-editor.js`. Dependencies are pinned
+in `frontend/package-lock.json`; the self-contained browser bundle is committed at
+`static/file-editor.js`, so the hosting service needs no Node runtime or external
+editor CDN. To rebuild it, run `npm --prefix frontend ci --ignore-scripts --no-audit`
+and `npm --prefix frontend run build`. Building does not run tests.
 
 ### Editing `chat_log.json`
 
@@ -629,7 +604,7 @@ the provider's handling of the request.
 
 ### Full manuscript versus displayed history
 
-The chat page size, manuscript preview size, and file-editor section size are
+The chat page size, manuscript preview size, and file-editor viewport are
 presentation and resource controls. They do not truncate the full manuscript
 sent to the writer. `chat_log.json` is used for transcript display, turn counts,
 recent-turn extraction, undo, and saved thought metadata. The entire transcript
@@ -1023,8 +998,8 @@ runtime state. They have different recovery properties:
 | Successfully synced story Markdown and transcript JSON | PostgreSQL when configured; otherwise legacy Firestore when available | Yes, subject to the external store remaining available. |
 | Working story files | `stories/<normalized-uid>/<story-id>/` beside `main.py` | Only with a persistent disk or a successful remote copy. |
 | Newer files whose upload failed | Local working directory with pending-upload metadata | Not without preserving that local disk. |
-| Latest reference undo snapshot | Local `_snapshots/` subdirectory | Not through the normal story snapshot sync. |
-| Failed prompt/revision retry marker | Local `pending_retry.json` | Not through the normal story snapshot sync. |
+| Turn reference checkpoints | `_turn_undo.json`, with a separate `_turn_undo_pending.json` candidate | Yes, with the normal story sync. |
+| Failed prompt/revision retry marker | `pending_retry.json` | Yes, with the normal story sync. |
 | Uploaded audio | Local media files | Not through the normal story snapshot sync. |
 | Active generation and recent progress | Python process memory | No. |
 | Last selected story | Account-scoped browser localStorage | Only in that browser profile, until cleared. |
@@ -1043,9 +1018,9 @@ stories/
       ...other story Markdown files...
       _sync_meta.json
       pending_retry.json       (when a retry is pending)
-      _snapshots/
-        manifest.json
-        ...latest reference snapshot...
+      _turn_undo.json          (completed-turn checkpoints)
+      _turn_undo_pending.json  (candidate for the active request)
+      _undo_journal.json       (only during a recoverable file operation)
 ```
 
 For local/default-user compatibility, the app can also recognize older direct
@@ -1105,14 +1080,15 @@ the application is not a permanently database-free cache.
 ### Atomic writes and their limits
 
 Local text and JSON helpers write a temporary file, flush it, and replace the
-destination. `commit_ai_turn` writes the manuscript and transcript under the
-story lock and attempts to restore the original manuscript if the transcript
-write fails. That is useful protection against ordinary write failures.
+destination. Turn commits and Undo write a journal of the original files under
+the story lock before replacing any of them. A failed write restores those files;
+if the process stops mid-operation, the next story access recovers the journal
+before reading or syncing that story. The journal is local and excluded from cloud sync.
 
 It is not one distributed transaction spanning local files, PostgreSQL, Firestore,
-the provider, and browser state. Sudden process or machine failure between local
-file operations remains different from a handled exception. Background analysis
-also writes files in stages before the later complete snapshot sync.
+the provider, and browser state. Recovery requires the local journal to survive;
+loss of an ephemeral disk requires the last successfully synced cloud version.
+Background analysis also writes files in stages before the later complete sync.
 
 The PostgreSQL **snapshot transaction** is atomic within that database. If it
 fails, the new local files may still exist while the remote database retains the
@@ -1618,8 +1594,8 @@ be cleared with empty strings.
 | Chat parsing | `ijson` processes entries incrementally | A page read still scans the transcript; it is not an indexed turn database. |
 | Streaming delivery | Default queue capacity is 16 events | The generation pipeline still assembles a complete response for saving. |
 | Stream painting | Frontend batches normal stream display updates around 100 ms | Long final text and large history entries still need rendering. |
-| File textarea | Approximately 8,000 characters visible, with typing room up to 12,000 | The complete buffer and edits remain in browser memory. |
-| Editor undo | Older edits trimmed around 20 MiB or 500 operations | One newest large edit can exceed the accounting target. |
+| File editor | CodeMirror viewport over the complete document | Document text and edit history remain in browser memory. |
+| Editor undo | Approximately 100 recent edit groups | Large replacements can still retain substantial text. |
 | Remote restore | Warm-cache filename/timestamp check | A changed/cold story still downloads its file snapshot. |
 | Logs | Latest 500 lines, each message line truncated around 4,096 characters | Redaction and buffering are not comprehensive monitoring or isolation. |
 | Generation status | Small in-memory records and active-only recovery polling | Records disappear when the process restarts. |
@@ -1637,7 +1613,7 @@ worker counts to address a slow provider: that does not make the provider faster
 and breaks the process-local coordination assumptions. Keep `RELOAD=false` so
 routine source changes do not restart a hosted process during work.
 
-On a slow laptop, use section navigation and file download instead of repeatedly
+On a slow laptop, use the editor or file download instead of repeatedly
 selecting and rendering a whole book. Close unused browser tabs if the browser is
 under memory pressure. Hosted inference moves model computation off the laptop,
 but the browser still renders text and holds editor buffers.
@@ -1723,7 +1699,10 @@ openai_compat.py                 Responses, Messages, and OpenCode text adapters
 regeneration.py                  Feedback context and returned thought-tag handling
 runtime_support.py              Progress tracking, history paging, streaming queues
 static/index.html               Application interface and browser-side orchestration
-static/file-editor.js           Sectioned editor, clipboard, find, undo/redo
+frontend/file-editor.js         Continuous text editor source and Windows key bindings
+frontend/package-lock.json      Pinned editor and build dependencies
+static/file-editor.js           Generated self-contained editor bundle
+turn_checkpoints.py             Durable turn backups and recoverable file restoration
 tests/                          Backend regression tests and Node frontend tests
 Dockerfile                      Runtime container definition
 .github/workflows/              Image publishing and keep-warm workflow
@@ -1867,7 +1846,7 @@ you need the transcript and reference material as well.
 | Feedback sections and saved thoughts | [regeneration.py](regeneration.py) |
 | Progress and bounded history/streaming | [runtime_support.py](runtime_support.py) |
 | Reconnection, story switching, local calls | [static/index.html](static/index.html) |
-| Copy, selection, undo, and text sections | [static/file-editor.js](static/file-editor.js) |
+| Copy, selection, and edit undo/redo | [frontend/file-editor.js](frontend/file-editor.js) |
 | Dependency ranges | [requirements.txt](requirements.txt) and [requirements-dev.txt](requirements-dev.txt) |
 | Container and release checks | [Dockerfile](Dockerfile) and [publish-image.yml](.github/workflows/publish-image.yml) |
 | Behavioral regression coverage | [tests](tests) |

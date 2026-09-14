@@ -47,6 +47,7 @@ function setup() {
         getSelectedModel: () => 'test-model',
         showGuestNagDialog() { announcements.push('Sign in'); },
         updateSendButtonState() {},
+        invalidateFileAfterUndo() {},
         announceToScreenReader(message) { announcements.push(message); },
         announceStatus(message) { announcements.push(message); },
         console,

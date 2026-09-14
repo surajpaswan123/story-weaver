@@ -73,6 +73,7 @@ from runtime_support import HistoryChanged, read_chat_page, relay_stream, heartb
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
+from turn_checkpoints import TurnCheckpoints, CheckpointError, JOURNAL as UNDO_JOURNAL
 from regeneration import (FeedbackUndoInput, RegenerationContext, extract_model_thoughts,
                           without_model_thoughts, with_regeneration_feedback)
 
@@ -1009,7 +1010,7 @@ def _write_story_sync_timestamp(story_dir: str, updated_at: float, storage: str 
 
 
 def _is_synced_story_file(name: str) -> bool:
-    return (isinstance(name, str) and name not in {"pending_retry.json", SYNC_META_FILE}
+    return (isinstance(name, str) and name not in {UNDO_JOURNAL, SYNC_META_FILE}
             and not name.startswith("temp_") and name.endswith((".md", ".json"))
             and not any(char in name for char in ("/", "\\", ":"))
             and name.rsplit(".", 1)[0].casefold() not in WINDOWS_RESERVED_NAMES)
@@ -2359,7 +2360,6 @@ def strip_thought_tags(text: str, filter_reasoning_lines: bool = True) -> str:
     return '\n'.join(filtered_lines).strip()
 
 # === SNAPSHOT SYSTEM — backup reference .md files before generation, restore on undo ===
-SNAPSHOT_MANIFEST = "manifest.json"
 
 
 def _snapshot_reference_files(story_dir: str) -> list[str]:
@@ -2372,61 +2372,10 @@ def _snapshot_reference_files(story_dir: str) -> list[str]:
     )
 
 def save_snapshot(story_id: str, uid: str = "default_user"):
-    """Save a snapshot of all reference .md files before a generation.
-    Only keeps the latest snapshot (for single undo)."""
+    """Prepare a durable candidate without replacing any completed-turn backup."""
     with get_story_lock(story_id, uid):
-        story_dir = get_story_dir(story_id, uid=uid)
-        snap_dir = os.path.join(story_dir, "_snapshots")
-        os.makedirs(snap_dir, exist_ok=True)
+        TurnCheckpoints(get_story_dir(story_id, uid=uid), _atomic_write_text).begin()
 
-        # Remove files from the prior snapshot so an absent file is represented
-        # accurately in the new manifest.
-        for name in os.listdir(snap_dir):
-            path = os.path.join(snap_dir, name)
-            if os.path.isfile(path):
-                os.remove(path)
-
-        filenames = _snapshot_reference_files(story_dir)
-        for filename in filenames:
-            filepath = os.path.join(story_dir, filename)
-            with open(filepath, "r", encoding="utf-8") as handle:
-                _atomic_write_text(os.path.join(snap_dir, filename), handle.read())
-        _atomic_write_json(os.path.join(snap_dir, SNAPSHOT_MANIFEST), {"files": filenames})
-        print(f"  [Snapshot] Saved {len(filenames)} reference files for {story_id}")
-
-def restore_snapshot(story_id: str, uid: str = "default_user"):
-    """Restore .md files from the latest snapshot (called on undo)."""
-    with get_story_lock(story_id, uid):
-        story_dir = get_story_dir(story_id, uid=uid)
-        snap_dir = os.path.join(story_dir, "_snapshots")
-        manifest_path = os.path.join(snap_dir, SNAPSHOT_MANIFEST)
-
-        if not os.path.exists(manifest_path):
-            print("  [Snapshot] No complete snapshot found, skipping restore.")
-            return
-
-        with open(manifest_path, "r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        filenames = {
-            name for name in manifest.get("files", [])
-            if isinstance(name, str) and os.path.basename(name) == name and name.lower().endswith(".md")
-        }
-
-        # Files created by background analysis after the snapshot must disappear
-        # on undo, otherwise custom categories survive a supposedly rolled-back turn.
-        for filename in _snapshot_reference_files(story_dir):
-            if filename not in filenames:
-                os.remove(os.path.join(story_dir, filename))
-
-        restored = 0
-        for filename in filenames:
-            snap_path = os.path.join(snap_dir, filename)
-            if not os.path.isfile(snap_path):
-                raise RuntimeError(f"Snapshot is incomplete: missing {filename}")
-            with open(snap_path, "r", encoding="utf-8") as handle:
-                _atomic_write_text(os.path.join(story_dir, filename), handle.read())
-            restored += 1
-        print(f"  [Snapshot] Restored {restored} reference files for {story_id}")
 
 CHARACTER_PHYSICAL_KEYWORDS = (
     "hair", "eye", "eyes", "skin", "face", "voice", "build", "frame", "body", "height",
@@ -2664,10 +2613,16 @@ def get_story_dir(story_id: str, uid: str = "default_user", create: bool = True)
         and safe_uid == "default_user"
         and os.path.isfile(os.path.join(root_dir, "story.md"))
     ):
+        if os.path.isfile(os.path.join(root_dir, UNDO_JOURNAL)):
+            with get_story_lock(story_id, uid):
+                TurnCheckpoints(root_dir, _atomic_write_text).recover()
         return root_dir
 
     if create:
         os.makedirs(story_dir, exist_ok=True)
+    if os.path.isfile(os.path.join(story_dir, UNDO_JOURNAL)):
+        with get_story_lock(story_id, uid):
+            TurnCheckpoints(story_dir, _atomic_write_text).recover()
     return story_dir
 
 def get_story_path(story_id: str, uid: str = "default_user", create: bool = True):
@@ -2722,13 +2677,8 @@ def commit_ai_turn(story_id: str, text: str, model: str = "", uid: str = "defaul
             "model_thoughts": saved_thoughts,
         })
 
-        _atomic_write_text(story_path, updated_story)
-        try:
-            _atomic_write_json(chat_path, entries)
-        except Exception:
-            # Keep story.md and chat_log.json aligned if the second write fails.
-            _atomic_write_text(story_path, original_story)
-            raise
+        TurnCheckpoints(get_story_dir(story_id, uid=uid), _atomic_write_text).commit(
+            original_story, updated_story, entries)
         return updated_story
 
 def has_any_generation_provider(user_info: dict = None) -> bool:
@@ -3409,7 +3359,7 @@ def get_consistency(story_id: str, user_id: str = Depends(get_current_user_id)):
 # appends to the file).
 STORY_FILE_INFO = {
     "story.md":       ("Manuscript", "The complete story text, in order.", "ai"),
-    "chat_log.json":  ("Chat history", 'The turn-by-turn transcript, including model_thoughts. Use a JSON array of entries with role "user" or "ai" and a text string. This edits chat history only; story.md and reference files stay separate. If you change AI response text, update the matching text in story.md too so Undo and Regenerate can locate it.', "app"),
+    "chat_log.json":  ("Chat history", 'The turn-by-turn transcript, including model_thoughts. Use a JSON array of entries with role "user" or "ai" and a text string. This edits chat history only; story.md and reference files stay separate. Editing the manuscript or transcript can invalidate earlier Undo and Regenerate backups. New completed turns save new backups.', "app"),
     "rules.md":       ("World Rules", "Hard law for this world. Outranks everything.", "user"),
     "style.md":       ("Style Guide", "Voice, tense, person, pacing.", "user"),
     "characters.md":  ("Characters", "Cast sheet: name + stable physical description.", "ai"),
@@ -7128,10 +7078,23 @@ async def delete_turn(story_id: str, body: dict, user_info: dict = Depends(requi
 
 @app.post("/story/{story_id}/undo")
 async def undo_last(story_id: str, user_info: dict = Depends(require_authenticated_user), feedback_input: Optional[FeedbackUndoInput] = None):
-    """Remove the last AI generation from story.md and the last AI+user pair from chat log."""
     user_id = user_info["uid"]
-    if story_turn_is_active(story_id, user_id):
-        raise HTTPException(status_code=409, detail="Wait for the current generation to finish before undoing")
+    if get_analysis_status(story_id, user_id).get("state") == "running":
+        raise HTTPException(status_code=409, detail="Wait for story analysis to finish before undoing")
+    token = begin_story_turn(story_id, user_id)
+    try:
+        with get_story_lock(story_id, user_id):
+            return _undo_last_locked(story_id, user_info, feedback_input)
+    except (CheckpointError, ValueError, KeyError, TypeError) as exc:
+        detail = str(exc) if isinstance(exc, CheckpointError) else "The saved undo data is invalid. Nothing was changed."
+        raise HTTPException(status_code=409, detail=detail) from exc
+    finally:
+        end_story_turn(story_id, user_id, token)
+
+
+def _undo_last_locked(story_id: str, user_info: dict, feedback_input: Optional[FeedbackUndoInput]):
+    """Validate and restore manuscript, transcript, references and retry state together."""
+    user_id = user_info["uid"]
     restore_story_directory_from_firestore(user_id, story_id)
     story_path = get_story_path(story_id, uid=user_id, create=False)
     chat_path = get_chat_log_path(story_id, uid=user_id, create=False)
@@ -7161,10 +7124,10 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
         if feedback_input is not None:
             raise HTTPException(status_code=409, detail="The latest prompt has no completed response to regenerate.")
         dangling = entries.pop()
-        try:
-            _atomic_write_json(chat_path, entries)
-        except Exception as e:
-            print(f"  Undo: could not write chat log: {e}")
+        TurnCheckpoints(get_story_dir(story_id, uid=user_id), _atomic_write_text).transaction({
+            "chat_log.json": json.dumps(entries, ensure_ascii=False),
+            "_turn_undo_pending.json": None, "pending_retry.json": None,
+        })
         sync_story_directory_to_firestore(user_id, story_id)
         return {"removed_text": "", "restored_prompt": dangling.get("text", "")}
 
@@ -7204,49 +7167,17 @@ async def undo_last(story_id: str, user_info: dict = Depends(require_authenticat
     if feedback_input is not None and not restored_prompt.strip():
         raise HTTPException(status_code=400, detail="This turn has no original user prompt to regenerate.")
 
-    # 2. Remove the AI text from the end of story.md
-    with open(story_path, "r", encoding="utf-8") as f:
-        story_content = f.read()
-
-    # The AI text is appended with "\n\n" prefix, try to find and remove it
-    # Try with the separator first, then without
-    # Rstrip story_content to handle trailing whitespace from truncation feature
+    with open(story_path, "r", encoding="utf-8") as handle:
+        story_content = handle.read()
     ai_text_clean = clean_text(ai_text).strip()
-    story_content_check = story_content.rstrip()
-    removed = False
-    for separator in ["\n\n", "\n", ""]:
-        suffix = separator + ai_text_clean
-        if story_content_check.endswith(suffix):
-            story_content = story_content_check[: -len(suffix)]
-            removed = True
-            break
-
-    if not removed:
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot safely undo because the story was modified after the last AI response."
-        )
-
-    _atomic_write_text(story_path, story_content)
-
-    # 3. Remove entries from chat log (AI entry + its preceding user entry)
-    indices_to_remove = [last_ai_idx]
-    if last_user_idx is not None:
-        indices_to_remove.append(last_user_idx)
-    entries = [e for i, e in enumerate(entries) if i not in indices_to_remove]
-
-    _atomic_write_json(chat_path, entries)
-
-    print(f"Undo: removed {len(ai_text_clean)} chars from story, restored prompt: '{restored_prompt[:50]}...'")
-    
-    # Restore .md files from snapshot (summary, incidents, items, time, etc.)
-    restore_snapshot(story_id, uid=user_id)
-
-    # Turn count is derived from chat_log.json each time (get_turn_count), which we just
-    # trimmed above - no manual counter to decrement anymore.
+    retry = None
     if regeneration is not None:
-        write_pending_retry(story_id, user_id, restored_prompt, "Regeneration with feedback is ready to run.", regeneration)
+        retry = {"prompt": restored_prompt, "error": "Regeneration with feedback is ready to run.",
+                 "time": time.strftime("%H:%M"), "regeneration": regeneration.model_dump()}
+    restored_files = TurnCheckpoints(get_story_dir(story_id, uid=user_id), _atomic_write_text).undo(
+        story_content, entries, retry)
     sync_story_directory_to_firestore(user_id, story_id)
+    print(f"Undo: restored {restored_files} reference files and the previous manuscript/transcript.")
 
     result = {"removed_text": ai_text_clean, "restored_prompt": restored_prompt, "model_thoughts": model_thoughts}
     if regeneration is not None:

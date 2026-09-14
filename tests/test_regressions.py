@@ -53,7 +53,11 @@ def test_snapshot_restores_all_reference_markdown_and_removes_new_files(isolated
         (story_dir / name).write_text("changed", encoding="utf-8")
     (story_dir / "new-category.md").write_text("created during analysis", encoding="utf-8")
 
-    main.restore_snapshot("snapshot-test", uid="user-1")
+    main.append_chat_entry("snapshot-test", "user", "Continue", uid="user-1")
+    main.commit_ai_turn("snapshot-test", "A new scene.", uid="user-1")
+    store = main.TurnCheckpoints(story_dir, main._atomic_write_text)
+    entries = json.loads((story_dir / "chat_log.json").read_text(encoding="utf-8"))
+    store.undo((story_dir / "story.md").read_text(encoding="utf-8"), entries)
 
     for name, content in originals.items():
         assert (story_dir / name).read_text(encoding="utf-8") == content

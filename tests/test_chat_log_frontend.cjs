@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const StoryFileEditor = require('../static/file-editor.js');
+const { HeadlessFileEditor } = require('./editor_state_fixture.cjs');
+const StoryFileEditor = { FileTextEditor: HeadlessFileEditor };
 
 const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
 const code = html.slice(html.indexOf('let openFileName = null;'), html.indexOf('async function saveRules()'));
@@ -46,7 +47,7 @@ test('chat history opens with accessible description and saves with a stale-edit
     await app.context.openStoryFile('chat_log.json');
     assert.equal(app.element('file-textarea').value, original);
     assert.equal(app.element('file-textarea').attributes['aria-label'], 'Contents of chat_log.json, editable');
-    assert.match(html, /aria-label="File contents, editable" aria-describedby="file-editor-desc file-editor-help"/);
+    assert.match(html, /id="file-editor-host"/);
     assert.equal(app.element('file-textarea').focused, true);
     assert.equal(app.element('file-delete-btn').classList.values.has('hidden'), true);
     assert.match(app.element('file-editor-meta').textContent, /Transcript/);
@@ -90,8 +91,8 @@ test('saving a large file sends all sections and preserves edits made during a s
     } });
     await app.context.openStoryFile('story.md');
     const editor = app.context.getFileEditor();
-    assert.ok(app.element('file-textarea').value.length < text.length);
-    editor.reveal(editor.buffer.text.length);
+    assert.equal(editor.getText().length, text.length);
+    editor.reveal(editor.view.state.doc.length);
     editor.replaceSelection('first edit');
     let submitted, finish;
     app.context.authFetch = async (url, options) => {
@@ -134,7 +135,7 @@ test('CRLF transcripts stay clean on open and use exact server text for conflict
     } });
     await app.context.openStoryFile('chat_log.json');
     assert.equal(app.context.fileEditorIsDirty(), false);
-    assert.equal(app.context.getFileEditor().buffer.undoStack.length, 0);
+    assert.equal(app.element('file-undo-btn').disabled, true);
     assert.equal(app.context.getFileEditor().getText(), serverText.replace(/\r\n/g, '\n'));
     const edited = serverText.replace(/\r\n/g, '\n').replace('Mira waited.', 'Mira stayed.');
     app.element('file-textarea').value = edited;
