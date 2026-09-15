@@ -1885,8 +1885,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     const delBtn = document.createElement('button');
                     delBtn.className = 'action-btn ml-auto';
                     delBtn.textContent = '🗑 Delete turn';
-                    delBtn.title = `Delete turn ${turnNumber} (your prompt and this AI response)`;
-                    delBtn.setAttribute('aria-label', `Delete turn ${turnNumber}: removes your prompt and this AI response from the story`);
+                    delBtn.disabled = !isLast || Boolean(observedGeneration?.active);
+                    delBtn.title = isLast ? `Delete turn ${turnNumber} and restore all story files` : 'Delete later turns first so the reference files can be restored consistently.';
+                    delBtn.setAttribute('aria-label', isLast ? `Delete turn ${turnNumber} and restore all story files to before it` : `Delete turn ${turnNumber} unavailable: delete later turns first`);
                     delBtn.onclick = () => deleteTurn(turnNumber - 1);
                     header.appendChild(delBtn);
                 }
@@ -2360,6 +2361,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         function invalidateFileAfterUndo(storyId) {
+            if (storyId !== currentStoryId) return;
+            refreshOpenPanels();
             if (openFileStoryId !== storyId || !openFileName) return;
             fileOpenRequest++;
             openFileNeedsReload = true;
@@ -3302,11 +3305,11 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         }
 
         async function deleteTurn(turnIndex) {
-            if (observedGeneration?.active || generationStatusRequest) return;
+            if (isGenerating || observedGeneration?.active || generationStatusRequest || feedbackRegenerationBusy) return;
             const request = beginStoryRead('turn-action');
             const humanTurn = turnIndex + 1;
             const ok = window.confirm(
-                `Delete turn ${humanTurn}? This permanently removes your prompt and the AI's response for that turn from this story.`
+                `Delete turn ${humanTurn} and restore all story files to their saved state before it? This also removes reference notes added by that turn. Any later manual reference edits will be replaced.`
             );
             if (!ok) return;
 
@@ -3323,19 +3326,13 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
                 const data = await res.json();
                 if (!isCurrentStoryRead(request)) return;
+                invalidateFileAfterUndo(request.storyId);
                 await loadStory();
                 if (!isCurrentStoryRead(request)) return;
-                if (data.consistency_warning) {
-                    announceToScreenReader(
-                        `Turn ${humanTurn} deleted from history, but its text could not be located in the story body — the story may have been edited manually. Consider running the Consistency Checker.`
-                    );
-                    announceStatus('Turn deleted — consistency check recommended');
-                } else {
-                    announceToScreenReader(
-                        `Turn ${humanTurn} deleted. ${data.remaining_turns} ${data.remaining_turns === 1 ? 'turn' : 'turns'} remaining. Remaining turns have been renumbered.`
-                    );
-                    announceStatus('Turn deleted');
-                }
+                announceToScreenReader(
+                    `Turn ${humanTurn} deleted. The manuscript, chat history, and ${data.restored_files} reference files were restored. ${data.remaining_turns} turns remaining.`
+                );
+                announceStatus('Turn deleted and story files restored');
             } catch (err) {
                 if (!isCurrentStoryRead(request)) return;
                 console.error('Delete turn failed:', err);

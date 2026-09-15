@@ -219,7 +219,7 @@ reconciling every later chapter.
 | Regenerate with feedback | The original prompt plus the removed draft, saved model thoughts, and feedback | Validate feedback, undo the latest turn, then send the revision context. |
 | Edit & Redo | The edited version of the previous prompt | Confirm the edit, undo the latest turn, then generate from the edited prompt. |
 | Retry failed prompt | The prompt returned from the pending retry record | Clear that retry marker and resubmit; do not undo an earlier successful turn. |
-| Delete a turn | No new generation | Remove the selected transcript turn and try to remove its matching manuscript text. |
+| Delete turn | No new generation | Restore the latest completed turn's manuscript, transcript, and all saved reference files together. |
 
 These actions change saved story data. Generation after an undo can itself fail;
 the removed turn is not retained as an alternate branch that is automatically
@@ -300,11 +300,17 @@ context. It is included in normal story sync, so a successful cloud save preserv
 it across a deployment restart. A retry creates a new provider request; it does not resume
 an upstream model from its last streamed token.
 
-Deleting an older turn does not restore the latest reference snapshot, because
-that snapshot belongs to a different point in the story. If matching manuscript
-text cannot be removed, the delete response reports a consistency warning. Review
-the manuscript and affected references, then run analysis if needed. Later scenes
-are not automatically rewritten around the deletion.
+**Delete turn** uses the same complete checkpoint restore as Undo and regeneration.
+It restores every saved reference file and removes files created after the checkpoint;
+it does not merely remove prose from `story.md` and `chat_log.json`. An open editor
+retains its text but requires reload before saving over the restored version.
+
+Only the latest completed turn can be deleted. Delete later turns first, and discard
+an unanswered trailing prompt first if present. Removing a middle turn while keeping
+later reference updates would retain facts based on the deleted events, so that
+request is rejected without changing the story. Missing or mismatched backups also
+stop deletion before any file changes. Previously contaminated notes are not
+automatically rebuilt by this fix; an append-only analysis cannot reliably erase them.
 
 ## File editor and keyboard reference
 
@@ -1425,7 +1431,7 @@ share one maximum.
 | POST | `/story/{story_id}/undo` | Signed in | No body for ordinary undo; optional `{ "feedback": "..." }` for feedback preparation. |
 | POST | `/story/{story_id}/retry` | Signed in | Returns and clears the pending prompt/revision marker; caller submits the returned prompt separately. |
 | POST | `/story/{story_id}/delete-dangling` | Signed in | Removes trailing unanswered user entries. |
-| POST | `/story/{story_id}/delete-turn` | Signed in | `{ "turn_index": 0 }`; index refers to an AI turn, starting at zero. |
+| POST | `/story/{story_id}/delete-turn` | Signed in | `{ "turn_index": 0 }`; zero-based index must identify the latest completed AI turn. Restores all checkpoint files; returns `restored_files`. |
 | POST | `/analyze/{story_id}` | Signed in | Query `turns=0` or positive N; starts manual analysis. |
 | GET | `/analyze/{story_id}/status` | Signed in | Analysis state, stages, files written, errors, and elapsed time. |
 
