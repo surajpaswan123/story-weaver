@@ -52,6 +52,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 import os
 import json
+import base64
 import time
 import threading
 import queue
@@ -389,6 +390,37 @@ def _atomic_write_bytes(path: str, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+async def _atomic_write_upload(upload, path: str, max_bytes: int, *, chunk_size: int = 1024 * 1024) -> int:
+    """Stream an UploadFile to disk without materializing the whole upload in RAM."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".story-weaver-", suffix=".upload.tmp", dir=directory)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while True:
+                chunk = await upload.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Audio file too large (max {max_bytes // (1024 * 1024)} MB).",
+                    )
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        return total
     except Exception:
         try:
             os.remove(temporary_path)
@@ -812,8 +844,8 @@ def get_effective_ai_clients(user_info: dict) -> dict:
             "openrouter_api_key", "groq_api_key"))
         if has_custom:
             return _clients_from_keys(admin_keys)
-        # No Settings keys configured -> nothing from .env is available; only
-        # the keyless local nokey proxy (if running) remains.
+        # No Settings keys configured -> only process-level clients explicitly
+        # initialized elsewhere remain. The retired Nokey proxy is never used.
         return {
             "genai_clients": clients,
             "nvidia_client": nvidia_client,
@@ -2086,18 +2118,11 @@ groq_client = None
 mistral_client = None
 hf_client = None
 
-# Gemini-Nokey Local Configuration
+# Gemini-Nokey was retired permanently. Keep the compatibility symbol at None
+# so legacy fallback branches are unreachable without touching unrelated routing.
 nokey_client = None
-try:
-    nokey_client = OpenAI(
-        base_url="http://localhost:8080",
-        api_key="none",
-    )
-    print("Gemini-Nokey local client initialized.")
-except Exception as e:
-    print(f"Failed to initialize Gemini-Nokey: {e}")
 
-# Safety filters OFF for creative writing via gemini-nokey
+# Legacy Nokey request metadata retained only for dormant compatibility code.
 NOKEY_SAFETY_OFF = {
     "google": {
         "safety_settings": [
@@ -2136,14 +2161,12 @@ NVIDIA_STORY_STREAM_MODELS = LiveModelList("nvidia")
 # Background tasks: NVIDIA models (dynamic, no static fallback)
 NVIDIA_BACKGROUND_MODELS = LiveModelList("nvidia")
 
-NOKEY_MODELS = LiveModelList("nokey")
-
-# Dedicated nokey model lists per component (all dynamic, no static fallback)
-NOKEY_STORY_MODELS = LiveModelList("nokey")
-
-NOKEY_BACKGROUND_MODELS = LiveModelList("nokey")
-
-NOKEY_TASK_MODELS = LiveModelList("nokey")
+# Gemini-Nokey is permanently retired. Empty tuples make every legacy Nokey
+# branch a no-op even if a client is accidentally reintroduced later.
+NOKEY_MODELS = ()
+NOKEY_STORY_MODELS = ()
+NOKEY_BACKGROUND_MODELS = ()
+NOKEY_TASK_MODELS = ()
 
 # Free models to rotate through (dynamic; kept to :free suffix)
 OPENROUTER_FREE_MODELS = LiveModelList("openrouter", prefer_suffix=":free")
@@ -2688,7 +2711,6 @@ def has_any_generation_provider(user_info: dict = None) -> bool:
         return any([
             bool(effective.get("genai_clients")),
             effective.get("nvidia_client") is not None,
-            effective.get("nokey_client") is not None,
             effective.get("groq_client") is not None,
             effective.get("mistral_client") is not None,
             effective.get("openrouter_client") is not None,
@@ -2697,7 +2719,7 @@ def has_any_generation_provider(user_info: dict = None) -> bool:
             effective.get("cerebras_client") is not None,
         ])
     return any([
-        bool(clients), nvidia_client, nokey_client, groq_client, mistral_client,
+        bool(clients), nvidia_client, groq_client, mistral_client,
         openrouter_client, official_openai_client, hf_client, cerebras_client,
     ])
 
@@ -3593,13 +3615,41 @@ SAFETY_SETTINGS = [
 # Model 3: Story Generator — full context + Model 1 + Model 2 results
 # ============================================================
 
+def _audio_api_format(mime_type: str, filename: str = "") -> str:
+    """Normalize common MIME types to OpenAI-compatible input_audio format names."""
+    mime = (mime_type or "").lower().split(";", 1)[0].strip()
+    mapping = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/flac": "flac",
+        "audio/ogg": "ogg",
+        "audio/webm": "webm",
+        "audio/mp4": "mp4",
+        "audio/m4a": "m4a",
+        "audio/x-m4a": "m4a",
+    }
+    if mime in mapping:
+        return mapping[mime]
+    ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
+    if ext in {"mp3", "wav", "flac", "ogg", "webm", "mp4", "m4a"}:
+        return ext
+    subtype = mime.split("/", 1)[1] if "/" in mime else ""
+    return "mp3" if subtype in {"mpeg", "mpeg3"} else (subtype or "mp3")
+
+
 def analyze_media_only(media_bytes: bytes, mime_type: str, filename: str = "media", user_info: dict = None) -> str:
-    """Model 1: Analyze media with ZERO story context. Returns objective description.
-    This prevents the hallucination problem where the model invents details from story context."""
-    
+    """Analyze raw media with zero story context.
+
+    A configured Audio Model is honored first. Native Google GenAI is the safe
+    automatic fallback because it accepts raw bytes directly. OpenAI-compatible
+    providers receive base64 only when explicitly selected, so Render does not
+    pay the base64/JSON memory cost for every upload.
+    """
     system_prompt = """You are a media analysis expert. Describe EXACTLY and ONLY what you perceive in this file.
 
-For AUDIO: Describe instruments, tempo (BPM estimate), mood, vocals (male/female/none, lyrics if audible), 
+For AUDIO: Describe instruments, tempo (BPM estimate), mood, vocals (male/female/none, lyrics if audible),
 genre, production quality, key changes, and overall emotional feel. Be specific but ONLY describe what you ACTUALLY hear.
 Do NOT make up lyrics or instruments that aren't clearly present.
 
@@ -3607,86 +3657,138 @@ For IMAGES: Describe composition, colors, subjects, style, lighting, and mood.
 
 For VIDEO: Describe visual content, motion, editing, and audio if present.
 
-CRITICAL: You have ZERO story context. Do NOT reference any characters, plot, or world. 
+CRITICAL: You have ZERO story context. Do NOT reference any characters, plot, or world.
 Just describe the raw media file objectively, like a music reviewer or art critic would."""
 
     user_prompt = f"Analyze this file: {filename} ({mime_type}). Describe exactly what you perceive."
-    
-    import base64 as b64mod
-    media_b64 = b64mod.b64encode(media_bytes).decode("utf-8")
-    
-    # Get user-specific clients. A standard user's failed/missing key must never
-    # fall through to a process-global admin or keyless client.
+    if not media_bytes:
+        return f"[Media analysis unavailable — file: {filename}, type: {mime_type}, empty file]"
+
     if user_info:
-        eff = get_effective_ai_clients(user_info)
-        active_genai_clients = eff.get("genai_clients") or []
-        active_nokey_client = eff.get("nokey_client")
+        uid = user_info.get("uid", "default_user")
+        user_keys = load_user_keys(uid)
+        active = get_effective_ai_clients(user_info)
     else:
-        active_genai_clients = clients
-        active_nokey_client = nokey_client
-    
-    # 0. Try Google GenAI native keys FIRST
+        user_keys = {}
+        active = {
+            "genai_clients": clients,
+            "nvidia_client": nvidia_client,
+            "openrouter_client": openrouter_client,
+            "groq_client": groq_client,
+            "openai_client": official_openai_client,
+        }
+
+    active_genai_clients = active.get("genai_clients") or []
+    configured_audio = (user_keys.get("audio_model") or "").strip()
+    configured_provider, configured_model = parse_model_override(configured_audio)
+    encoded_audio = None
+    audio_format = _audio_api_format(mime_type, filename)
+
+    def call_genai(client, model_name: str, label: str):
+        print(f"  [MediaAnalyzer] Trying {label}...")
+        media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
+        response = _retry_transient(
+            lambda: client.models.generate_content(
+                model=model_name.replace("models/", ""),
+                contents=[
+                    types.Content(role="user", parts=[
+                        types.Part.from_text(text=user_prompt),
+                        media_part,
+                    ])
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.3,
+                    safety_settings=SAFETY_SETTINGS,
+                    **({"thinking_config": types.ThinkingConfig(
+                        thinking_budget=HIGH_THINKING_BUDGET,
+                        include_thoughts=True,
+                    )} if is_thinking_model(model_name) else {}),
+                ),
+            ),
+            label=f"MediaAnalyzer/{label}",
+        )
+        result = response.text or ""
+        if result.strip():
+            print(f"  [MediaAnalyzer] Got {len(result)} chars from {label}")
+            return result
+        raise RuntimeError(f"{label} returned an empty media analysis")
+
+    def call_compatible(client, model_name: str, label: str):
+        nonlocal encoded_audio
+        if encoded_audio is None:
+            encoded_audio = base64.b64encode(media_bytes).decode("ascii")
+        media_part = {
+            "type": "input_audio",
+            "input_audio": {"format": audio_format, "data": encoded_audio},
+        }
+        kwargs = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": user_prompt},
+                    media_part,
+                ]},
+            ],
+        }
+        if not model_name.lower().startswith("o"):
+            kwargs["temperature"] = 0.3
+        print(f"  [MediaAnalyzer] Trying configured {label}...")
+        response = _retry_transient(
+            lambda: client.chat.completions.create(**kwargs),
+            label=f"MediaAnalyzer/{label}",
+        )
+        result = response.choices[0].message.content or ""
+        if result.strip():
+            print(f"  [MediaAnalyzer] Got {len(result)} chars from {label}")
+            return result
+        raise RuntimeError(f"{label} returned an empty media analysis")
+
+    # Honor the explicit Audio Model override first.
+    if configured_model:
+        if configured_provider in ("google", "genai") or (
+            configured_provider is None and configured_model.lower().startswith(("gemini", "gemma"))
+        ):
+            for client in active_genai_clients:
+                try:
+                    return call_genai(client, configured_model, f"Configured/GenAI/{configured_model}")
+                except Exception as e:
+                    print(f"  [MediaAnalyzer] Configured GenAI/{configured_model} failed: {e}")
+        else:
+            compat_clients = {
+                "nvidia": active.get("nvidia_client"),
+                "openai": active.get("openai_client"),
+                "openrouter": active.get("openrouter_client"),
+                "groq": active.get("groq_client"),
+            }
+            if configured_provider:
+                choices = [(configured_provider, compat_clients.get(configured_provider))]
+            else:
+                choices = [(name, client) for name, client in compat_clients.items() if client]
+            for provider_name, provider_client in choices:
+                if not provider_client:
+                    continue
+                try:
+                    return call_compatible(
+                        provider_client,
+                        configured_model,
+                        f"{provider_name}/{configured_model}",
+                    )
+                except Exception as e:
+                    print(f"  [MediaAnalyzer] Configured {provider_name}/{configured_model} failed: {e}")
+
+    # Automatic fallback: native Gemini keys only. This path keeps raw bytes raw
+    # and avoids base64 duplication on memory-constrained Render instances.
     for client in active_genai_clients:
         for model_name in get_dynamic_gemini_story_models():
+            if configured_model and model_name.replace("models/", "") == configured_model.replace("models/", ""):
+                continue
             try:
-                print(f"  [MediaAnalyzer] Trying {model_name} via native API...")
-                media_part_native = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[
-                        types.Content(role="user", parts=[
-                            types.Part.from_text(text=user_prompt),
-                            media_part_native
-                        ])
-                    ],
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        temperature=0.3,
-                        safety_settings=SAFETY_SETTINGS,
-                        **({"thinking_config": types.ThinkingConfig(thinking_budget=HIGH_THINKING_BUDGET, include_thoughts=True)} if is_thinking_model(model_name) else {})
-                    )
-                )
-                result = response.text
-                print(f"  [MediaAnalyzer] Got {len(result)} chars from GenAI/{model_name}")
-                return result
+                return call_genai(client, model_name, f"GenAI/{model_name}")
             except Exception as e:
                 print(f"  [MediaAnalyzer] GenAI/{model_name} failed: {e}")
 
-    # 1. Fallback to Nokey
-    if active_nokey_client:
-        for model in NOKEY_TASK_MODELS:
-            try:
-                print(f"  [MediaAnalyzer] Trying {model} via nokey...")
-                audio_format = mime_type.split("/")[-1] if "/" in mime_type else "mp3"
-                
-                # Build content based on media type
-                if mime_type.startswith("audio/"):
-                    media_part = {"type": "input_audio", "input_audio": {"format": audio_format, "data": media_b64}}
-                else:
-                    media_part = {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{media_b64}"}}
-                
-                extra = NOKEY_SAFETY_OFF.copy()
-                if is_thinking_model(model):
-                    extra["google"] = {**extra["google"], "thinking_config": {"thinkingBudget": HIGH_THINKING_BUDGET}}
-
-                response = _retry_on_429(lambda m=model: active_nokey_client.chat.completions.create(
-                    model=m,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": [
-                            {"type": "text", "text": user_prompt},
-                            media_part
-                        ]}
-                    ],
-                    temperature=0.3,
-                    extra_body=extra
-                ), label=f"MediaAnalyzer/{model}")
-                result = response.choices[0].message.content
-                print(f"  [MediaAnalyzer] Got {len(result)} chars from Nokey/{model}")
-                return result
-            except Exception as e:
-                print(f"  [MediaAnalyzer] Nokey/{model} failed: {e}")
-    
     return f"[Media analysis unavailable — file: {filename}, type: {mime_type}, size: {len(media_bytes)} bytes]"
 
 
@@ -6247,7 +6349,7 @@ def _build_background_analysis_prompt(story_id: str, uid: str, full_story: str, 
     if rules_text.strip():
         combined_prompt += f"WORLD RULES (check against these):\n{rules_text}\n\n"
 
-    # Send the FULL story — gemini-nokey uses models with 1M+ context window
+    # Send the FULL story; configured long-context models can consume the full manuscript.
     combined_prompt += f"FULL STORY TEXT:\n{full_story}\n\n"
 
     # Full-story catch-up pass: reference the manuscript above instead of repeating it.
@@ -6547,7 +6649,7 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         if rules_text.strip():
             combined_prompt += f"WORLD RULES (check against these):\n{rules_text}\n\n"
         
-        # Send the FULL story — gemini-nokey uses models with 1M+ context window
+        # Send the FULL story; configured long-context models can consume the full manuscript.
         combined_prompt += f"FULL STORY TEXT:\n{full_story}\n\n"
 
         # A forced full-story analysis passes new_text == full_story. Sending the
@@ -7148,7 +7250,6 @@ async def retry_failed_prompt(story_id: str, user_info: dict = Depends(require_a
 
 # ===== AUDIO UPLOAD ENDPOINT =====
 from fastapi import File, UploadFile, Form
-import base64
 
 @app.post("/generate-audio")
 async def generate_with_audio(
@@ -7166,38 +7267,38 @@ async def generate_with_audio(
         api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
         if not any(bool(user_keys.get(k)) for k in api_keys):
             raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
-    """Generate story with audio context. Prioritizes gemini-nokey proxy, falls back to native API."""
-    print(f"DEBUG: Audio generation request for {story_id}, audio: {audio.filename}", flush=True)
-
-    # Read the audio file with a size cap (avoids memory/disk exhaustion)
-    audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
-    if len(audio_bytes) > MAX_AUDIO_BYTES:
-        raise HTTPException(status_code=413, detail="Audio file too large (max 25 MB).")
+    """Generate story with audio context using a memory-bounded upload path."""
+    audio_original_name = audio_original_name or "uploaded_audio"
     audio_mime = audio.content_type or "audio/mpeg"
+    print(f"DEBUG: Audio generation request for {story_id}, audio: {audio_original_name}", flush=True)
     if not audio_mime.startswith("audio/"):
-        raise HTTPException(status_code=415, detail="Only audio files are supported.")
-    # Extract format from mime (e.g. "audio/mpeg" -> "mpeg", "audio/wav" -> "wav")
-    audio_format = audio_mime.split("/")[-1] if "/" in audio_mime else "mp3"
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    print(f"DEBUG: Audio size: {len(audio_bytes)} bytes, mime: {audio_mime}, format: {audio_format}")
+        try:
+            await audio.close()
+        finally:
+            raise HTTPException(status_code=415, detail="Only audio files are supported.")
 
     story_path = get_story_path(story_id, uid=user_id)
     story_dir = get_story_dir(story_id, uid=user_id)
+    safe_audio_name = sanitize_filename(audio_original_name)
+    audio_save_path = os.path.join(story_dir, safe_audio_name)
+
+    # Stream the multipart upload straight to disk. UploadFile may already be
+    # spooled by Starlette; calling read() without a chunk size would create a
+    # second full-file bytes object and is what pushed Render over its RAM cap.
+    try:
+        audio_size = await _atomic_write_upload(audio, audio_save_path, MAX_AUDIO_BYTES)
+    finally:
+        try:
+            await audio.close()
+        except Exception:
+            pass
+    print(f"DEBUG: Saved audio ({audio_size} bytes, {audio_mime}) to {audio_save_path}")
 
     # Read the full story text
     full_story_text = ""
     if os.path.exists(story_path):
         with open(story_path, "r", encoding="utf-8") as f:
             full_story_text = f.read()
-
-    # Save the audio file to the story folder for future context
-    safe_audio_name = sanitize_filename(audio.filename or "uploaded_audio")
-    audio_save_path = os.path.join(story_dir, safe_audio_name)
-    try:
-        _atomic_write_bytes(audio_save_path, audio_bytes)
-        print(f"DEBUG: Saved audio to {audio_save_path}")
-    except Exception as save_err:
-        print(f"WARNING: Could not save audio file: {save_err}")
 
     # Leave context.md management to normal story generation.
 
@@ -7302,7 +7403,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
         # Save snapshot of .md files before generation (for undo)
         save_snapshot(story_id, uid=user_id)
         # Log the user's input to chat log
-        append_chat_entry(story_id, "user", f"[🎵 Audio: {audio.filename}] {user_input}", uid=user_id)
+        append_chat_entry(story_id, "user", f"[🎵 Audio: {audio_original_name}] {user_input}", uid=user_id)
     except Exception:
         end_story_turn(story_id, user_id, turn_token)
         raise
@@ -7336,7 +7437,20 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
             
             # === Step 1: Model 1 (Media Analyzer) — ZERO story context ===
             print("[PIPELINE] Step 1: Starting media analysis (zero context)...")
-            media_analysis = analyze_media_only(audio_bytes, audio_mime, audio.filename or "audio", user_info=user_info)
+            media_bytes = None
+            try:
+                with open(audio_save_path, "rb") as media_file:
+                    media_bytes = media_file.read()
+                media_analysis = analyze_media_only(
+                    media_bytes,
+                    audio_mime,
+                    audio_original_name,
+                    user_info=user_info,
+                )
+            finally:
+                # Do not retain a 10-25 MB bytes object for story generation,
+                # rules editing, background analysis, or Firestore sync.
+                media_bytes = None
             print(f"[PIPELINE] Step 1 done: {len(media_analysis)} chars")
             
 
@@ -7348,7 +7462,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
 {story_context}
 
 === OBJECTIVE MEDIA ANALYSIS (from a separate, context-free model) ===
-The following is an objective analysis of the audio file "{audio.filename}" by a model that had ZERO story context.
+The following is an objective analysis of the audio file "{audio_original_name}" by a model that had ZERO story context.
 Use ONLY this description when referencing the audio. Do NOT invent additional details about the music.
 {media_analysis}
 {rules_reminder}"""
@@ -7539,7 +7653,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 if len(full_response) > 300:
                     story_snippet += "..."
                 entry = clean_text(
-                    f"\n\n**{timestamp}** — 🎵 *{audio.filename}* (prompt: {user_input[:100]})\n"
+                    f"\n\n**{timestamp}** — 🎵 *{audio_original_name}* (prompt: {user_input[:100]})\n"
                     f"{story_snippet}\n"
                     f"- **Objective Audio Analysis**: {media_analysis[:500]}"
                 )
@@ -8030,15 +8144,22 @@ async def local_audio_begin(story_id: str, user_input: str = Form("", max_length
     try:
         restore_story_directory_from_firestore(user_id, story_id)
         story_dir = get_story_dir(story_id, uid=user_id)
-        safe_audio_name = sanitize_filename(audio.filename or "uploaded_audio")
+        audio_original_name = audio.filename or "uploaded_audio"
+        safe_audio_name = sanitize_filename(audio_original_name)
         audio_save_path = os.path.join(story_dir, safe_audio_name)
-        audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
-        if len(audio_bytes) > MAX_AUDIO_BYTES:
-            raise HTTPException(status_code=413, detail="Audio file too large (max 25 MB).")
         audio_mime = audio.content_type or "audio/mpeg"
         if not audio_mime.startswith("audio/"):
-            raise HTTPException(status_code=415, detail="Only audio files are supported.")
-        _atomic_write_bytes(audio_save_path, audio_bytes)
+            try:
+                await audio.close()
+            finally:
+                raise HTTPException(status_code=415, detail="Only audio files are supported.")
+        try:
+            await _atomic_write_upload(audio, audio_save_path, MAX_AUDIO_BYTES)
+        finally:
+            try:
+                await audio.close()
+            except Exception:
+                pass
         ctx = _build_generate_messages(story_id, user_id, user_input or "")
         save_snapshot(story_id, uid=user_id)
         append_chat_entry(story_id, "user", user_input or "", uid=user_id)
@@ -8683,7 +8804,6 @@ PROVIDER_DISPLAY_NAMES = {
     "cerebras": "Cerebras",
     "mistral": "Mistral",
     "hf": "HuggingFace",
-    "nokey": "Gemini-Nokey (Local)",
 }
 
 from fastapi import Response
@@ -9047,17 +9167,7 @@ def fetch_hf_live_models(api_key: str = None):
 
 
 def fetch_nokey_live_models():
-    """The gemini-nokey local proxy exposes an OpenAI-style /models endpoint."""
-    try:
-        if not nokey_client:
-            return None
-        page = nokey_client.models.list()
-        models = [{"id": m.id, "created": _created_ts(getattr(m, "created", None))}
-                  for m in (getattr(page, "data", None) or []) if getattr(m, "id", None)]
-        if models:
-            return "nokey", models
-    except Exception as e:
-        print(f"[Live Fetch Note] Nokey models fetch: {e}")
+    """Retired: Gemini-Nokey is permanently unavailable."""
     return None
 
 
@@ -9138,11 +9248,11 @@ def fetch_google_live_models(api_key: str = None):
 
 
 def refresh_live_provider_models():
-    """Refresh the live model cache from PUBLIC, keyless catalogs only.
+    """Refresh the live model cache from public, keyless catalogs only.
 
-    Fetching here can never touch a user's private API keys: NVIDIA's model
-    catalog and the public 'nokey' (Gemini proxy) list are open endpoints.
-    Key-gated providers (Gemini-with-your-key, OpenAI, Groq, OpenRouter,
+    Fetching here can never touch a user's private API keys: only NVIDIA's
+    public model catalog is refreshed at boot. Key-gated providers
+    (Gemini-with-your-key, OpenAI, Groq, OpenRouter,
     Cerebras, Mistral, HF) are populated on demand, per user, from each user's
     own Settings keys inside /api/providers-models — never here, so no secret
     is pulled into this refresh path or into logs at boot.
@@ -9153,7 +9263,6 @@ def refresh_live_provider_models():
         updated = {}
         fetched = [
             ("nvidia", lambda: fetch_nvidia_live_models()),
-            ("nokey", lambda: fetch_nokey_live_models()),
         ]
         with ThreadPoolExecutor(max_workers=len(fetched)) as executor:
             futures = {executor.submit(cb): pk for pk, cb in fetched}
@@ -9204,16 +9313,14 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
     configured = [(p, k, d, f) for p, k, d, f in provider_defs if user_keys.get(k)]
 
     if not configured:
-        # No Settings keys for this user. NVIDIA's catalog and the public nokey
-        # (Gemini proxy) are refreshable without any secret — warm them so the
-        # keyless fallback is current, then surface the cached keyless providers.
-        # (No server .env is consulted anywhere; providers come strictly from
-        # each user's own Settings keys + the public keyless catalogs.)
+        # No Settings keys for this user. NVIDIA's public catalog is refreshable
+        # without a secret, so keep that catalog warm for model discovery.
+        # Generation still requires the user's own provider key.
         if time.time() - LAST_DYNAMIC_FETCH > 1800:
             threading.Thread(target=refresh_live_provider_models, daemon=True).start()
         providers = {}
         for pkey, pinfo in (DYNAMIC_PROVIDER_MODELS or {}).items():
-            if pkey not in {"nvidia", "nokey"}:
+            if pkey != "nvidia":
                 continue
             models = _dropdown_models(pkey)
             if models:
@@ -9391,8 +9498,8 @@ if __name__ == "__main__":
     import uvicorn
 
     # Warm the live model cache so no provider list is ever empty post-boot.
-    # NVIDIA's model catalog and the public 'nokey' (Gemini proxy) list are
-    # public, keyless endpoints — fetch them at startup, then refresh every 15
+    # NVIDIA's model catalog is a public, keyless endpoint — fetch it at
+    # startup, then refresh every 15
     # minutes so generation always sees a fresh catalog (new models appear
     # automatically; removed ones vanish). Key-gated providers (OpenAI, Groq,
     # Gemini-with-your-key, OpenRouter, Cerebras, Mistral, HF) still populate
@@ -9405,7 +9512,7 @@ if __name__ == "__main__":
             print(f"[Live Fetch] Startup warm-up error: {_e}")
 
     def _periodic_refresh():
-        # Refresh the keyless public catalogs every 15 minutes so the live list
+        # Refresh the keyless NVIDIA public catalog every 15 minutes so the live list
         # stays fresh (new NVIDIA models appear, removed ones vanish). Keyed
         # providers refresh per-user on demand via /api/providers-models.
         while True:
