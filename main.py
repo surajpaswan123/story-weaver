@@ -7268,7 +7268,7 @@ async def generate_with_audio(
         if not any(bool(user_keys.get(k)) for k in api_keys):
             raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
     """Generate story with audio context using a memory-bounded upload path."""
-    audio_original_name = audio_original_name or "uploaded_audio"
+    audio_original_name = audio.filename or "uploaded_audio"
     audio_mime = audio.content_type or "audio/mpeg"
     print(f"DEBUG: Audio generation request for {story_id}, audio: {audio_original_name}", flush=True)
     if not audio_mime.startswith("audio/"):
