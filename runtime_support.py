@@ -111,6 +111,40 @@ def _chat_entries(source):
         raise ValueError("Chat history contains invalid JSON") from exc
 
 
+def count_ai_turns(path):
+    """Count completed AI turns without loading the whole chat log into memory."""
+    count = 0
+    with open(path, "rb") as source:
+        for entry in _chat_entries(source):
+            if not isinstance(entry, dict):
+                raise ValueError("Chat history contains an invalid entry")
+            if entry.get("role") == "ai":
+                count += 1
+    return count
+
+
+def recent_ai_text(path, num_turns=10):
+    """Return the same recent-AI prose as the old json.load path, but bounded.
+
+    Positive num_turns retains only that many AI entries while parsing. A
+    non-positive value preserves the historical "all AI turns" behavior.
+    """
+    limit = int(num_turns)
+    recent = deque(maxlen=limit if limit > 0 else None)
+    with open(path, "rb") as source:
+        for entry in _chat_entries(source):
+            if not isinstance(entry, dict):
+                raise ValueError("Chat history contains an invalid entry")
+            if entry.get("role") != "ai":
+                continue
+            text = entry.get("text", "")
+            if not isinstance(text, str):
+                raise ValueError("Chat history contains non-text content")
+            if text.strip():
+                recent.append(text)
+    return "\n\n".join(text.strip() for text in recent if text.strip())
+
+
 def read_chat_page(path, last=40, before=None, after=None, revision=None, max_chars=256_000):
     """Parse one entry at a time; retain only a bounded page of complete entries."""
     last = max(1, min(int(last), 100))
