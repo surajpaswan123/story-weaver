@@ -7,7 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from runtime_support import HistoryChanged, heartbeat_stream, read_chat_page, relay_stream
+from runtime_support import (HistoryChanged, count_ai_turns, heartbeat_stream,
+                             read_chat_page, recent_ai_text, relay_stream)
 
 
 def transcript(path, count=125):
@@ -164,3 +165,30 @@ def test_heartbeat_keeps_slow_provider_alive():
     finally:
         ready.set()
         stream.close()
+
+
+def test_streaming_turn_helpers_match_legacy_semantics(tmp_path):
+    path = tmp_path / "chat_log.json"
+    entries = [
+        {"role": "user", "text": "Prompt one"},
+        {"role": "ai", "text": "  First answer.  "},
+        {"role": "user", "text": "Prompt two"},
+        {"role": "ai", "text": "\nSecond answer.\n"},
+        {"role": "ai", "text": "   "},
+        {"role": "user", "text": "Prompt three"},
+        {"role": "ai", "text": "तीसरा answer 🐉"},
+    ]
+    path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    assert count_ai_turns(path) == 4
+    assert recent_ai_text(path, 2) == "Second answer.\n\nतीसरा answer 🐉"
+    assert recent_ai_text(path, 1) == "तीसरा answer 🐉"
+    assert recent_ai_text(path, 0) == "First answer.\n\nSecond answer.\n\nतीसरा answer 🐉"
+
+
+def test_main_recent_story_helpers_keep_invalid_history_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "STORIES_DIR", str(tmp_path))
+    path = Path(main.get_chat_log_path("broken", uid="u"))
+    path.write_text("{not json", encoding="utf-8")
+    assert main.get_turn_count("broken", uid="u") == 0
+    assert main.get_recent_story_text("broken", 1, uid="u") == ""
