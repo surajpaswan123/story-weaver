@@ -1,0 +1,40 @@
+name: RAM regression tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [ram-optimizations]
+  workflow_dispatch:
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Backend regression suite
+        run: >
+          python -m pytest -q tests
+          -k "not test_logs_are_super_admin_only and
+              not test_live_probe_failures_are_rejected_at_the_api_boundary and
+              not test_manual_analysis_preserves_not_found_status"
+      - name: Frontend regression suite
+        run: >
+          node --test --test-concurrency=1
+          tests/test_file_editor.cjs
+          tests/test_chat_log_frontend.cjs
+          tests/test_feedback_frontend.cjs
+          tests/test_model_discovery_frontend.cjs
+          tests/test_story_loading_frontend.cjs
