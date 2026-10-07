@@ -70,7 +70,8 @@ from difflib import SequenceMatcher
 import hashlib
 import ipaddress
 
-from runtime_support import HistoryChanged, read_chat_page, relay_stream, heartbeat_stream, TurnProgress
+from runtime_support import (HistoryChanged, read_chat_page, relay_stream, heartbeat_stream,
+                             TurnProgress, count_ai_turns, recent_ai_text)
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -1119,6 +1120,57 @@ def _write_postgres_story(uid: str, story_id: str, files: dict, title: str = Non
         conn.close()
 
 
+def _write_postgres_story_directory(uid: str, story_id: str, story_dir: str, title: str = None):
+    """Commit a local story snapshot while retaining at most one file body in RAM."""
+    import psycopg2
+
+    names = []
+    if os.path.isdir(story_dir):
+        for name in os.listdir(story_dir):
+            path = os.path.join(story_dir, name)
+            if _is_synced_story_file(name) and os.path.isfile(path) and not os.path.islink(path):
+                names.append(name)
+    if not names:
+        return None, 0
+
+    if not title and "story.md" in names:
+        try:
+            with open(os.path.join(story_dir, "story.md"), "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+        except OSError:
+            pass
+
+    conn = psycopg2.connect(db_conn_str, connect_timeout=10)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))", (uid, story_id))
+            sync_timestamp = time.time()
+            for name in names:
+                path = os.path.join(story_dir, name)
+                with open(path, "r", encoding="utf-8") as handle:
+                    content = handle.read()
+                cur.execute("""
+                    INSERT INTO user_stories (uid, story_id, file_name, content, updated_at, title)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (uid, story_id, file_name)
+                    DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at,
+                                  title = COALESCE(EXCLUDED.title, user_stories.title)
+                """, (uid, story_id, name, content, sync_timestamp, title if name == "story.md" else None))
+                content = None
+            cur.execute("SELECT file_name FROM user_stories WHERE uid = %s AND story_id = %s", (uid, story_id))
+            stale_names = [row[0] for row in cur.fetchall() if row[0] not in names]
+            if stale_names:
+                cur.executemany("DELETE FROM user_stories WHERE uid = %s AND story_id = %s AND file_name = %s",
+                                [(uid, story_id, name) for name in stale_names])
+        conn.commit()
+        return sync_timestamp, len(names)
+    finally:
+        conn.close()
+
+
 def _read_legacy_firestore_story(uid: str, story_id: str):
     if not db_firestore:
         return {}, 0.0, None
@@ -1219,14 +1271,32 @@ def sync_story_directory_to_firestore(uid: str, story_id: str, title: str = None
     storage = "postgres" if db_conn_str else "firestore"
     try:
         with get_story_lock(story_id, uid):
-            files = _read_local_story_files(story_dir)
-            if not files:
-                return
+            if db_conn_str:
+                if not os.path.isdir(story_dir):
+                    return
+                file_count = sum(
+                    1 for name in os.listdir(story_dir)
+                    if _is_synced_story_file(name)
+                    and os.path.isfile(os.path.join(story_dir, name))
+                    and not os.path.islink(os.path.join(story_dir, name))
+                )
+                if not file_count:
+                    return
+                files = None
+            else:
+                files = _read_local_story_files(story_dir)
+                if not files:
+                    return
+                file_count = len(files)
+
             state = _story_sync_state(story_dir)
             state["pending_upload"] = True
             _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), state)
             if db_conn_str:
-                sync_timestamp = _write_postgres_story(uid, story_id, files, title=title)
+                sync_timestamp, written_count = _write_postgres_story_directory(
+                    uid, story_id, story_dir, title=title)
+                if written_count != file_count:
+                    raise RuntimeError("Story files changed while preparing the Postgres snapshot")
             else:
                 doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
                 sync_timestamp = time.time()
@@ -1239,7 +1309,7 @@ def sync_story_directory_to_firestore(uid: str, story_id: str, title: str = None
                 else:
                     doc_ref.set(payload)
             _write_story_sync_timestamp(story_dir, sync_timestamp, storage)
-        print(f"[{storage.title()} Sync] Saved {len(files)} files for story {story_id}")
+        print(f"[{storage.title()} Sync] Saved {file_count} files for story {story_id}")
         return True
     except Exception as exc:
         print(f"[{storage.title()} Sync Error] {exc}")
@@ -2809,39 +2879,24 @@ def read_pending_retry(story_id: str, uid: str = "default_user"):
 
 
 def get_turn_count(story_id: str, uid: str = "default_user") -> int:
-    """Count completed AI turns for THIS story, derived from chat_log.json instead of a
-    shared global counter. Self-correcting on undo (which already removes the AI+user
-    pair from chat_log.json) - no manual increment/decrement bookkeeping needed."""
+    """Count completed AI turns without materializing the full chat log."""
     path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return 0
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-    except (json.JSONDecodeError, Exception):
+        return count_ai_turns(path)
+    except Exception:
         return 0
-    return sum(1 for e in entries if e.get("role") == "ai")
 
 def get_recent_story_text(story_id: str, num_turns: int = 10, uid: str = "default_user") -> str:
-    """Build the 'recent narrative' context from the last N AI-generated turns
-    in chat_log.json, instead of dumping the entire story.md every time.
-
-    Only 'ai' role entries are used (never 'user' entries) so the output reads
-    as continuous prose, matching exactly what story.md itself would contain -
-    chat_log's ai text and story.md's saved text are the same value, written
-    at the same point, so this is a clean turn-boundary tail of story.md
-    rather than an arbitrary line-count slice."""
+    """Build the exact recent narrative while retaining only the requested AI turns."""
     path = get_chat_log_path(story_id, uid=uid, create=False)
     if not os.path.exists(path):
         return ""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-    except (json.JSONDecodeError, Exception):
+        return recent_ai_text(path, num_turns)
+    except Exception:
         return ""
-    ai_turns = [e.get("text", "") for e in entries if e.get("role") == "ai" and e.get("text", "").strip()]
-    recent = ai_turns[-num_turns:] if num_turns > 0 else ai_turns
-    return "\n\n".join(t.strip() for t in recent if t.strip())
 
 RECENT_STORY_TURNS = 50  # Retained for get_recent_story_text callers that still want a
                          # window (background analysis uses BATCH_SIZE). The STORY model
@@ -6666,6 +6721,10 @@ def background_analysis(story_id: str, full_story: str, new_text: str, user_id: 
         else:
             combined_prompt += f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}"
 
+        # combined_prompt now contains the exact manuscript text. Release the
+        # standalone full-story reference before the provider SDK serializes it.
+        full_story = None
+
         # Use user-specific AI clients when user_info is available. With a local
         # (browser-direct) result the model was already called in the browser.
         if local_output is not None:
@@ -7393,10 +7452,10 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
     # Inject current time state so the story generator knows what day/time it is
     time_state = parse_current_time_state(story_id, uid=user_id)
     time_anchor = f"\n\n⏰ {time_state}" if time_state else ""
-    system_msg = f"{system_instruction}\n\n{STORY_FILES_MANIFEST}\n\n{story_context}{time_anchor}{rules_reminder}"
-    user_msg = f"<user_input>\n{user_input}\n</user_input>\n\nThe user has attached an audio file. Listen to it and follow the instructions in <user_input>."
-
-    print(f"DEBUG: Audio generate system len: {len(system_msg)}, user len: {len(user_msg)}")
+    # Only the last 8k characters are needed for stream replay detection.
+    # The previous full-story system_msg/user_msg allocation here was never used.
+    story_seed_tail = full_story_text[-8000:]
+    full_story_text = None
 
     turn_token = begin_story_turn(story_id, user_id)
     try:
@@ -7414,6 +7473,7 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
         yield from _relay_stream(tracked_story_stream(_audio_worker(), story_id, user_id, turn_token))
 
     def _audio_worker():
+        nonlocal story_context
         full_response = ""
         model_thoughts = ""
         model_used_ref = ""
@@ -7466,6 +7526,7 @@ The following is an objective analysis of the audio file "{audio_original_name}"
 Use ONLY this description when referencing the audio. Do NOT invent additional details about the music.
 {media_analysis}
 {rules_reminder}"""
+            story_context = None
             
             pipeline_user = f"""<user_input>
 {user_input}
@@ -7507,7 +7568,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             
             # Stream the response
             in_thought = False
-            chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+            chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
             for chunk in stream:
                 text_content = _safe_chunk_text(chunk)
 
@@ -7536,7 +7597,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry)'})}\n\n"
                     if retry_is_thinking:
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
-                    chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+                    chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     for chunk in stream:
                         text_content = _safe_chunk_text(chunk)
                         if text_content:
@@ -7572,7 +7633,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     stream_is_thinking = retry_is_thinking
                     model_used_ref = retry_model_name
                     full_response = ""
-                    chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+                    chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry)'})}\n\n"
                     if retry_is_thinking:
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
@@ -7596,6 +7657,11 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 write_pending_retry(story_id, uid=user_id, prompt=user_input, error='AI generated no visible text. Safety filters may have blocked the response.')
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. Safety filters may have blocked the response.'})}\n\n"
                 return
+
+            # The writer model is finished. Do not retain its full-story request
+            # while the rules editor and analysis allocate their own requests.
+            pipeline_system = None
+            pipeline_user = None
 
             # === Step 3: Silent Rules Editor — refine before saving, streamed live ===
             if not skip_rules_check and (rules_text or style_text):
@@ -7636,7 +7702,8 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
 
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
-            commit_ai_turn(story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
+            updated_story = commit_ai_turn(
+                story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
             yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
 
             # Save to audio_log.md — use Model 1's OBJECTIVE analysis, not story text
@@ -7666,7 +7733,6 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             # input box stays locked until story memory is actually caught up. This is what
             # closes the race condition: the next turn can't start reading characters.md/
             # items.md/time.md/etc. until this turn's updates have actually been written.
-            updated_story = full_story_text + ("\n\n" if full_story_text else "") + full_response
             turn_counter = get_turn_count(story_id, uid=user_id)
             print(f"Turn {turn_counter} completed (audio, 3-model pipeline). (Batch size: {BATCH_SIZE})")
             if turn_counter % BATCH_SIZE == 0:
@@ -8406,6 +8472,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
     user_msg = with_regeneration_feedback(user_msg, input_data.regeneration)
     print(f"DEBUG: Generating for {input_data.story_id}, system len: {len(system_msg)}, user len: {len(user_msg)}")
     print(f"DEBUG: Story text empty? {not full_story_text}")
+    story_seed_tail = full_story_text[-8000:]
+    full_story_text = None
 
     turn_token = begin_story_turn(input_data.story_id, user_id)
     try:
@@ -8424,12 +8492,13 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         yield from _relay_stream(tracked_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token))
 
     def _generate_worker():
+        nonlocal system_msg, user_msg
         full_response = ""
         model_thoughts = ""
         model_used_ref = ""
         last_finish_reason = ""
         response_persisted = False
-        chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+        chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
         try:
             # Opening the stream is the failure point for provider overload (503) and
             # rate limits (429). Retry the SAME provider/model up to
@@ -8537,7 +8606,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     if retry_is_thinking:
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
                     last_finish_reason = ""
-                    chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+                    chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     stream = _heartbeat_stream(stream)
                     for chunk in stream:
                         if chunk is _HEARTBEAT:
@@ -8587,7 +8656,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     model_used_ref = retry_model_name
                     full_response = ""
                     last_finish_reason = ""
-                    chunk_normalizer = StreamChunkNormalizer(seed_text=full_story_text)
+                    chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry after non-visible response)'})}\n\n"
                     if retry_is_thinking:
                         yield f"data: {json.dumps({'type': 'thinking', 'message': retry_model_name + ' is thinking deeply... this may take a few minutes.'})}\n\n"
@@ -8623,6 +8692,11 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 yield f"data: {json.dumps({'type': 'error', 'message': 'AI generated no visible text. It might be blocked by safety filters.'})}\n\n"
                 return
             
+            # No writer retry can happen after this point. Release its giant
+            # request before rules editing and background analysis.
+            system_msg = None
+            user_msg = None
+
             # Detect and fix truncation: trim to last complete sentence
             was_truncated = False
             stripped = full_response.rstrip()
@@ -8698,7 +8772,8 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
 
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
-            commit_ai_turn(input_data.story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
+            updated_story = commit_ai_turn(
+                input_data.story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
             response_persisted = True
             yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
             
@@ -8706,8 +8781,6 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             # so the input box stays locked until story memory is actually caught up. This
             # closes the race condition: the next turn can't start reading characters.md/
             # items.md/time.md/etc. until this turn's updates have actually been written.
-            updated_story = full_story_text + ("\n\n" if full_story_text else "") + full_response
-            
             turn_counter = get_turn_count(input_data.story_id, uid=user_id)
             print(f"Turn {turn_counter} completed. (Batch size: {BATCH_SIZE})")
 

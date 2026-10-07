@@ -91,10 +91,19 @@ def test_ai_turn_commit_rolls_story_back_if_chat_write_fails(isolated_stories, m
     story_path.write_text("original story", encoding="utf-8")
     main.append_chat_entry("rollback-story", "user", "continue", uid="user-1")
 
-    def fail_chat_write(_path, _value, **_kwargs):
-        raise OSError("simulated chat write failure")
+    real_write = main._atomic_write_text
+    failed = False
 
-    monkeypatch.setattr(main, "_atomic_write_json", fail_chat_write)
+    def fail_chat_write(path, value, **kwargs):
+        nonlocal failed
+        if Path(path).name == "chat_log.json" and not failed:
+            failed = True
+            raise OSError("simulated chat write failure")
+        return real_write(path, value, **kwargs)
+
+    # TurnCheckpoints now writes story/chat through the transactional text writer.
+    # Fail the chat write once, then allow the rollback writes to succeed.
+    monkeypatch.setattr(main, "_atomic_write_text", fail_chat_write)
 
     with pytest.raises(OSError):
         main.commit_ai_turn("rollback-story", "new response", "test-model", uid="user-1")

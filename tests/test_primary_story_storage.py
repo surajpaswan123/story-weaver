@@ -273,3 +273,28 @@ def test_warm_restore_reads_only_metadata_but_fetches_new_or_missing_files(stora
     main.restore_story_directory_from_firestore("storage-user", "test")
     assert (folder / "summary.md").read_text(encoding="utf-8") == "Current summary"
     assert fs.gets == 0
+
+
+def test_postgres_sync_does_not_materialize_entire_story_snapshot(storage, monkeypatch):
+    pg, fs, folder = storage
+    folder.mkdir(parents=True)
+    (folder / "story.md").write_text("# Big Story\n" + "x" * 200_000, encoding="utf-8")
+    (folder / "chat_log.json").write_text('[{"role":"ai","text":"turn"}]', encoding="utf-8")
+    (folder / "characters.md").write_text("Mira: dark hair", encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Postgres sync must not load every story file into one dict")
+
+    monkeypatch.setattr(main, "_read_local_story_files", forbidden)
+    assert main.sync_story_directory_to_firestore("storage-user", "test") is True
+    assert pg.rows[("storage-user", "test", "story.md")][0].startswith("# Big Story")
+    assert pg.rows[("storage-user", "test", "chat_log.json")][0].startswith("[")
+    assert fs.gets == 0
+
+
+def test_empty_postgres_story_does_not_mark_pending_upload(storage):
+    pg, fs, folder = storage
+    folder.mkdir(parents=True)
+    assert main.sync_story_directory_to_firestore("storage-user", "test") is None
+    assert main._story_sync_state(str(folder)).get("pending_upload") is not True
+    assert pg.rows == {}
