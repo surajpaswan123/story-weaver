@@ -1271,19 +1271,33 @@ def sync_story_directory_to_firestore(uid: str, story_id: str, title: str = None
     storage = "postgres" if db_conn_str else "firestore"
     try:
         with get_story_lock(story_id, uid):
-            state = _story_sync_state(story_dir)
-            state["pending_upload"] = True
-            _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), state)
             if db_conn_str:
-                sync_timestamp, file_count = _write_postgres_story_directory(
-                    uid, story_id, story_dir, title=title)
+                if not os.path.isdir(story_dir):
+                    return
+                file_count = sum(
+                    1 for name in os.listdir(story_dir)
+                    if _is_synced_story_file(name)
+                    and os.path.isfile(os.path.join(story_dir, name))
+                    and not os.path.islink(os.path.join(story_dir, name))
+                )
                 if not file_count:
                     return
+                files = None
             else:
                 files = _read_local_story_files(story_dir)
                 if not files:
                     return
                 file_count = len(files)
+
+            state = _story_sync_state(story_dir)
+            state["pending_upload"] = True
+            _atomic_write_json(os.path.join(story_dir, SYNC_META_FILE), state)
+            if db_conn_str:
+                sync_timestamp, written_count = _write_postgres_story_directory(
+                    uid, story_id, story_dir, title=title)
+                if written_count != file_count:
+                    raise RuntimeError("Story files changed while preparing the Postgres snapshot")
+            else:
                 doc_ref = db_firestore.collection("users").document(uid).collection("stories").document(story_id)
                 sync_timestamp = time.time()
                 payload = {"updated_at": sync_timestamp,
