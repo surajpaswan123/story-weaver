@@ -32,7 +32,8 @@ function setup() {
     const bar = { after(form) { activeForm = form; } };
     const button = Object.assign(new Control(), { closest: () => bar });
     const response = data => ({ ok: true, json: async () => data });
-    const context = vm.createContext({
+    let context;
+    context = vm.createContext({
         AbortController, storyViewEpoch: 0, storyReads: new Map(),
         observedGeneration: null, generationStatusRequest: null,
         document: {
@@ -52,9 +53,9 @@ function setup() {
         announceStatus(message) { announcements.push(message); },
         resetGenerationMonitor() {
             announcements.push('reset-generation-monitor');
-            this.generationStatusRequest?.controller?.abort?.();
-            this.generationStatusRequest = null;
-            this.observedGeneration = null;
+            context.generationStatusRequest?.controller?.abort?.();
+            context.generationStatusRequest = null;
+            context.observedGeneration = null;
         },
         console,
         authFetch: async (url, options) => { calls.push({ url, options }); return response({ restored_prompt: 'Original prompt.', regeneration }); },
