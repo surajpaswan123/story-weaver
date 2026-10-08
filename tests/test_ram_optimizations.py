@@ -1,4 +1,8 @@
 import json
+import asyncio
+import gc
+import threading
+import weakref
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -101,3 +105,58 @@ def test_background_analysis_prompt_keeps_full_story_and_new_text(configured_use
     assert f"FULL STORY TEXT:\n{full_story}\n\n" in prompt
     assert f"NEW TEXT (latest addition — focus on this for new entries):\n{new_text}" in prompt
     assert captured["inventory_new_text"] == new_text
+
+
+def test_idle_story_locks_release_but_waiters_keep_the_same_lock(monkeypatch):
+    monkeypatch.setattr(main, "_story_locks", weakref.WeakValueDictionary())
+    lock = main.get_story_lock("story", "u")
+    ref = weakref.ref(lock)
+    waiting, entered = threading.Event(), threading.Event()
+
+    def waiter():
+        same = main.get_story_lock("story", "u")
+        assert same is ref()
+        waiting.set()
+        with same:
+            entered.set()
+
+    with lock:
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        assert waiting.wait(2)
+        assert not entered.is_set()
+        assert main.get_story_lock("story", "u") is lock
+    thread.join(2)
+    assert entered.is_set() and not thread.is_alive()
+    del lock
+    gc.collect()
+    assert ref() is None and len(main._story_locks) == 0
+    for index in range(1000):
+        with main.get_story_lock(str(index), "u"):
+            pass
+    gc.collect()
+    assert len(main._story_locks) == 0
+
+
+def test_stopping_turns_does_not_retain_prompt_frames(configured_user, monkeypatch):
+    monkeypatch.setattr(main, "db_conn_str", "")
+    monkeypatch.setattr(main, "_active_story_turns", {})
+    main.save_user_keys(configured_user["uid"], {"openai_api_key": "test-key"})
+    monkeypatch.setattr(main, "has_any_generation_provider", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main, "stop_requested", lambda *args: True)
+    monkeypatch.setattr(main, "stream_with_fallback", lambda *args, **kwargs:
+                        (iter([main.GenericChunk("Uncommitted text.")]), "Fake/writer", False))
+
+    async def stopped_turn(index):
+        payload = main.StoryInput(story_id=f"stop-ram-{index}", user_input="Full prompt. " * 7000,
+                                  provider="openai", model="fake", skip_rules_check=True)
+        ref = weakref.ref(payload)
+        response = await main.generate_story(payload, main.BackgroundTasks(), configured_user)
+        events = [event async for event in response.body_iterator]
+        assert any('"type": "stopped"' in event for event in events)
+        assert not any('"type": "error"' in event or '"type": "replace"' in event for event in events)
+        return ref
+
+    refs = [asyncio.run(stopped_turn(index)) for index in range(3)]
+    gc.collect()
+    assert all(ref() is None for ref in refs)

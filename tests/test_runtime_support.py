@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 import main
 from runtime_support import (HistoryChanged, count_ai_turns, heartbeat_stream,
-                             read_chat_page, recent_ai_text, relay_stream)
+                             read_chat_page, recent_ai_text, relay_stream,
+                             file_metadata, text_metadata)
 
 
 def transcript(path, count=125):
@@ -192,3 +193,31 @@ def test_main_recent_story_helpers_keep_invalid_history_fallback(tmp_path, monke
     path.write_text("{not json", encoding="utf-8")
     assert main.get_turn_count("broken", uid="u") == 0
     assert main.get_recent_story_text("broken", 1, uid="u") == ""
+
+
+@pytest.mark.parametrize("text", ["", " \t", "\r\n", "a\r\nb\rc\n", "\n\n",
+                                      "हिन्दी 🐉\v\f\x1c\x1d\x1e\x85\u2028\u2029end"])
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 65536])
+def test_chunked_metadata_matches_previous_semantics(tmp_path, text, chunk_size):
+    chunks = (text[i:i + chunk_size] for i in range(0, len(text), chunk_size))
+    assert text_metadata(chunks) == {"chars": len(text), "lines": len(text.splitlines()), "empty": not text.strip()}
+    path = tmp_path / "story.md"
+    path.write_bytes(text.encode("utf-8"))
+    normalized = path.read_text(encoding="utf-8")
+    assert file_metadata(path, chunk_size) == {"chars": len(normalized), "lines": len(normalized.splitlines()), "empty": not normalized.strip()}
+
+
+def test_single_line_metadata_uses_bounded_memory(tmp_path):
+    import tracemalloc
+    path = tmp_path / "chat_log.json"
+    with path.open("w", encoding="utf-8") as handle:
+        for _ in range(200):
+            handle.write("x" * 65536)
+    tracemalloc.start()
+    try:
+        metadata = file_metadata(path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert metadata == {"chars": 200 * 65536, "lines": 1, "empty": False}
+    assert peak < 2_000_000

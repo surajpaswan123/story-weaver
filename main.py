@@ -49,6 +49,8 @@ from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 import os
 import json
@@ -60,6 +62,7 @@ import random
 import ipaddress
 import socket
 import tempfile
+import weakref
 import uuid
 import urllib.parse
 import re
@@ -71,7 +74,7 @@ import hashlib
 import ipaddress
 
 from runtime_support import (HistoryChanged, read_chat_page, relay_stream, heartbeat_stream,
-                             TurnProgress, count_ai_turns, recent_ai_text)
+                             TurnProgress, count_ai_turns, recent_ai_text, file_revision, file_metadata, text_metadata)
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -82,6 +85,14 @@ from regeneration import (FeedbackUndoInput, RegenerationContext, extract_model_
 load_dotenv()
 
 app = FastAPI()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_without_payload(request: Request, exc: RequestValidationError):
+    # Invalid large edits must not echo and serialize entire manuscripts/transcripts.
+    errors = [{key: value for key, value in error.items() if key != "input"}
+              for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 # Firebase Admin Initialization (Graceful / Optional)
 db_firestore = None
@@ -450,7 +461,8 @@ def sanitize_id(name: str) -> str:
     return safe
 
 
-_story_locks: dict[tuple[str, str], threading.RLock] = {}
+# Callers hold a strong reference while waiting/working. Idle locks can disappear.
+_story_locks = weakref.WeakValueDictionary()
 _story_locks_guard = threading.Lock()
 _active_story_turns: dict[tuple[str, str], tuple[str, float]] = {}
 _active_story_turns_guard = threading.Lock()
@@ -504,14 +516,6 @@ _stop_requests_guard = threading.Lock()
 
 class _StopRequested(Exception):
     """Internal control-flow exception to unwind an in-flight stream on stop."""
-
-
-# Pre-built sentinel raised from inside the streaming loops. This was referenced by
-# the mid-stream stop poll but never defined, so pressing Stop raised a NameError
-# that fell through to the generic 'except Exception' handler: the user saw a stream
-# ERROR instead of a clean 'stopped' event, and the dangling prompt cleanup in
-# 'except _StopRequested' never ran.
-_STOP_REQUESTED_EXCEPTION = _StopRequested("Generation stopped by user")
 
 
 def _stop_key(story_id: str, uid: str) -> tuple[str, str]:
@@ -3503,8 +3507,7 @@ def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id))
             if not os.path.isfile(full):
                 continue
             try:
-                with open(full, "r", encoding="utf-8") as handle:
-                    content = handle.read()
+                metadata = file_metadata(full)
             except OSError as e:
                 print(f"[Files] Could not read {name}: {e}")
                 continue
@@ -3514,9 +3517,7 @@ def list_story_files(story_id: str, user_id: str = Depends(get_current_user_id))
                 "label": meta["label"],
                 "description": meta["description"],
                 "owner": meta["owner"],
-                "chars": len(content),
-                "lines": len(content.splitlines()),
-                "empty": not content.strip(),
+                **metadata,
             })
 
     # Stable, meaningful order: the documented pipeline order first, extras alphabetical.
@@ -3532,8 +3533,10 @@ def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_cur
     target = _resolve_story_file(story_id, filename, user_id)
     if not os.path.isfile(target):
         raise HTTPException(status_code=404, detail=f"{filename} does not exist in this story")
-    with open(target, "r", encoding="utf-8") as handle:
-        content = handle.read()
+    with get_story_lock(story_id, user_id):
+        with open(target, "r", encoding="utf-8") as handle:
+            content = handle.read()
+        revision = file_revision(target)
     meta = _story_file_meta(os.path.basename(target))
     return {
         "name": os.path.basename(target),
@@ -3541,14 +3544,16 @@ def read_story_file(story_id: str, filename: str, user_id: str = Depends(get_cur
         "description": meta["description"],
         "owner": meta["owner"],
         "text": content,
-        "chars": len(content),
-        "lines": len(content.splitlines()),
+        "revision": revision,
+        **text_metadata([content]),
     }
 
 
 class StoryFileInput(BaseModel):
-    text: str = Field(max_length=2_000_000)
-    expected_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    # Generated transcripts (including model thoughts) routinely exceed 2M chars.
+    text: str
+    expected_revision: Optional[str] = Field(default=None, max_length=24, pattern=r"^[0-9a-f]{24}$")
+    expected_text: Optional[str] = None  # Compatibility with already-open older editors.
 
 
 def validate_chat_log_edit(text: str) -> None:
@@ -3601,6 +3606,9 @@ async def write_story_file(
     else:
         cleaned = clean_text(input_data.text)
     with get_story_lock(story_id, user_id):
+        if name == "chat_log.json" and input_data.expected_revision is not None:
+            if not os.path.isfile(target) or file_revision(target) != input_data.expected_revision:
+                raise HTTPException(status_code=409, detail="Chat history changed since you opened it. Reload the file and apply your edit to the latest history.")
         if name == "chat_log.json" and input_data.expected_text is not None:
             current = ""
             if os.path.isfile(target):
@@ -3609,14 +3617,15 @@ async def write_story_file(
             if current != input_data.expected_text:
                 raise HTTPException(status_code=409, detail="Chat history changed since you opened it. Reload the file and apply your edit to the latest history.")
         _atomic_write_text(target, cleaned)
+        revision = file_revision(target)
     sync_story_directory_to_firestore(user_id, story_id)
     print(f"[Files] {'Updated' if existed else 'Created'} {name} for story {story_id} ({len(cleaned)} chars)")
     return {
         "success": True,
         "name": name,
         "created": not existed,
-        "chars": len(cleaned),
-        "lines": len(cleaned.splitlines()),
+        "revision": revision,
+        **text_metadata([cleaned]),
     }
 
 
@@ -8534,7 +8543,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     while _waited < _wait:
                         if stop_requested(input_data.story_id, user_id):
                             print("[Stop] Stop requested while waiting to retry; aborting turn.")
-                            raise _STOP_REQUESTED_EXCEPTION
+                            raise _StopRequested("Generation stopped by user")
                         time.sleep(0.5)
                         _waited += 0.5
                         if _waited % 10 < 0.5:
@@ -8563,7 +8572,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                 # dangling user entry and does not write response text.
                 if stop_requested(input_data.story_id, user_id):
                     print(f"[Stop] Stop requested mid-stream for {input_data.story_id}; aborting turn.")
-                    raise _STOP_REQUESTED_EXCEPTION
+                    raise _StopRequested("Generation stopped by user")
                 text_content = _safe_chunk_text(chunk)
 
                 if text_content:
