@@ -7292,16 +7292,17 @@ def _undo_last_locked(story_id: str, user_info: dict, feedback_input: Optional[F
 
 @app.post("/story/{story_id}/retry")
 async def retry_failed_prompt(story_id: str, user_info: dict = Depends(require_authenticated_user)):
-    """Clear the failed-prompt marker and return the prompt so the UI can resubmit
-    it. No undo happens here - the failed turn left nothing in the story, and
-    previous successful turns must stay untouched."""
+    """Return the saved failed prompt without consuming its recovery marker.
+
+    The marker is cleared only after a replacement turn commits successfully.
+    If the browser reload/status handoff races before /generate starts, Retry
+    Failed Prompt therefore remains available with the exact feedback context.
+    """
     user_id = user_info["uid"]
     restore_story_directory_from_firestore(user_id, story_id)
     data = read_pending_retry(story_id, uid=user_id)
-    clear_pending_retry(story_id, uid=user_id)
     if not data or not data.get("prompt"):
         raise HTTPException(status_code=404, detail="No failed prompt to retry")
-    sync_story_directory_to_firestore(user_id, story_id)
     result = {"prompt": data["prompt"], "error": data.get("error", "")}
     if data.get("regeneration"):
         result["regeneration"] = data["regeneration"]

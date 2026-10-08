@@ -117,6 +117,9 @@ def test_failed_feedback_generation_retains_context_for_retry_after_reload(feedb
     retried = feedback_app.post(f"/story/{STORY}/retry").json()
     assert retried["regeneration"] == context
     assert retried["prompt"] == ORIGINAL_PROMPT
+    # Retry is a read/prepare operation now. The recovery copy must survive
+    # until a replacement generation actually commits.
+    assert main.read_pending_retry(STORY, configured_user["uid"])["regeneration"] == context
     assert (folder / "story.md").read_text(encoding="utf-8") == "A stranger arrived."
 
 

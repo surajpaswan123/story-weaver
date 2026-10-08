@@ -32,7 +32,8 @@ function setup() {
     const bar = { after(form) { activeForm = form; } };
     const button = Object.assign(new Control(), { closest: () => bar });
     const response = data => ({ ok: true, json: async () => data });
-    const context = vm.createContext({
+    let context;
+    context = vm.createContext({
         AbortController, storyViewEpoch: 0, storyReads: new Map(),
         observedGeneration: null, generationStatusRequest: null,
         document: {
@@ -50,6 +51,12 @@ function setup() {
         invalidateFileAfterUndo() {},
         announceToScreenReader(message) { announcements.push(message); },
         announceStatus(message) { announcements.push(message); },
+        resetGenerationMonitor() {
+            announcements.push('reset-generation-monitor');
+            context.generationStatusRequest?.controller?.abort?.();
+            context.generationStatusRequest = null;
+            context.observedGeneration = null;
+        },
         console,
         authFetch: async (url, options) => { calls.push({ url, options }); return response({ restored_prompt: 'Original prompt.', regeneration }); },
         requireJsonResponse: async result => { if (!result.ok) throw new Error('Undo rejected'); return result.json(); },
@@ -99,7 +106,7 @@ test('feedback submission undoes once, reloads context, and forwards the exact c
     assert.deepEqual(JSON.parse(app.calls[0].options.body), { feedback: '  Keep <names> & make it cautious.\n' });
     assert.equal(app.calls[1].load, true);
     assert.equal(app.generations.length, 1);
-    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration]);
+    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration, true]);
     assert.equal(form.removed, true);
     assert.equal(app.input.disabled, false);
 });
@@ -146,11 +153,46 @@ test('retry after reload forwards saved feedback instead of doing another undo',
     app.context.authFetch = async (url, options) => { app.calls.push({ url, options }); return app.response({ prompt: 'Original prompt.', regeneration }); };
     await app.context.retryLastPrompt('Older prompt');
     assert.equal(app.calls[0].url, '/story/story-one/retry');
-    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration]);
+    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration, true]);
     assert.equal(app.calls.some(call => call.url?.endsWith('/undo')), false);
 });
 
 test('all latest-turn action renderers include the new accessible button', () => {
     assert.equal((html.match(/onclick="showRegenerateFeedback\(this\)"/g) || []).length, 4);
     assert.match(html, /summary\.textContent = 'Model thoughts'/);
+});
+
+
+test('feedback handoff cancels a status poll that appears after undo', async () => {
+    const app = setup();
+    const form = app.open();
+    form.querySelector('textarea').value = 'Make it cautious.';
+    let aborted = false;
+    app.context.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        app.context.generationStatusRequest = { controller: { abort() { aborted = true; } } };
+        return app.response({ restored_prompt: 'Original prompt.', regeneration });
+    };
+    await app.submit(form);
+    assert.equal(aborted, true);
+    assert.equal(app.context.generationStatusRequest, null);
+    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration, true]);
+});
+
+test('retry handoff cancels a stale status poll and uses prepared mode', async () => {
+    const app = setup();
+    let aborted = false;
+    app.context.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        app.context.generationStatusRequest = { controller: { abort() { aborted = true; } } };
+        return app.response({ prompt: 'Original prompt.', regeneration });
+    };
+    await app.context.retryLastPrompt('Older prompt');
+    assert.equal(aborted, true);
+    assert.equal(app.context.generationStatusRequest, null);
+    assert.deepEqual(app.generations[0], ['Original prompt.', false, regeneration, true]);
+});
+
+test('prepared submit path reports a busy race instead of silently dropping it', () => {
+    assert.match(html, /preparedTurn[\s\S]*page is still busy[\s\S]*feedback has been preserved/);
 });

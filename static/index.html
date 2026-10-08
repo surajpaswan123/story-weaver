@@ -2562,8 +2562,18 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
 
 
 
-        async function submitStory(overrideText, bypassCheck = false, regeneration = null) {
-            if (isGenerating || historyLoading || observedGeneration?.active || generationStatusRequest) return;
+        async function submitStory(overrideText, bypassCheck = false, regeneration = null, preparedTurn = false) {
+            if (preparedTurn && generationStatusRequest) {
+                generationStatusRequest.controller.abort();
+                generationStatusRequest = null;
+                updateSendButtonState();
+            }
+            if (isGenerating || historyLoading || observedGeneration?.active || generationStatusRequest) {
+                if (preparedTurn) {
+                    throw new Error('The replacement turn was prepared, but the page is still busy. Use Retry Failed Prompt; your feedback has been preserved.');
+                }
+                return;
+            }
             const generationStoryId = currentStoryId;
             const generationEpoch = storyViewEpoch;
             const submission = ++storySubmissionSeq;
@@ -3145,9 +3155,13 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             }
             if (!isCurrentStoryRead(request)) return;
             try {
+                // The retry marker stays server-side until a replacement commits.
+                // Drop stale status polling before reloading so it cannot eat this
+                // prepared handoff without ever sending /generate.
+                resetGenerationMonitor();
                 await loadStory();
                 if (!isCurrentStoryRead(request)) return;
-                await submitStory(promptText, false, regeneration);
+                await submitStory(promptText, false, regeneration, true);
             } catch (err) {
                 if (!isCurrentStoryRead(request)) return;
                 console.error('Retry failed:', err);
@@ -3221,10 +3235,14 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 const data = await requireJsonResponse(res, 'Could not prepare regeneration');
                 if (!data.regeneration || !data.restored_prompt) throw new Error('The server did not return a turn to regenerate. Reload the story to check its retry status.');
                 if (!isCurrentStoryRead(request) || storyId !== currentStoryId) return;
+                // Undo completed on the server, so an old generation-status
+                // request now describes pre-undo state. Cancel it before the
+                // reload/replacement handoff or it can silently block submitStory.
+                resetGenerationMonitor();
                 invalidateFileAfterUndo(storyId);
                 await loadStory();
                 if (!isCurrentStoryRead(request) || storyId !== currentStoryId) return;
-                await submitStory(data.restored_prompt, false, data.regeneration);
+                await submitStory(data.restored_prompt, false, data.regeneration, true);
                 form.remove();
             } catch (error) {
                 if (!isCurrentStoryRead(request)) return;
