@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -102,6 +103,38 @@ class HistoryChanged(ValueError):
 def _revision(stat):
     signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     return hashlib.blake2s(repr(signature).encode(), digest_size=12).hexdigest()
+
+
+def file_revision(path):
+    """Small optimistic-concurrency token; no copy of the file body is needed."""
+    return _revision(os.stat(path))
+
+
+_LINE_BREAK = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def text_metadata(chunks):
+    """Match len(text), splitlines() and strip() without retaining whole lines."""
+    chars = breaks = 0
+    nonempty = previous_cr = ends_in_break = False
+    for chunk in chunks:
+        if not chunk:
+            continue
+        chars += len(chunk)
+        breaks += sum(1 for _ in _LINE_BREAK.finditer(chunk))
+        if previous_cr and chunk.startswith("\n"):
+            breaks -= 1  # A CRLF can span two chunks.
+        previous_cr = chunk.endswith("\r")
+        ends_in_break = bool(_LINE_BREAK.fullmatch(chunk[-1]))
+        nonempty = nonempty or not chunk.isspace()
+    return {"chars": chars, "lines": breaks + int(bool(chars) and not ends_in_break),
+            "empty": not nonempty}
+
+
+def file_metadata(path, chunk_size=64 * 1024):
+    """Read metadata in bounded chunks, even for a multi-megabyte single line."""
+    with open(path, "r", encoding="utf-8") as handle:
+        return text_metadata(iter(lambda: handle.read(chunk_size), ""))
 
 
 def _chat_entries(source):

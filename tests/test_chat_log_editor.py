@@ -108,3 +108,49 @@ def test_guest_cannot_edit_chat_history(editor):
     main.app.dependency_overrides[main.get_current_user_info] = lambda: {"uid": "guest", "is_guest": True}
     assert client.put(URL, json={"text": "[]"}).status_code == 403
     assert (folder / "chat_log.json").read_bytes() == before
+
+
+def test_large_transcript_revision_saves_every_thought_and_refreshes_token(editor):
+    client, folder = editor
+    opened = client.get(URL).json()
+    entries = [{"role": "user", "text": "Continue. हिन्दी 🐉"},
+               {"role": "ai", "text": "The complete story.",
+                "model_thoughts": "A full saved thought. " * 430000,
+                "annotation": {"reviewed": True}}]
+    edited = json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
+    assert len(edited) > 9_000_000
+    response = client.put(URL, json={"text": edited, "expected_revision": opened["revision"]})
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved["revision"] != opened["revision"]
+    assert saved["chars"] == len(edited)
+    assert (folder / "chat_log.json").read_bytes() == edited.encode("utf-8")
+    reopened = client.get(URL).json()
+    assert reopened["text"] == edited and reopened["revision"] == saved["revision"]
+    assert client.get("/story/editor/chat").json()["messages"][-1]["model_thoughts"] == entries[-1]["model_thoughts"]
+    assert (folder / "story.md").read_text(encoding="utf-8") == "Mira waited."
+    # A second save uses the returned token; a stale first token still conflicts.
+    assert client.put(URL, json={"text": "[]", "expected_revision": opened["revision"]}).status_code == 409
+    assert client.put(URL, json={"text": edited, "expected_revision": saved["revision"]}).status_code == 200
+
+
+def test_revision_rejects_same_length_replacement_and_missing_history(editor):
+    client, folder = editor
+    opened = client.get(URL).json()
+    main._atomic_write_text(str(folder / "chat_log.json"), opened["text"].replace("Mira", "Luna"))
+    latest = (folder / "chat_log.json").read_bytes()
+    assert client.put(URL, json={"text": "[]", "expected_revision": opened["revision"]}).status_code == 409
+    assert (folder / "chat_log.json").read_bytes() == latest
+    (folder / "chat_log.json").unlink()
+    assert client.put(URL, json={"text": "[]", "expected_revision": opened["revision"]}).status_code == 409
+    assert not (folder / "chat_log.json").exists()
+
+
+def test_invalid_large_input_returns_small_error_without_echoing_content(editor):
+    client, folder = editor
+    before = (folder / "chat_log.json").read_bytes()
+    response = client.put(URL, json={"text": {"private_text": "x" * 3_000_000}})
+    assert response.status_code == 422
+    assert len(response.content) < 1000
+    assert "private_text" not in response.text
+    assert (folder / "chat_log.json").read_bytes() == before

@@ -150,3 +150,24 @@ test('CRLF transcripts stay clean on open and use exact server text for conflict
     await app.context.saveOpenFile();
     assert.equal(saved[1].expected_text, edited);
 });
+
+test('revision saves send one full transcript and advance the conflict token', async () => {
+    const app = setup();
+    const text = JSON.stringify([{ role: 'ai', text: 'हिन्दी 🐉', model_thoughts: 'Full thought. '.repeat(750000) }]);
+    const revision = 'a'.repeat(24), nextRevision = 'b'.repeat(24);
+    app.context.authFetch = async () => ({ ok: true, data: {
+        name: 'chat_log.json', owner: 'app', label: 'Chat history', text,
+        revision, lines: 1, chars: text.length,
+    } });
+    await app.context.openStoryFile('chat_log.json');
+    const saved = [];
+    app.context.authFetch = async (url, options) => {
+        saved.push(JSON.parse(options.body));
+        return { ok: true, data: { chars: text.length, lines: 1, revision: nextRevision } };
+    };
+    await app.context.saveOpenFile();
+    assert.deepEqual(saved[0], { text, expected_revision: revision });
+    assert.equal(app.context.fileEditorIsDirty(), false);
+    await app.context.saveOpenFile();
+    assert.deepEqual(saved[1], { text, expected_revision: nextRevision });
+});
