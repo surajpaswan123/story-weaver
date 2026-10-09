@@ -7,7 +7,9 @@
 !openai_compat.py
 !regeneration.py
 !runtime_support.py
+!live_stream.py
 !turn_checkpoints.py
 !static/
 !static/index.html
 !static/file-editor.js
+!static/live-generation.js

@@ -34,3 +34,4 @@ jobs:
           tests/test_feedback_frontend.cjs
           tests/test_model_discovery_frontend.cjs
           tests/test_story_loading_frontend.cjs
+          tests/test_live_generation_frontend.cjs
