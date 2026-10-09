@@ -10,6 +10,7 @@ import time
 from collections import deque
 
 import ijson
+from starlette.responses import StreamingResponse
 
 
 class TurnProgress:
@@ -232,18 +233,23 @@ def read_chat_page(path, last=40, before=None, after=None, revision=None, max_ch
             "revision": current_revision, "last_user_prompt": last_user_prompt}
 
 
-def relay_stream(gen, max_queue=16):
-    """Bound delivery memory; finish saving in the worker after UI disconnects."""
+def relay_stream(gen, max_queue=16, detached=None, max_block_seconds=30):
+    """Bound delivery memory without letting an absent reader block saving."""
     events = queue.Queue(maxsize=max_queue)
-    detached = threading.Event()
+    if detached is None:
+        detached = threading.Event()
 
     def deliver(event):
+        deadline = time.monotonic() + max_block_seconds
         while not detached.is_set():
             try:
                 events.put(event, timeout=0.1)
                 return
             except queue.Full:
-                pass
+                if time.monotonic() >= deadline:
+                    # A browser/proxy can stop reading without promptly sending
+                    # a disconnect. Drop only live delivery; keep every save step.
+                    detached.set()
 
     def pump():
         try:
@@ -257,7 +263,12 @@ def relay_stream(gen, max_queue=16):
     threading.Thread(target=pump, daemon=True, name="story-stream-worker").start()
     try:
         while True:
-            kind, item = events.get()
+            try:
+                kind, item = events.get(timeout=0.1)
+            except queue.Empty:
+                if detached.is_set():
+                    return
+                continue
             if kind == "done":
                 return
             if kind == "error":
@@ -271,6 +282,32 @@ def relay_stream(gen, max_queue=16):
                 events.get_nowait()
             except queue.Empty:
                 break
+
+
+class StoryStreamingResponse(StreamingResponse):
+    """Detach HTTP delivery on disconnect while the story worker finishes."""
+
+    def __init__(self, source, **kwargs):
+        self.detached = threading.Event()
+        self.relay = relay_stream(source, detached=self.detached)
+        super().__init__(self.relay, **kwargs)
+
+    async def listen_for_disconnect(self, receive):
+        # Older ASGI servers notify through receive rather than raising on send.
+        await super().listen_for_disconnect(receive)
+        self.detached.set()
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # StreamingResponse does not close its sync iterator on send failure.
+            self.detached.set()
+            try:
+                self.relay.close()
+            except ValueError:
+                # A pending threadpool read observes detachment and closes itself.
+                pass
 
 
 def heartbeat_stream(stream, heartbeat, interval=15, max_queue=16):

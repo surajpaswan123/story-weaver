@@ -48,7 +48,7 @@ sys.stderr = LogInterceptor(sys.stderr)
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
@@ -74,7 +74,8 @@ import hashlib
 import ipaddress
 
 from runtime_support import (HistoryChanged, read_chat_page, relay_stream, heartbeat_stream,
-                             TurnProgress, count_ai_turns, recent_ai_text, file_revision, file_metadata, text_metadata)
+                             TurnProgress, StoryStreamingResponse, count_ai_turns, recent_ai_text,
+                             file_revision, file_metadata, text_metadata)
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -7477,11 +7478,6 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
         end_story_turn(story_id, user_id, turn_token)
         raise
 
-    def event_stream():
-        # Same background-thread treatment as /generate: closing the browser stops
-        # the SSE relay but the audio pipeline keeps running to completion.
-        yield from _relay_stream(tracked_story_stream(_audio_worker(), story_id, user_id, turn_token))
-
     def _audio_worker():
         nonlocal story_context
         full_response = ""
@@ -7798,7 +7794,9 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 print(f"  Final Firestore sync failed: {sync_err}")
             end_story_turn(story_id, user_id, turn_token)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StoryStreamingResponse(
+        tracked_story_stream(_audio_worker(), story_id, user_id, turn_token),
+        media_type="text/event-stream")
 
 # ---------------------------------------------------------------------------
 # LOCAL (BROWSER-DIRECT) OPENAI-COMPATIBLE GENERATION
@@ -8495,12 +8493,6 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         end_story_turn(input_data.story_id, user_id, turn_token)
         raise
 
-    def event_stream():
-        # Run the whole turn in a background thread (see _relay_stream): if the
-        # browser is closed mid-generation, the worker keeps going - the story is
-        # still saved, chat-logged, synced, and the retry marker is updated.
-        yield from _relay_stream(tracked_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token))
-
     def _generate_worker():
         nonlocal system_msg, user_msg
         full_response = ""
@@ -8874,7 +8866,9 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             clear_stop_request(input_data.story_id, user_id)
             end_story_turn(input_data.story_id, user_id, turn_token)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StoryStreamingResponse(
+        tracked_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token),
+        media_type="text/event-stream")
 
 # Model lists come ONLY from live provider API fetches - no hardcoded model lists.
 # Provider display names are labels, not model lists.
