@@ -77,13 +77,15 @@ class TurnProgress:
             for event in source:
                 # Chunk payloads can be large. Their text never enters status storage.
                 if isinstance(event, str) and event.startswith('data: {"type": "chunk"'):
-                    self.update(key, token, state='generating')
+                    # Rules-editor chunks belong to the editing stage.
+                    if self.status(key, token).get('state') != 'editing':
+                        self.update(key, token, state='generating')
                 elif isinstance(event, str) and event.startswith('data: '):
                     try:
                         kind = json.loads(event[6:]).get('type')
                     except (ValueError, AttributeError):
                         kind = None
-                    if kind in {'finalizing', 'retrying'}:
+                    if kind in {'editing', 'finalizing', 'retrying'}:
                         self.update(key, token, state=kind)
                     elif kind in {'done', 'error', 'stopped'}:
                         outcome = {'done': 'completed', 'error': 'failed', 'stopped': 'stopped'}[kind]

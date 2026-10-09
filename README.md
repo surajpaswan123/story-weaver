@@ -937,7 +937,15 @@ provider call, save the turn, update references, and attempt the final cloud syn
 After a signed-in reload, the interface remembers the last selected story for
 that account in that browser, validates it against the returned story list, and
 loads it. It reads generation status alongside history and continues checking
-while a recovered turn is active. Finished saved history is loaded automatically.
+while a recovered turn is active. For server-hosted generation, it also reconnects
+to the same turn's live stream: text and model thoughts already generated are
+replayed, then new output continues arriving without another provider request.
+Finished saved history is loaded automatically.
+
+The writer's draft is visible before rules editing. While the editor starts,
+that draft stays visible; its first output replaces the draft, and the final
+replacement matches the text and thoughts committed to the transcript. During
+memory updates, reopening shows the completed text once and keeps input locked.
 
 | State | What it means |
 | --- | --- |
@@ -945,6 +953,7 @@ while a recovered turn is active. Finished saved history is loaded automatically
 | `starting` | A turn has been reserved. |
 | `generating` | The server worker is executing the generation pipeline. |
 | `retrying` | A retry event was observed. |
+| `editing` | The rules editor is refining the writer's draft. |
 | `finalizing` | The pipeline is finishing work such as reference updates and cleanup. |
 | `completed` | The tracked turn ended with a completion outcome. |
 | `failed` | The tracked turn ended with an error outcome. |
@@ -969,6 +978,15 @@ prompts or streamed prose. Finished records are limited to 128 and expire after
 about one hour; active records are retained. The run ID is not the secret token
 required by browser-driven turn operations.
 
+Live events use a temporary disk journal outside the story directory. They are
+not added to model context, story backups, or cloud snapshots, and do not keep
+another full draft in RAM. Active journals remain available while the worker
+runs; finished journals are limited to sixteen and pruned after about ten minutes.
+`GET /story/{story_id}/generation-stream?run_id=...&after=...` requires authentication
+and reads only that account's story and run. SSE event IDs are byte cursors; a
+dropped subscription reconnects after its last complete event. Disconnects
+end subscriptions without stopping the provider, memory work, or saving.
+
 ### What recovery cannot do
 
 The registry and active workers are process-local. A Render restart, deployment,
@@ -977,8 +995,8 @@ the progress record. The app does not have a persistent job queue or a mechanism
 to restart an interrupted generation from its last token. After a restart, an
 idle status cannot reconstruct the fate of every earlier request.
 
-Recovery does not replay already-streamed unsaved text. It watches status and
-loads saved results. A completion state also does not independently certify that
+Live draft replay is available only in the process that owns the generation.
+A completion state also does not independently certify that
 the last PostgreSQL upload succeeded; storage failures are discussed below.
 
 For browser-direct generation, status identifies `execution: "browser"`. It

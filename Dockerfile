@@ -18,9 +18,10 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && mkdir /app/stories \
     && chown storyweaver:storyweaver /app/stories
 
-COPY main.py openai_compat.py regeneration.py runtime_support.py turn_checkpoints.py ./
+COPY main.py openai_compat.py regeneration.py runtime_support.py live_stream.py turn_checkpoints.py ./
 COPY static/index.html ./static/index.html
 COPY static/file-editor.js ./static/file-editor.js
+COPY static/live-generation.js ./static/live-generation.js
 
 USER 10001:10001
 EXPOSE 8000

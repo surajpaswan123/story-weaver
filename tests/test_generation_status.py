@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 
 import main
+from live_stream import LiveStreams
 from runtime_support import TurnProgress
 
 
@@ -18,6 +19,7 @@ def status_app(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'db_firestore', None)
     monkeypatch.setattr(main, '_active_story_turns', {})
     monkeypatch.setattr(main, '_turn_progress', TurnProgress())
+    monkeypatch.setattr(main, '_live_streams', LiveStreams())
     user = {'uid': 'status-user', 'is_super_admin': False}
     main.app.dependency_overrides[main.require_authenticated_user] = lambda: user
     main.app.dependency_overrides[main.get_current_user_id] = lambda: user['uid']
@@ -69,7 +71,8 @@ def test_disconnected_reader_keeps_running_and_reopened_story_gets_saved_result(
 
 @pytest.mark.parametrize('spec_version', ['2.0', '2.4'])
 @pytest.mark.parametrize('phase', ['retrying', 'finalizing'])
-def test_socket_disconnect_releases_delivery_without_explicit_generator_close(status_app, spec_version, phase):
+@pytest.mark.parametrize('replay', [False, True])
+def test_socket_disconnect_releases_delivery_without_explicit_generator_close(status_app, spec_version, phase, replay):
     client, user = status_app
     story, uid = 'socket-story', user['uid']
     token = main.begin_story_turn(story, uid)
@@ -88,8 +91,9 @@ def test_socket_disconnect_releases_delivery_without_explicit_generator_close(st
         yield event('done')
         saved.set()
 
-    response = main.StoryStreamingResponse(
-        main.tracked_story_stream(worker(), story, uid, token), media_type='text/event-stream')
+    response = (main.start_live_story_stream(worker(), story, uid, token) if replay else
+                main.StoryStreamingResponse(main.tracked_story_stream(worker(), story, uid, token),
+                                            media_type='text/event-stream'))
 
     async def disconnected_socket():
         first_body = asyncio.Event()
