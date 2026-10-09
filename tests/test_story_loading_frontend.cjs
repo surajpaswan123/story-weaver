@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const liveApi = require('../static/live-generation.js');
 const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
 
 function source(name) {
@@ -50,7 +51,7 @@ function setup() {
         clearTimeout: id => timers.delete(id), clearInterval, console: { error() {}, warn() {}, log() {} },
         currentUser: { uid: 'test-user' },
         localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-        observedGeneration: null, generationStatusTimer: null, generationStatusRequest: null, generationStatusFailures: 0, historyGenerationRunId: '',
+        liveGeneration: null, StoryLiveStream: liveApi, observedGeneration: null, generationStatusTimer: null, generationStatusRequest: null, generationStatusFailures: 0, historyGenerationRunId: '',
         currentStoryId: 'A', storyViewEpoch: 0, storySubmissionSeq: 0, storyLoadSeq: 0, storyReads: new Map(),
         activeReader: null, activeStoryId: null, isGenerating: false, isGuestMode: false,
         allChatEntries: [], renderedStartIndex: 0, historyStart: 0, historyEnd: 0, historyTotal: 0,
@@ -70,7 +71,7 @@ function setup() {
     elements.get('provider-select').value = 'openai';
     for (const name of ['beginStoryRead', 'isCurrentStoryRead', 'resetStoryView', 'setGenerating', 'updateSendButtonState', 'updateHistoryControls',
         'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'stopGeneration', 'regenerateStory',
-        'resetGenerationMonitor', 'generationRecoveryControls', 'showGenerationRecovery', 'scheduleGenerationCheck', 'applyGenerationStatus', 'checkGenerationStatus', 'stopRecoveredGeneration', 'rememberSelectedStory', 'restoreSelectedStory']) {
+        'cancelLiveGeneration', 'connectLiveGeneration', 'resetGenerationMonitor', 'generationRecoveryControls', 'showGenerationRecovery', 'scheduleGenerationCheck', 'applyGenerationStatus', 'checkGenerationStatus', 'stopRecoveredGeneration', 'rememberSelectedStory', 'restoreSelectedStory']) {
         vm.runInContext(source(name), context);
     }
     return { context, elements, notices, calls, timers, storage };
@@ -321,4 +322,100 @@ test('a recovered turn can be stopped, then its saved history is reloaded', asyn
     assert.match(c.storyDisplay.textContent, /Earlier saved turn/);
     assert.equal(app.elements.get('generation-stop').hidden, true);
     assert.equal(c.input.disabled, false);
+});
+
+test('reload attaches to the partial draft and later events without a generation POST', async () => {
+    const app = setup(), c = app.context;
+    const generation = { active: true, state: 'generating', execution: 'server', stream_available: true, run_id: 'live-1', turn_index: 0 };
+    let controller;
+    const stream = new ReadableStream({ start(value) { controller = value; } });
+    c.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        if (url.includes('/generation-stream?')) return new Response(stream);
+        return response({ ...page('Continue'), messages: [{ role: 'user', text: 'Continue', turn_index: 0 }], generation });
+    };
+    await c.loadStory();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.liveGeneration.runId, 'live-1');
+    controller.enqueue(new TextEncoder().encode('id: 100\ndata: {"type":"chunk","text":"<thought>Thoughts.</thought>Half the story."}\n\n'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.liveGeneration.view.draft.text, 'Half the story.');
+    assert.equal(c.liveGeneration.view.draft.thoughts, 'Thoughts.');
+    controller.enqueue(new TextEncoder().encode('id: 200\ndata: {"type":"chunk","text":" More arrives."}\n\n'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.liveGeneration.view.draft.text, 'Half the story. More arrives.');
+    assert.equal(c.liveGeneration.after, 200);
+    assert.equal(app.calls.some(call => call.options?.method === 'POST'), false);
+    assert.match(app.calls.at(-1).url, /run_id=live-1&after=0/);
+    c.resetStoryView();
+});
+
+test('a dropped replay reconnects after the last displayed cursor without duplicating text', async () => {
+    const app = setup(), c = app.context;
+    const generation = { active: true, state: 'generating', execution: 'server', stream_available: true, run_id: 'live-1', turn_index: 0 };
+    let attempts = 0;
+    c.authFetch = async (url, options) => {
+        app.calls.push({ url, options });
+        if (url.includes('/generation-stream?')) {
+            attempts++;
+            return new Response(attempts === 1 ? 'id: 100\ndata: {"type":"chunk","text":"One."}\n\n' :
+                'id: 100\ndata: {"type":"chunk","text":"One."}\n\nid: 200\ndata: {"type":"chunk","text":" Two."}\n\n');
+        }
+        return response({ ...page('Continue'), generation });
+    };
+    await c.loadStory();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.liveGeneration.after, 100);
+    await c.connectLiveGeneration(generation);
+    assert.match(app.calls.at(-1).url, /after=100/);
+    assert.equal(c.liveGeneration.view.draft.text, 'One. Two.');
+    assert.equal(c.liveGeneration.after, 200);
+    c.resetStoryView();
+});
+
+test('reload during memory updating renders the committed turn through replay only once', async () => {
+    const app = setup(), c = app.context;
+    const generation = { active: true, state: 'finalizing', execution: 'server', stream_available: true, run_id: 'live-1', turn_index: 0 };
+    c.authFetch = async url => url.includes('/generation-stream?') ? new Response('id: 100\ndata: {"type":"replace","text":"Saved turn.","model_thoughts":"<thought>Saved thoughts.</thought>"}\n\n') :
+        response({ messages: [{ role: 'user', text: 'Continue', turn_index: 0 }, { role: 'ai', text: 'Saved turn.', turn_index: 0 }], start_index: 0, end_index: 2, total_entries: 2, generation });
+    await c.loadStory();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.allChatEntries.filter(entry => entry.role === 'ai').length, 0);
+    assert.equal(c.liveGeneration.view.draft.text, 'Saved turn.');
+    assert.equal(c.liveGeneration.view.draft.thoughts, 'Saved thoughts.');
+    assert.equal(c.input.disabled, true);
+    c.resetStoryView();
+});
+
+test('initial streaming and reload use the same draft transitions without appending both versions', async () => {
+    const app = setup(), c = app.context;
+    c.loadStory = async () => {};
+    c.authFetch = async () => new Response([
+        { type: 'chunk', text: '<thought>Writer thoughts.</thought>Writer draft.' },
+        { type: 'editing' }, { type: 'chunk', text: 'Edited draft.' },
+        { type: 'replace', text: 'Exact saved text.', model_thoughts: '<thought>Writer thoughts.</thought>' },
+        { type: 'done' },
+    ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''));
+    await c.submitStory('Continue', true);
+    const body = c.storyDisplay.children.find(element => element.className?.startsWith('story-font'));
+    assert.equal(body.textContent, 'Exact saved text.');
+    assert.doesNotMatch(c.storyDisplay.textContent, /Writer draft|Edited draft/);
+    assert.equal(c.isGenerating, false);
+});
+
+test('a queued replay event cannot render after switching stories', async () => {
+    const app = setup(), c = app.context, pending = deferred();
+    const generation = { active: true, state: 'generating', stream_available: true, run_id: 'old-A', turn_index: 0 };
+    let cancelled = 0;
+    c.authFetch = async url => url.includes('/generation-stream?') ? { ok: true, body: { getReader: () => ({ read: () => pending.promise,
+        cancel: async () => cancelled++, releaseLock() {} }) } } : response({ ...page('A'), generation });
+    await c.loadStory();
+    await new Promise(resolve => setImmediate(resolve));
+    pending.resolve({ done: false, value: new TextEncoder().encode('id: 100\ndata: {"type":"chunk","text":"A stale draft"}\n\n') });
+    c.resetStoryView(); c.currentStoryId = 'B';
+    c.storyDisplay.textContent = 'B story';
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.storyDisplay.textContent, 'B story');
+    assert.equal(c.liveGeneration, null);
+    assert.ok(cancelled >= 1);
 });

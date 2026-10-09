@@ -48,7 +48,7 @@ sys.stderr = LogInterceptor(sys.stderr)
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Header, Request, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
@@ -74,7 +74,9 @@ import hashlib
 import ipaddress
 
 from runtime_support import (HistoryChanged, read_chat_page, relay_stream, heartbeat_stream,
-                             TurnProgress, count_ai_turns, recent_ai_text, file_revision, file_metadata, text_metadata)
+                             TurnProgress, StoryStreamingResponse, count_ai_turns, recent_ai_text,
+                             file_revision, file_metadata, text_metadata)
+from live_stream import LiveStreams
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
                            MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
@@ -467,6 +469,7 @@ _story_locks_guard = threading.Lock()
 _active_story_turns: dict[tuple[str, str], tuple[str, float]] = {}
 _active_story_turns_guard = threading.Lock()
 _turn_progress = TurnProgress()
+_live_streams = LiveStreams()
 STORY_TURN_TTL_SECONDS = 30 * 60
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -555,7 +558,11 @@ def current_generation_status(story_id: str, uid: str):
     story_turn_is_active(story_id, uid)  # Expire an abandoned reservation, never a live worker.
     with _active_story_turns_guard:
         current = _active_story_turns.get(key)
-        return _turn_progress.status(key, current[0] if current else None)
+        status = _turn_progress.status(key, current[0] if current else None)
+    journal = _live_streams.get(key, status['run_id'])
+    if journal:
+        status.update(stream_available=True, turn_index=journal.turn_index)
+    return status
 
 
 def tracked_story_stream(source, story_id: str, uid: str, token: str):
@@ -563,6 +570,20 @@ def tracked_story_stream(source, story_id: str, uid: str, token: str):
         yield from _turn_progress.track(_stop_key(story_id, uid), token, source)
     finally:
         end_story_turn(story_id, uid, token)
+
+
+def start_live_story_stream(source, story_id: str, uid: str, token: str):
+    try:
+        path = get_chat_log_path(story_id, uid=uid, create=False)
+        with get_story_lock(story_id, uid):
+            turn_index = count_ai_turns(path) if os.path.exists(path) else 0
+        run_id = hashlib.sha256(token.encode()).hexdigest()[:20]
+        journal = _live_streams.start(_stop_key(story_id, uid), run_id, turn_index,
+                                     tracked_story_stream(source, story_id, uid, token))
+        return journal.response()
+    except Exception:
+        end_story_turn(story_id, uid, token)
+        raise
 
 
 def validate_story_turn_token(story_id: str, uid: str, token: str) -> None:
@@ -3265,6 +3286,18 @@ def get_generation_status(story_id: str, user_info: dict = Depends(require_authe
     return JSONResponse(current_generation_status(story_id, user_info['uid']), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/story/{story_id}/generation-stream")
+def resume_generation_stream(story_id: str, run_id: str, after: int = 0,
+                             user_info: dict = Depends(require_authenticated_user)):
+    """Subscribe to the existing worker; never reopen a provider or mutate files."""
+    journal = _live_streams.get(_stop_key(story_id, user_info['uid']), run_id)
+    if journal is None:
+        raise HTTPException(status_code=404, detail="This live generation is no longer available. Reload the saved story.")
+    if not journal.valid_cursor(after):
+        raise HTTPException(status_code=422, detail="Invalid generation cursor")
+    return journal.response(after)
+
+
 @app.get("/story/{story_id}/chat")
 def get_chat_log(story_id: str, last: int = 40, before: int = None, after: int = None,
                  revision: str = None, user_id: str = Depends(get_current_user_id)):
@@ -5035,12 +5068,6 @@ def _relay_stream(gen):
     yield from relay_stream(gen)
 
 
-def _thought_blocks(text: str):
-    """Extract complete <thought>...</thought> blocks from streamed text.
-    Safe to run per chunk: stream adapters wrap each delta's reasoning in its
-    own complete tags, so a block is never split across chunks."""
-    return re.findall(r"<thought>.*?</thought>", text or "", re.S)
-
 
 def _find_stream_overlap(existing_text: str, incoming_text: str) -> int:
     """Return the longest suffix/prefix overlap between emitted text and a new chunk."""
@@ -5165,37 +5192,6 @@ def _rules_edit_looks_suspicious(original_text: str, edited_text: str) -> bool:
 
     return False
 
-
-def _iter_display_chunks(text: str, max_chunk_chars: int = 260):
-    """Yield readable final-text chunks for SSE without exposing raw generator deltas."""
-    remaining = text or ""
-    while remaining:
-        if len(remaining) <= max_chunk_chars:
-            yield remaining
-            break
-
-        split_at = remaining.rfind("\n\n", 0, max_chunk_chars + 1)
-        if split_at <= 0:
-            split_at = remaining.rfind(". ", 0, max_chunk_chars + 1)
-        if split_at <= 0:
-            split_at = remaining.rfind(" ", 0, max_chunk_chars + 1)
-        if split_at <= 0:
-            split_at = max_chunk_chars
-
-        if remaining[split_at:split_at + 2] == "\n\n":
-            chunk = remaining[:split_at + 2]
-            remaining = remaining[split_at + 2:]
-        elif remaining[split_at:split_at + 2] == ". ":
-            chunk = remaining[:split_at + 2]
-            remaining = remaining[split_at + 2:]
-        else:
-            chunk = remaining[:split_at]
-            remaining = remaining[split_at:]
-
-        chunk = chunk.lstrip("\n")
-        remaining = remaining.lstrip("\n")
-        if chunk:
-            yield chunk
 
 
 def _strip_meta_summary_paragraphs(text: str) -> tuple[str, bool]:
@@ -7477,11 +7473,6 @@ IMPORTANT: Write your response as part of the ongoing story narrative, not as a 
         end_story_turn(story_id, user_id, turn_token)
         raise
 
-    def event_stream():
-        # Same background-thread treatment as /generate: closing the browser stops
-        # the SSE relay but the audio pipeline keeps running to completion.
-        yield from _relay_stream(tracked_story_stream(_audio_worker(), story_id, user_id, turn_token))
-
     def _audio_worker():
         nonlocal story_context
         full_response = ""
@@ -7587,10 +7578,8 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     if not fresh_text:
                         continue
                     full_response += fresh_text
-                    # Forward the main model's thinking blocks live so the
-                    # thinking panel populates (audio pipeline streams text later)
-                    for _tb in _thought_blocks(fresh_text):
-                        yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                    # Show the writer draft and thoughts before rules editing.
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
 
             if not full_response:
                 retry_result = retry_empty_stream_with_fallback(
@@ -7615,8 +7604,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
-                            for _tb in _thought_blocks(fresh_text):
-                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
 
             if not full_response:
                 remove_last_user_entry(story_id, uid=user_id)
@@ -7643,6 +7631,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     stream_is_thinking = retry_is_thinking
                     model_used_ref = retry_model_name
                     full_response = ""
+                    yield f"data: {json.dumps({'type': 'reset'})}\n\n"
                     chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry)'})}\n\n"
                     if retry_is_thinking:
@@ -7654,8 +7643,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
-                            for _tb in _thought_blocks(fresh_text):
-                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
                     model_thoughts = extract_model_thoughts(full_response)
                     full_response = strip_thought_tags(full_response, filter_reasoning_lines=False)
                     full_response, cleanup_notes = _clean_generated_story_text(full_response)
@@ -7676,6 +7664,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
             # === Step 3: Silent Rules Editor — refine before saving, streamed live ===
             if not skip_rules_check and (rules_text or style_text):
                 print("Rules Editor: running (rules.md and/or style.md has content)")
+                yield f"data: {json.dumps({'type': 'editing'})}\n\n"
                 refined_text = ""
                 last_display_chunk = None
                 for piece in refine_with_rules_stream(full_response, rules_text, style_text, user_info=user_info):
@@ -7703,18 +7692,11 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
-                last_display_chunk = None
-                for display_chunk in _iter_display_chunks(full_response):
-                    if last_display_chunk is not None and display_chunk == last_display_chunk:
-                        continue
-                    last_display_chunk = display_chunk
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': display_chunk})}\n\n"
-
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
             updated_story = commit_ai_turn(
                 story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
-            yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
+            yield f"data: {json.dumps({'type': 'replace', 'text': full_response, 'model_thoughts': model_thoughts})}\n\n"
 
             # Save to audio_log.md — use Model 1's OBJECTIVE analysis, not story text
             try:
@@ -7798,7 +7780,7 @@ Use that analysis and the user's prompt to write the next part of the story. Do 
                 print(f"  Final Firestore sync failed: {sync_err}")
             end_story_turn(story_id, user_id, turn_token)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return start_live_story_stream(_audio_worker(), story_id, user_id, turn_token)
 
 # ---------------------------------------------------------------------------
 # LOCAL (BROWSER-DIRECT) OPENAI-COMPATIBLE GENERATION
@@ -8495,12 +8477,6 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
         end_story_turn(input_data.story_id, user_id, turn_token)
         raise
 
-    def event_stream():
-        # Run the whole turn in a background thread (see _relay_stream): if the
-        # browser is closed mid-generation, the worker keeps going - the story is
-        # still saved, chat-logged, synced, and the retry marker is updated.
-        yield from _relay_stream(tracked_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token))
-
     def _generate_worker():
         nonlocal system_msg, user_msg
         full_response = ""
@@ -8580,15 +8556,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     if not fresh_text:
                         continue
                     full_response += fresh_text
-                    if input_data.skip_rules_check:
-                        # Stream everything live when no rules editor will follow
-                        yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
-                    else:
-                        # Rules editor re-renders the story text afterward, so only
-                        # forward the MAIN model's thinking blocks live - they were
-                        # previously stripped before display, hiding the thinking panel.
-                        for _tb in _thought_blocks(fresh_text):
-                            yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
                 else:
                     finish_reason = "Unknown"
                     candidates = getattr(chunk, 'candidates', None)
@@ -8628,8 +8596,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
-                            for _tb in _thought_blocks(fresh_text):
-                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
                         else:
                             finish_reason = "Unknown"
                             candidates = getattr(chunk, 'candidates', None)
@@ -8665,6 +8632,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     is_thinking = retry_is_thinking
                     model_used_ref = retry_model_name
                     full_response = ""
+                    yield f"data: {json.dumps({'type': 'reset'})}\n\n"
                     last_finish_reason = ""
                     chunk_normalizer = StreamChunkNormalizer(seed_text=story_seed_tail)
                     yield f"data: {json.dumps({'type': 'info', 'model': retry_model_name + ' (retry after non-visible response)'})}\n\n"
@@ -8681,8 +8649,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                             if not fresh_text:
                                 continue
                             full_response += fresh_text
-                            for _tb in _thought_blocks(fresh_text):
-                                yield f"data: {json.dumps({'type': 'chunk', 'text': _tb})}\n\n"
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': fresh_text})}\n\n"
                         else:
                             finish_reason = "Unknown"
                             candidates = getattr(chunk, 'candidates', None)
@@ -8734,6 +8701,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             # === Silent Rules Editor — refine before saving, streamed live ===
             if not input_data.skip_rules_check and (rules_text or style_text):
                 print("Rules Editor: running (rules.md and/or style.md has content)")
+                yield f"data: {json.dumps({'type': 'editing'})}\n\n"
                 refined_text = ""
                 last_display_chunk = None
                 for piece in refine_with_rules_stream(full_response, rules_text, style_text, user_info=user_info):
@@ -8771,21 +8739,12 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
                     yield f"data: {json.dumps({'type': 'error', 'message': 'AI produced an empty response after post-processing.'})}\n\n"
                     return
 
-                # Only send display chunks if we haven't already streamed live
-                if not input_data.skip_rules_check:
-                    last_display_chunk = None
-                    for display_chunk in _iter_display_chunks(full_response):
-                        if last_display_chunk is not None and display_chunk == last_display_chunk:
-                            continue
-                        last_display_chunk = display_chunk
-                        yield f"data: {json.dumps({'type': 'chunk', 'text': display_chunk})}\n\n"
-
             # Commit story.md and chat_log.json together before telling the
             # browser that this exact cleaned version is final.
             updated_story = commit_ai_turn(
                 input_data.story_id, full_response, model_used_ref, uid=user_id, model_thoughts=model_thoughts)
             response_persisted = True
-            yield f"data: {json.dumps({'type': 'replace', 'text': full_response})}\n\n"
+            yield f"data: {json.dumps({'type': 'replace', 'text': full_response, 'model_thoughts': model_thoughts})}\n\n"
             
             # Trigger background analysis (BATCHED) - and WAIT for it before signaling done,
             # so the input box stays locked until story memory is actually caught up. This
@@ -8874,7 +8833,7 @@ You are an elite, professional creative writing partner and ghostwriter. Your pr
             clear_stop_request(input_data.story_id, user_id)
             end_story_turn(input_data.story_id, user_id, turn_token)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return start_live_story_stream(_generate_worker(), input_data.story_id, user_id, turn_token)
 
 # Model lists come ONLY from live provider API fetches - no hardcoded model lists.
 # Provider display names are labels, not model lists.

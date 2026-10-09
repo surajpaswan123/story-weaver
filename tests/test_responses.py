@@ -236,7 +236,7 @@ def test_generate_api_persists_only_completed_responses(completed, configured_us
         messages = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith("data: ")]
         if completed:
             assert messages[-1]["type"] == "done"
-            assert any(item == {"type": "replace", "text": text} for item in messages)
+            assert any(item == {"type": "replace", "text": text, "model_thoughts": ""} for item in messages)
             assert story_path.read_text(encoding="utf-8").count(text) == 1
         else:
             assert messages[-1]["type"] == "error"

@@ -127,6 +127,29 @@ def test_relay_applies_backpressure_but_finishes_saving_after_disconnect():
     assert len(produced) == 100
 
 
+def test_stalled_relay_finishes_worker_even_when_reader_never_closes():
+    produced, saved = [], threading.Event()
+
+    def provider():
+        for i in range(100):
+            produced.append(i)
+            yield i
+        saved.set()
+
+    stream = relay_stream(provider(), max_queue=2, max_block_seconds=0.2)
+    try:
+        assert next(stream) == 0
+        # Retain the reader without consuming or closing it, as a stalled proxy
+        # can do. The worker must not depend on generator garbage collection.
+        assert saved.wait(2)
+        assert produced == list(range(100))
+        remaining = list(stream)
+        assert len(remaining) <= 2
+        assert remaining == sorted(remaining)
+    finally:
+        stream.close()
+
+
 def test_heartbeat_close_unblocks_full_queue_and_closes_provider():
     closed = threading.Event()
     def provider():

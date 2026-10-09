@@ -1,11 +1,14 @@
+import asyncio
 import json
 import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 import main
+from live_stream import LiveStreams
 from runtime_support import TurnProgress
 
 
@@ -16,6 +19,7 @@ def status_app(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'db_firestore', None)
     monkeypatch.setattr(main, '_active_story_turns', {})
     monkeypatch.setattr(main, '_turn_progress', TurnProgress())
+    monkeypatch.setattr(main, '_live_streams', LiveStreams())
     user = {'uid': 'status-user', 'is_super_admin': False}
     main.app.dependency_overrides[main.require_authenticated_user] = lambda: user
     main.app.dependency_overrides[main.get_current_user_id] = lambda: user['uid']
@@ -63,6 +67,73 @@ def test_disconnected_reader_keeps_running_and_reopened_story_gets_saved_result(
     finally:
         release.set()
         stream.close()
+
+
+@pytest.mark.parametrize('spec_version', ['2.0', '2.4'])
+@pytest.mark.parametrize('phase', ['retrying', 'finalizing'])
+@pytest.mark.parametrize('replay', [False, True])
+def test_socket_disconnect_releases_delivery_without_explicit_generator_close(status_app, spec_version, phase, replay):
+    client, user = status_app
+    story, uid = 'socket-story', user['uid']
+    token = main.begin_story_turn(story, uid)
+    main.append_chat_entry(story, 'user', 'Continue.', uid=uid)
+    release, saved = threading.Event(), threading.Event()
+    prose, thoughts = 'Complete saved prose. ' * 1000, 'Saved model thoughts.'
+
+    def worker():
+        yield event(phase)
+        assert release.wait(5)
+        # Memory work emits more progress events than the disconnected relay
+        # can buffer. Saving and releasing the turn must still finish.
+        for _ in range(40):
+            yield event('heartbeat')
+        main.commit_ai_turn(story, prose, 'mock-model', uid=uid, model_thoughts=thoughts)
+        yield event('done')
+        saved.set()
+
+    response = (main.start_live_story_stream(worker(), story, uid, token) if replay else
+                main.StoryStreamingResponse(main.tracked_story_stream(worker(), story, uid, token),
+                                            media_type='text/event-stream'))
+
+    async def disconnected_socket():
+        first_body = asyncio.Event()
+
+        async def receive():
+            await first_body.wait()
+            return {'type': 'http.disconnect'}
+
+        async def send(message):
+            if message['type'] == 'http.response.body':
+                first_body.set()
+                if spec_version == '2.4':
+                    raise OSError('Browser connection closed')
+
+        scope = {'type': 'http', 'asgi': {'spec_version': spec_version}}
+        if spec_version == '2.4':
+            with pytest.raises(ClientDisconnect):
+                await response(scope, receive, send)
+        else:
+            await response(scope, receive, send)
+
+    try:
+        asyncio.run(disconnected_socket())
+        running = client.get(f'/story/{story}/generation-status').json()
+        assert running['active'] is True and running['state'] == phase
+        release.set()
+        assert saved.wait(1), 'An HTTP disconnect must not leave the save worker blocked on delivery'
+        for _ in range(100):
+            status = client.get(f'/story/{story}/generation-status').json()
+            if not status['active']:
+                break
+            time.sleep(0.01)
+        assert status['active'] is False and status['state'] == 'completed'
+        entry = client.get(f'/story/{story}/chat').json()['messages'][-1]
+        assert entry['text'] == prose and entry['model_thoughts'] == thoughts
+        next_token = main.begin_story_turn(story, uid)
+        main.end_story_turn(story, uid, next_token)
+    finally:
+        release.set()
+        response.detached.set()
 
 
 def test_status_is_account_scoped_and_does_not_restore_cloud_files(status_app, monkeypatch):

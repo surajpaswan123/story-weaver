@@ -55,7 +55,7 @@ def test_generate_analysis_and_undo_survive_memory_release(configured_user, monk
             assert response.status_code == 200
             events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
             assert events[-1]["type"] == "done"
-            assert any(event == {"type": "replace", "text": "Fresh turn."} for event in events)
+            assert any(event == {"type": "replace", "text": "Fresh turn.", "model_thoughts": ""} for event in events)
 
             assert "Original story." in captured["system_msg"]
             assert captured["analysis_story_id"] == story_id
