@@ -51,7 +51,7 @@ function setup() {
         clearTimeout: id => timers.delete(id), clearInterval, console: { error() {}, warn() {}, log() {} },
         currentUser: { uid: 'test-user' },
         localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-        liveGeneration: null, StoryLiveStream: liveApi, observedGeneration: null, generationStatusTimer: null, generationStatusRequest: null, generationStatusFailures: 0, historyGenerationRunId: '',
+        liveGeneration: null, StoryLiveStream: liveApi, observedGeneration: null, generationStatusTimer: null, generationStatusRequest: null, generationStatusFailures: 0, historyGenerationRunId: '', recoveredStopBusy: false,
         currentStoryId: 'A', storyViewEpoch: 0, storySubmissionSeq: 0, storyLoadSeq: 0, storyReads: new Map(),
         activeReader: null, activeStoryId: null, isGenerating: false, isGuestMode: false,
         allChatEntries: [], renderedStartIndex: 0, historyStart: 0, historyEnd: 0, historyTotal: 0,
@@ -59,7 +59,7 @@ function setup() {
         fileOpenRequest: 0, fileEditorSession: 0, openFileName: null, openFileStoryId: null, openFileOwner: null,
         openFileOriginal: '', fileEditorInstance: null, _analysisPollTimer: null, feedbackRegenerationBusy: false,
         SEND_SVG: '', STOP_SVG: '', attachedAudioFile: null, currentUserSettings: {},
-        input: elements.get('user-input'), sendBtn: elements.get('send-btn'), storyDisplay: elements.get('story-display'),
+        input: elements.get('user-input'), sendBtn: elements.get('send-btn'), statusIndicator: elements.get('status-indicator'), storyDisplay: elements.get('story-display'),
         storyTitle: elements.get('story-title'), elementsGrid: elements.get('elements-grid'), truncationBanner: elements.get('truncation-banner'),
         announceStatus: text => notices.push(text), announceToScreenReader: text => notices.push(text),
         fileEditorIsDirty: () => false, refreshOpenPanels() {}, triggerAnalysis() {}, showPendingRetryBanner() {},
@@ -69,7 +69,7 @@ function setup() {
         requireJsonResponse: async result => { if (!result.ok) throw new Error((await result.json()).detail); return result.json(); },
     });
     elements.get('provider-select').value = 'openai';
-    for (const name of ['beginStoryRead', 'isCurrentStoryRead', 'resetStoryView', 'setGenerating', 'updateSendButtonState', 'updateHistoryControls',
+    for (const name of ['beginStoryRead', 'isCurrentStoryRead', 'resetStoryView', 'syncGenerationActionButton', 'setGenerating', 'updateSendButtonState', 'updateHistoryControls',
         'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'stopGeneration', 'regenerateStory',
         'cancelLiveGeneration', 'connectLiveGeneration', 'resetGenerationMonitor', 'generationRecoveryControls', 'showGenerationRecovery', 'scheduleGenerationCheck', 'applyGenerationStatus', 'checkGenerationStatus', 'stopRecoveredGeneration', 'rememberSelectedStory', 'restoreSelectedStory']) {
         vm.runInContext(source(name), context);
@@ -213,7 +213,8 @@ test('reopening a running turn reports progress and does not call its prompt int
     assert.equal(c.input.disabled, true);
     c.input.value = 'A second prompt';
     c.updateSendButtonState();
-    assert.equal(c.sendBtn.disabled, true);
+    assert.equal(c.sendBtn.disabled, false);
+    assert.equal(c.sendBtn.attributes['aria-label'], 'Stop generation');
     const calls = [];
     c.authFetch = (...args) => calls.push(args);
     await c.submitStory('Must not start another generation', true);
@@ -246,7 +247,8 @@ test('a status network failure keeps the turn unconfirmed, blocks resubmission, 
     await c.checkGenerationStatus();
     assert.match(app.elements.get('generation-recovery-message').textContent, /may still be running/);
     assert.equal(c.observedGeneration.active, true);
-    assert.equal(c.sendBtn.disabled, true);
+    assert.equal(c.sendBtn.disabled, false);
+    assert.equal(c.sendBtn.attributes['aria-label'], 'Stop generation');
     assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [6000]);
     await c.checkGenerationStatus();
     assert.deepEqual([...app.timers.values()].map(timer => timer.delay), [12000]);
@@ -320,8 +322,24 @@ test('a recovered turn can be stopped, then its saved history is reloaded', asyn
     assert.equal(app.calls[0].url, '/story/A/stop');
     assert.equal(app.calls[0].options.method, 'POST');
     assert.match(c.storyDisplay.textContent, /Earlier saved turn/);
-    assert.equal(app.elements.get('generation-stop').hidden, true);
+    assert.equal(c.sendBtn.attributes['aria-label'], 'Send to AI');
     assert.equal(c.input.disabled, false);
+});
+
+test('very long recovered reply still displays its latest user prompt', async () => {
+    const app = setup(), c = app.context;
+    const generation = { active: true, state: 'finalizing', execution: 'server',
+        stream_available: true, run_id: 'long-run', turn_index: 5 };
+    c.authFetch = async url => url.includes('/generation-stream?')
+        ? new Response('')
+        : response({ messages: [{ role: 'ai', text: 'huge output', turn_index: 5 }],
+            last_user_prompt: 'Continue Luna and Theo from the cottage.',
+            start_index: 42, end_index: 43, total_entries: 43, generation });
+    await c.loadStory();
+    assert.equal(c.allChatEntries.filter(entry => entry.role === 'user').length, 1);
+    assert.match(c.storyDisplay.textContent, /Continue Luna and Theo from the cottage/);
+    assert.equal(c.sendBtn.attributes['aria-label'], 'Stop generation');
+    c.resetStoryView();
 });
 
 test('reload attaches to the partial draft and later events without a generation POST', async () => {

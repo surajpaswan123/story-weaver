@@ -85,7 +85,7 @@ class TurnProgress:
                         kind = json.loads(event[6:]).get('type')
                     except (ValueError, AttributeError):
                         kind = None
-                    if kind in {'editing', 'finalizing', 'retrying'}:
+                    if kind in {'thinking', 'editing', 'finalizing', 'retrying'}:
                         self.update(key, token, state=kind)
                     elif kind in {'done', 'error', 'stopped'}:
                         outcome = {'done': 'completed', 'error': 'failed', 'stopped': 'stopped'}[kind]
@@ -218,6 +218,15 @@ def read_chat_page(path, last=40, before=None, after=None, revision=None, max_ch
                     page.append((total, entry, size))
                     chars += size
                     while len(page) > last or (len(page) > 1 and chars > max_chars):
+                        # The latest user instruction must stay alongside its AI
+                        # reply even when that reply's saved reasoning alone exceeds
+                        # the nominal page budget. Both entries were already read;
+                        # dropping the instruction makes the turn look orphaned.
+                        # This can exceed max_chars for ONE pair, not the full log.
+                        if (last >= 2 and len(page) == 2
+                                and page[0][1].get("role") == "user"
+                                and page[1][1].get("role") == "ai"):
+                            break
                         chars -= page.popleft()[2]
                 elif not forward_full:
                     if page and (len(page) >= last or chars + size > max_chars):
