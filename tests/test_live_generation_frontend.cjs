@@ -38,6 +38,24 @@ test('provider retry replaces a thought-only attempt instead of mixing two attem
     assert.equal(draft.thoughts, 'Second attempt.');
 });
 
+test('recovered display follows thinking, prose, rules editing, and finalization', () => {
+    const draft = new Draft();
+    draft.apply({ type: 'thinking' });
+    assert.equal(draft.stage, 'thinking');
+    draft.apply({ type: 'chunk', text: '<thought>Planning...' });
+    assert.equal(draft.stage, 'thinking');
+    draft.apply({ type: 'chunk', text: '</thought>Chapter prose.' });
+    assert.equal(draft.stage, 'generating');
+    draft.apply({ type: 'editing' });
+    assert.equal(draft.stage, 'editing');
+    draft.apply({ type: 'chunk', text: 'Edited prose.' });
+    assert.equal(draft.stage, 'editing');
+    draft.apply({ type: 'replace', text: 'Committed prose.' });
+    assert.equal(draft.stage, 'finalizing');
+    draft.apply({ type: 'done' });
+    assert.equal(draft.stage, 'finalizing'); // Wait for final server sync.
+});
+
 test('stream reader assembles split SSE frames and UTF-8 without losing cursor IDs', async () => {
     const events = [
         'id: 100\ndata: {"type":"chunk","text":"नदी 🌙"}\n\n',
