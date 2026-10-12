@@ -26,8 +26,13 @@
         append(text) { if (this.inThought) this.thoughts += text; else this.text += text; }
         apply(event) {
             if (event.type === 'chunk') {
+                const editing = this.editingPending || this.stage === 'editing';
                 if (this.editingPending) { this.text = this.buffer = ''; this.inThought = false; this.editingPending = false; }
                 this.chunk(event.text);
+                // Thought tokens are streamed as ordinary chunks. Track their
+                // actual phase so recovered streams do not claim "generating"
+                // while the provider is still reasoning.
+                if (!editing) this.stage = this.inThought || (this.thoughts && !this.text.trim()) ? 'thinking' : 'generating';
             }
             else if (event.type === 'info') this.model = event.model || '';
             else if (event.type === 'reset') { this.text = this.thoughts = this.buffer = ''; this.inThought = this.editingPending = false; this.stage = 'generating'; }
@@ -37,6 +42,7 @@
             } else if (event.type === 'replace') {
                 this.text = event.text || ''; this.buffer = ''; this.inThought = this.editingPending = false;
                 if (typeof event.model_thoughts === 'string') this.thoughts = event.model_thoughts.replace(/<\/?(?:thought|think|thoughts|thaughts)\b[^>]*>/gi, '');
+                this.stage = 'finalizing';
             } else if (['thinking', 'retrying', 'finalizing', 'error', 'stopped'].includes(event.type)) this.stage = event.type;
             else if (event.type === 'done') this.stage = 'finalizing';
         }
@@ -89,9 +95,14 @@
             toggle.setAttribute('aria-expanded', String(!thoughts.hidden));
             toggle.textContent = thoughts.hidden ? 'Show Model thoughts' : 'Hide Model thoughts';
         });
+        const phaseStatus = document.createElement('div');
+        phaseStatus.className = 'px-6 pb-3 text-sm text-stone-500 italic';
+        phaseStatus.setAttribute('role', 'status');
+        phaseStatus.setAttribute('aria-live', 'polite');
+        phaseStatus.textContent = 'Generating...';
         const body = document.createElement('div');
         body.className = 'story-font text-lg leading-relaxed whitespace-pre-wrap px-6 pb-3';
-        for (const node of [heading, toggle, thoughts, body]) container.appendChild(node);
+        for (const node of [heading, toggle, thoughts, phaseStatus, body]) container.appendChild(node);
         display.appendChild(container);
         let timer = null;
         function paint() {
@@ -101,6 +112,14 @@
             body.textContent = draft.text.replace(/\*/g, '').split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').trim()).filter(Boolean).join('\n');
             thoughts.textContent = draft.thoughts;
             toggle.hidden = !draft.thoughts.trim();
+            const phaseLabels = {
+                generating: 'Generating...', thinking: 'Thinking...',
+                retrying: 'Retrying the AI provider...', editing: 'Applying rules and style...',
+                finalizing: 'Saving story and updating memory...',
+                error: 'Generation interrupted', stopped: 'Generation stopped'
+            };
+            const nextPhase = phaseLabels[draft.stage] || 'Generating...';
+            if (phaseStatus.textContent !== nextPhase) phaseStatus.textContent = nextPhase;
             if (follow) display.scrollTop = display.scrollHeight;
         }
         return {
