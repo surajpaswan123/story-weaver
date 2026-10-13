@@ -523,7 +523,7 @@ def end_story_turn(story_id: str, uid: str, token: str) -> None:
 # Each cancellation flag belongs to a specific user/story/run token.
 # The worker cleans up and releases the reservation after final sync; the
 # Stop endpoint never mutates an active worker's story directory.
-_stop_requests: set[tuple[str, str, str]] = set()
+_stop_requests: dict[tuple[str, str, str], bool] = {}
 _stop_requests_guard = threading.Lock()
 
 
@@ -541,17 +541,17 @@ def _run_id_for_token(token: str) -> str:
 
 def request_stop(story_id: str, uid: str, token: str) -> None:
     with _stop_requests_guard:
-        _stop_requests.add((*_stop_key(story_id, uid), token))
+        _stop_requests[(*_stop_key(story_id, uid), token)] = True
 
 
 def clear_stop_request(story_id: str, uid: str, token: str) -> None:
     with _stop_requests_guard:
-        _stop_requests.discard((*_stop_key(story_id, uid), token))
+        _stop_requests.pop((*_stop_key(story_id, uid), token), None)
 
 
 def stop_requested(story_id: str, uid: str, token: str) -> bool:
     with _stop_requests_guard:
-        return (*_stop_key(story_id, uid), token) in _stop_requests
+        return bool(_stop_requests.get((*_stop_key(story_id, uid), token)))
 
 
 def story_turn_is_active(story_id: str, uid: str = "default_user") -> bool:
