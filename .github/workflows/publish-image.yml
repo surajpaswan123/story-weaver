@@ -12,11 +12,13 @@ on:
       - openai_compat.py
       - regeneration.py
       - runtime_support.py
+      - http_access_filter.py
       - live_stream.py
       - static/index.html
       - static/file-editor.js
       - static/live-generation.js
       - tests/test_live_generation_frontend.cjs
+      - tests/test_http_access_filter.py
       - tests/test_file_editor.cjs
       - tests/test_chat_log_frontend.cjs
       - tests/test_story_loading_frontend.cjs
