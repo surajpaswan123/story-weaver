@@ -1649,8 +1649,16 @@ def _retry_transient(fn, label="API", max_retries=MAX_TRANSIENT_RETRIES, delays=
     """
     last_err = None
     for attempt in range(max_retries + 1):
+        if attempt:
+            # The previous error log only announced the *scheduled* retry.
+            # Log when the next attempt actually enters its provider call, too.
+            print(f"  [{label}] retry {attempt}/{max_retries} starting now "
+                  f"(provider request in progress)...", flush=True)
         try:
-            return fn()
+            result = fn()
+            if attempt:
+                print(f"  [{label}] retry {attempt}/{max_retries} succeeded", flush=True)
+            return result
         except Exception as e:
             last_err = e
             if attempt >= max_retries or not is_transient_error(e):
