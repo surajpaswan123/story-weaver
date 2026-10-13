@@ -8871,6 +8871,21 @@ async def ping(request: Request):
     )
 
 
+@app.api_route("/cron-labude", methods=["GET", "HEAD"], include_in_schema=False)
+async def cron_labude(request: Request):
+    """Tiny cron-job.org probe. The '504' is joke text, not an HTTP error.
+
+    This response is intentionally independent of generation/model status.
+    A down or unreachable process cannot answer any HTTP request.
+    """
+    return Response(
+        content="504 लबुडे" if request.method == "GET" else "",
+        status_code=200,
+        media_type="text/plain",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return Response(status_code=204)
