@@ -40,6 +40,21 @@ def test_stop_requires_matching_run_and_keeps_story_locked(status_app, monkeypat
     assert not main.stop_requested(story, uid, token)
 
 
+def test_duplicate_generate_rejected_without_restoring_active_files(status_app, monkeypatch):
+    client, user = status_app
+    story, uid = 'protected-story', user['uid']
+    token = main.begin_story_turn(story, uid)
+    try:
+        monkeypatch.setattr(main, 'restore_story_directory_from_firestore',
+                            lambda *args: pytest.fail('Never restore over an active worker'))
+        result = client.post('/generate', json={'story_id': story, 'user_input': 'Continue.'})
+        assert result.status_code == 409
+        assert 'already running' in result.json()['detail']
+        assert main.current_generation_status(story, uid)['active']
+    finally:
+        main.end_story_turn(story, uid, token)
+
+
 def test_stale_stop_cannot_cancel_next_generation(status_app):
     client, user = status_app
     story, uid = 'successor', user['uid']
