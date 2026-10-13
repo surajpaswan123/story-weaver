@@ -7,6 +7,7 @@
 !openai_compat.py
 !regeneration.py
 !runtime_support.py
+!http_access_filter.py
 !live_stream.py
 !turn_checkpoints.py
 !static/
