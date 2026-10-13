@@ -1,6 +1,7 @@
 import sys
 import time
 from collections import deque
+from http_access_filter import is_routine_access_log
 
 # Server Log Buffer & Interceptor
 SERVER_LOGS = deque(maxlen=500)
@@ -10,17 +11,26 @@ class LogInterceptor:
         self.original_stream = original_stream
 
     def write(self, message):
-        if message:
-            try:
-                self.original_stream.write(message)
-                self.original_stream.flush()
-            except Exception:
-                pass
-            timestamp = time.strftime("%H:%M:%S")
-            for line in message.splitlines():
-                cleaned = line.strip()
-                if cleaned:
-                    SERVER_LOGS.append(f"[{timestamp}] {cleaned[:4096]}" + (" [truncated]" if len(cleaned) > 4096 else ""))
+        if not message:
+            return
+        # Uvicorn writes entire access records to stdout/stderr. Keep all
+        # application messages verbatim, but drop successful HTTP chatter
+        # before it reaches either the deployment logs or our 500-line viewer.
+        # Never drop 4xx/5xx requests: those can indicate real failures.
+        visible = "".join(line for line in message.splitlines(keepends=True)
+                          if not is_routine_access_log(line))
+        if not visible:
+            return
+        try:
+            self.original_stream.write(visible)
+            self.original_stream.flush()
+        except Exception:
+            pass
+        timestamp = time.strftime("%H:%M:%S")
+        for line in visible.splitlines():
+            cleaned = line.strip()
+            if cleaned:
+                SERVER_LOGS.append(f"[{timestamp}] {cleaned[:4096]}" + (" [truncated]" if len(cleaned) > 4096 else ""))
 
     def flush(self):
         try:
