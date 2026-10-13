@@ -186,7 +186,7 @@ test('undo finishing after a story switch cannot regenerate into the new story',
 test('late streaming events and cleanup cannot touch the new story or its active generation', async () => {
     const { context: c } = setup(), chunk = deferred();
     let cancelled = 0;
-    c.authFetch = async () => ({ ok: true, body: { getReader: () => ({ read: () => chunk.promise, cancel: async () => cancelled++ }) } });
+    c.authFetch = async () => ({ ok: true, headers: { get: () => 'old-run' }, body: { getReader: () => ({ read: () => chunk.promise, cancel: async () => cancelled++ }) } });
     const old = c.submitStory('A prompt', true);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(c.isGenerating, true);
