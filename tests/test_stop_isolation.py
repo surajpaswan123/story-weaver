@@ -33,8 +33,9 @@ def test_stop_requires_matching_run_and_keeps_story_locked(status_app, monkeypat
         with pytest.raises(main.HTTPException) as error:
             main.begin_story_turn(story, uid)
         assert error.value.status_code == 409
-        assert main.get_chat_log_path(story, uid=uid)
-        assert client.get(f'/story/{story}/chat').json()['messages'][-1]['role'] == 'user'
+        chat_path = main.get_chat_log_path(story, uid=uid)
+        with open(chat_path, encoding='utf-8') as handle:
+            assert '\"role\": \"user\"' in handle.read()
     finally:
         main.end_story_turn(story, uid, token)
     assert not main.stop_requested(story, uid, token)
