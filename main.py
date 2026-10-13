@@ -520,10 +520,9 @@ def end_story_turn(story_id: str, uid: str, token: str) -> None:
 
 
 # --- Generation stop/cancel support -------------------------------------------------
-# A per-(user,story) flag the streaming worker polls so the user can abort a
-# long-running generation from the UI. Setting it makes the worker tear down
-# without committing the partial turn; the /stop endpoint also removes the
-# dangling "You said:" entry and releases the turn reservation.
+# Each cancellation flag belongs to a specific user/story/run token.
+# The worker cleans up and releases the reservation after final sync; the
+# Stop endpoint never mutates an active worker's story directory.
 _stop_requests: set[tuple[str, str, str]] = set()
 _stop_requests_guard = threading.Lock()
 
@@ -8294,6 +8293,10 @@ async def stop_generation(story_id: str, request: Request,
 async def generate_story(input_data: StoryInput, background_tasks: BackgroundTasks, user_info: dict = Depends(require_authenticated_user)):
     print(f"DEBUG: Received generation request for {input_data.story_id}", flush=True)
     user_id = user_info["uid"]
+    # Reject duplicate submissions BEFORE restoring files. Restoring while a
+    # worker is writing could replace its local story with an older cloud copy.
+    if story_turn_is_active(input_data.story_id, user_id):
+        raise HTTPException(status_code=409, detail="Another generation is already running for this story")
     restore_story_directory_from_firestore(user_id, input_data.story_id)
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
