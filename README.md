@@ -1342,6 +1342,13 @@ Use GET without an API key. A running instance responds with HTTP 200, plain tex
 `OK`, and a two-byte body. HEAD is also supported without a response body. The
 endpoint does not download stories, authenticate a user, or contact providers.
 
+If you want the playful 504 लबुडे response without an actual server error,
+point an existing cron-job.org job at `https://YOUR-SERVICE/cron-labude`
+instead. That endpoint responds with HTTP **200** and the tiny UTF-8 plain
+text `504 लबुडे` on every GET while the application is reachable.
+The text does not indicate an actual 504 failure. Real outages, failed network
+requests, and proxy errors still need to be detected by the scheduler.
+
 This avoids downloading the entire HTML page for every scheduled request. A
 ten-minute interval is an example configuration, not a guarantee of uninterrupted
 hosting. Host cold starts, network failures, scheduler timeouts, usage limits,
