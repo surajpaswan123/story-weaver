@@ -93,7 +93,7 @@ class LiveStreams:
                           if r.finished_at is not None)
         for index, (when, key) in enumerate(finished):
             if time.monotonic() - when > self.finished_ttl or index < len(finished) - self.max_finished:
-                self.records.pop((key, run_id), None)
+                self.records.pop(key, None)
 
     def get(self, key, run_id):
         with self.lock:
@@ -138,6 +138,6 @@ class LiveStreams:
             journal.failed = True
             journal.finish()
             with self.lock:
-                self.records.pop(key, None)
+                self.records.pop((key, run_id), None)
             raise
         return journal
