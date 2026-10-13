@@ -153,7 +153,9 @@ def test_cursor_replays_exact_unicode_and_old_run_never_follows_a_new_turn():
     assert value['text'] == 'Luna: नदी 🌙'
     assert journal.valid_cursor(cursor) and not journal.valid_cursor(cursor + 1)
     newer = streams.start(('u', 's'), 'new', 1, iter([event('chunk', text='Next turn')]))
-    assert streams.get(('u', 's'), 'old') is None
+    # A newer run must not steal or erase the previous run's replay.
+    assert streams.get(('u', 's'), 'old') is journal
+    assert streams.get(('u', 's'), 'new') is newer
     assert list(journal.read(cursor, detached)) == []
     assert payload(next(newer.read(0, detached)))[1]['text'] == 'Next turn'
 

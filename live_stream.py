@@ -81,6 +81,8 @@ class ReplayResponse(StoryStreamingResponse):
 
 class LiveStreams:
     def __init__(self, max_finished=16, finished_ttl=600):
+        # Multiple completed or draining runs may coexist without replacing each
+        # other's replay journals. Every lookup requires the exact run ID.
         self.records = {}
         self.lock = threading.RLock()
         self.max_finished = max_finished
@@ -96,14 +98,14 @@ class LiveStreams:
     def get(self, key, run_id):
         with self.lock:
             self._prune()
-            journal = self.records.get(key)
-            return journal if journal and not journal.failed and journal.run_id == run_id else None
+            journal = self.records.get((key, run_id))
+            return journal if journal and not journal.failed else None
 
     def start(self, key, run_id, turn_index, source):
         journal = StreamJournal(run_id, turn_index)
         with self.lock:
             self._prune()
-            self.records[key] = journal
+            self.records[(key, run_id)] = journal
 
         def pump():
             try:
@@ -136,6 +138,6 @@ class LiveStreams:
             journal.failed = True
             journal.finish()
             with self.lock:
-                self.records.pop(key, None)
+                self.records.pop((key, run_id), None)
             raise
         return journal

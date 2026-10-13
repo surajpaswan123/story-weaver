@@ -70,7 +70,7 @@ function setup() {
     });
     elements.get('provider-select').value = 'openai';
     for (const name of ['beginStoryRead', 'isCurrentStoryRead', 'resetStoryView', 'syncGenerationActionButton', 'setGenerating', 'updateSendButtonState', 'updateHistoryControls',
-        'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'stopGeneration', 'regenerateStory',
+        'renderBatch', 'renderChatEntryToNode', 'onStoryScroll', 'loadStory', 'switchStory', 'loadSummary', 'saveSummary', 'submitStory', 'requestExactGenerationStop', 'stopGeneration', 'regenerateStory',
         'cancelLiveGeneration', 'connectLiveGeneration', 'resetGenerationMonitor', 'generationRecoveryControls', 'showGenerationRecovery', 'scheduleGenerationCheck', 'applyGenerationStatus', 'checkGenerationStatus', 'stopRecoveredGeneration', 'rememberSelectedStory', 'restoreSelectedStory']) {
         vm.runInContext(source(name), context);
     }
@@ -186,7 +186,7 @@ test('undo finishing after a story switch cannot regenerate into the new story',
 test('late streaming events and cleanup cannot touch the new story or its active generation', async () => {
     const { context: c } = setup(), chunk = deferred();
     let cancelled = 0;
-    c.authFetch = async () => ({ ok: true, body: { getReader: () => ({ read: () => chunk.promise, cancel: async () => cancelled++ }) } });
+    c.authFetch = async () => ({ ok: true, headers: { get: () => 'old-run' }, body: { getReader: () => ({ read: () => chunk.promise, cancel: async () => cancelled++ }) } });
     const old = c.submitStory('A prompt', true);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(c.isGenerating, true);
@@ -321,6 +321,7 @@ test('a recovered turn can be stopped, then its saved history is reloaded', asyn
     await c.stopRecoveredGeneration();
     assert.equal(app.calls[0].url, '/story/A/stop');
     assert.equal(app.calls[0].options.method, 'POST');
+    assert.deepEqual(JSON.parse(app.calls[0].options.body), { run_id: 'run-1' });
     assert.match(c.storyDisplay.textContent, /Earlier saved turn/);
     assert.equal(c.sendBtn.attributes['aria-label'], 'Send to AI');
     assert.equal(c.input.disabled, false);

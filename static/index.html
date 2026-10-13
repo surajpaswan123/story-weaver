@@ -1288,7 +1288,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 if (observedGeneration.execution === 'browser') {
                     message = 'Waiting for a turn started in another browser connection. This turn depends on that browser staying open. If it closed, stop this turn before retrying.';
                 } else {
-                    const phases = { starting: 'Starting generation', generating: 'The story turn is still generating on the server', retrying: 'The provider is busy; the server is retrying', thinking: 'The model is thinking', editing: 'Applying your rules and style', finalizing: 'Saving the story and updating its memory' };
+                    const phases = { starting: 'Starting generation', stopping: 'Cancelling the requested story turn', generating: 'The story turn is still generating on the server', retrying: 'The provider is busy; the server is retrying', thinking: 'The model is thinking', editing: 'Applying your rules and style', finalizing: 'Saving the story and updating its memory' };
                     message = (phases[observedGeneration.state] || 'The story turn is still running on the server') + (observedGeneration.stream_available ? '…' : '. The saved result will load here when it finishes.');
                 }
                 scheduleGenerationCheck();
@@ -1301,7 +1301,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             showGenerationRecovery(message, observedGeneration.active);
             if (observedGeneration.active) {
                 const labels = {
-                    starting: 'Starting generation…', generating: 'Generating story text…',
+                    starting: 'Starting generation…', stopping: 'Stopping generation…', generating: 'Generating story text…',
                     thinking: 'The model is thinking…', retrying: 'The provider is busy; retrying…',
                     editing: 'Applying your rules and style…',
                     finalizing: 'Saving the story and updating its memory…'
@@ -1360,7 +1360,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             announceStatus('Stopping generation…');
             updateSendButtonState();
             try {
-                await requireJsonResponse(await authFetch(`/story/${encodeURIComponent(request.storyId)}/stop`, { method: 'POST' }), 'Could not stop generation');
+                await requestExactGenerationStop(request.storyId, observedGeneration.run_id);
                 if (!isCurrentStoryRead(request)) return;
                 await checkGenerationStatus();
             } catch (error) {
@@ -1411,6 +1411,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             if (activeReader) Promise.resolve(activeReader.cancel()).catch(() => {});
             activeReader = null;
             activeStoryId = null;
+            activeRunId = null;
+            stopPending = false;
             setGenerating(false);
             input.value = '';
             input.disabled = false;
@@ -1468,6 +1470,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         let isGenerating = false;
         let activeReader = null;   // the current SSE reader (cancel to abort)
         let activeStoryId = null;  // story being generated, for the /stop call
+        let activeRunId = null;  // immutable server run ID returned by /generate
+        let stopPending = false;  // queues Stop until the server reveals its run ID
         const SEND_SVG = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>';
         const STOP_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>';
 
@@ -1489,26 +1493,38 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             updateHistoryControls();
         }
 
+        async function requestExactGenerationStop(storyId, runId) {
+            const response = await authFetch(`/story/${encodeURIComponent(storyId)}/stop`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ run_id: runId })
+            });
+            await requireJsonResponse(response, 'Could not stop generation');
+        }
+
         async function stopGeneration() {
             if (!isGenerating) {
                 if (observedGeneration?.active) await stopRecoveredGeneration();
                 return;
             }
-            const request = beginStoryRead('stop');
-            const reader = activeReader;
+            if (stopPending) return;
+            stopPending = true;
+            updateSendButtonState();
             announceStatus('Stopping generation...');
-            // Tell the server to cancel + clean up the partial turn.
-            const sid = activeStoryId || currentStoryId;
+            // A Stop clicked before the response headers arrive is queued until
+            // we know the exact run ID; it must never cancel a different turn.
+            if (!activeRunId) return;
             try {
-                await authFetch(`/story/${encodeURIComponent(sid)}/stop`, { method: 'POST' });
-            } catch (e) {
-                console.warn('Stop request failed:', e);
+                await requestExactGenerationStop(activeStoryId || currentStoryId, activeRunId);
+            } catch (error) {
+                stopPending = false;
+                updateSendButtonState();
+                announceStatus('Could not stop generation: ' + error.message);
             }
-            // Abort the local read loop; the 'finally' path re-enables the button.
-            if (isCurrentStoryRead(request) && reader) {
-                try { await reader.cancel(); } catch (e) {}
-            }
+            // Keep the SSE reader attached until the owning worker confirms
+            // 'stopped'; disconnecting the reader doesn't stop that worker.
         }
+
 
         // ===== SCREEN READER HELPERS =====
         function announceToScreenReader(text) {
@@ -2767,8 +2783,12 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             input.value = '';
             input.disabled = true;
             sendBtn.disabled = false;
-            if (!generationIsCurrent()) return;
+            // Recheck after settings awaits; two quick submits must not both
+            // pass the initial guard and launch concurrent server requests.
+            if (!generationIsCurrent() || isGenerating || observedGeneration?.active) return;
             activeStoryId = generationStoryId;
+            activeRunId = null;
+            stopPending = false;
             setGenerating(true);
             announceStatus('Generating response...');
 
@@ -2939,6 +2959,16 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 }
 
                 if (!generationIsCurrent()) { await response.body?.cancel(); return; }
+                activeRunId = response.headers.get('X-Story-Run-Id');
+                if (stopPending && activeRunId) {
+                    try {
+                        await requestExactGenerationStop(generationStoryId, activeRunId);
+                    } catch (error) {
+                        stopPending = false;
+                        updateSendButtonState();
+                        announceStatus('Could not stop generation: ' + error.message);
+                    }
+                }
                 const reader = response.body.getReader();
                 activeReader = reader;
                 const decoder = new TextDecoder();
@@ -3136,6 +3166,8 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 if (!completed) observedGeneration = { active: true, state: 'starting' };
                 activeReader = null;
                 activeStoryId = null;
+                activeRunId = null;
+                stopPending = false;
                 setGenerating(false);
                 input.disabled = !completed;
                 updateSendButtonState();
@@ -4354,8 +4386,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
         input.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if (isGenerating || observedGeneration?.active) { stopGeneration(); }
-                else { submitStory(); }
+                // Enter is only Send. It must never trigger Stop while the
+                // disabled input is being used by a keyboard or screen reader.
+                if (!isGenerating && !observedGeneration?.active) submitStory();
             }
         });
 
@@ -4364,7 +4397,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             // During generation the button becomes Stop and must stay enabled
             // regardless of the (cleared) text box.
             syncGenerationActionButton();
-            sendBtn.disabled = recoveredStopBusy || (!(isGenerating || observedGeneration?.active) &&
+            sendBtn.disabled = (typeof stopPending !== 'undefined' && stopPending) || recoveredStopBusy || (!(isGenerating || observedGeneration?.active) &&
                 Boolean(historyLoading || generationStatusRequest || input.disabled || input.value.trim().length === 0));
         }
         input.addEventListener('input', updateSendButtonState);
