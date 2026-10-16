@@ -731,10 +731,16 @@ maximum can terminate output; the Messages/Responses adapters surface known
 incomplete outcomes instead of treating all truncated responses as normal
 success. Some other paths also trim an unfinished final sentence during cleanup.
 
-Responses reasoning-effort options accepted by Settings are default/empty,
-`none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Acceptance by Settings does
-not establish support by the chosen provider. This field is not an Anthropic
-thinking-budget control and does not expose reasoning that the provider withholds.
+Reasoning-effort options accepted by Settings are default/empty, `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. OpenAI Responses sends
+the selected value as `reasoning.effort`, while OpenAI Chat Completions sends
+the standard top-level `reasoning_effort` field. Anthropic Messages maps `none` to
+disabled thinking and maps `low`, `medium`, `high`, `xhigh`, and `max` to the
+native adaptive-thinking plus `output_config.effort` fields. Anthropic does not
+support the OpenAI-only `minimal` level; selecting it for an Anthropic Messages
+connection returns a clear provider-format error. Acceptance by Settings does
+not establish support by the chosen provider, and the provider may still reject
+an effort that its selected model does not support.
 
 ### Model discovery and missing models
 

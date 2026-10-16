@@ -51,7 +51,7 @@ def test_one_saved_connection_switches_protocol_per_model(suffix, saved_format, 
     assert "temperature" not in seen[0][1]
     assert seen[1][1]["messages"] == MESSAGES
     assert seen[1][1]["temperature"] == 1
-    assert "reasoning" not in seen[1][1]
+    assert seen[1][1]["reasoning_effort"] == "xhigh"
 
 
 @pytest.mark.parametrize("url", ["https://example.com/zen/v1", "https://opencode.ai.evil.example/zen/v1", "https://opencode.ai/other/v1"])

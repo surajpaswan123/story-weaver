@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from openai import OpenAI
 
 import main
-from openai_compat import OpenCodeClient, ResponsesClient, resolve_openai_endpoint
+from openai_compat import OpenCodeClient, ReasoningChatClient, ResponsesClient, resolve_openai_endpoint
 
 
 MODEL = "muse-spark-1.3-contributor-free"
@@ -89,6 +89,34 @@ def test_responses_request_and_nonstream_output(transport_client):
     }
 
 
+def test_responses_max_reasoning_effort_is_forwarded(transport_client):
+    client, requests, _ = transport_client(effort="max")
+    client.chat.completions.create(model=MODEL, messages=MESSAGES)
+    body = json.loads(requests[0].content)
+    assert body["reasoning"] == {"effort": "max"}
+
+
+def test_chat_completions_max_reasoning_effort_is_forwarded():
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hello"}}]})
+
+    sdk = OpenAI(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+        max_retries=0,
+    )
+    try:
+        client = ReasoningChatClient(sdk, "max")
+        client.chat.completions.create(model="gpt-5", messages=MESSAGES)
+        assert json.loads(requests[0].content)["reasoning_effort"] == "max"
+    finally:
+        sdk.close()
+
+
 def test_provider_default_omits_reasoning(transport_client):
     client, requests, _ = transport_client(effort="")
     client.chat.completions.create(model=MODEL, messages=MESSAGES)
@@ -161,6 +189,8 @@ def test_settings_api_round_trip_and_client_cache(configured_user):
             assert main.get_effective_ai_clients(configured_user)["openai_client"] is first
             assert app.post("/api/user/settings", json={"openai_api_format": "invalid"}).status_code == 422
             assert app.post("/api/user/settings", json={"openai_reasoning_effort": "invalid"}).status_code == 422
+            assert app.post("/api/user/settings", json={"openai_reasoning_effort": "max"}).status_code == 200
+            assert app.get("/api/user/settings").json()["masked_keys"]["openai_reasoning_effort"] == "max"
             assert app.post("/api/user/settings", json={"openai_reasoning_effort": ""}).status_code == 200
             second = main.get_effective_ai_clients(configured_user)["openai_client"]
             assert second is not first

@@ -101,6 +101,27 @@ def test_messages_wire_format_preserves_system_and_history(messages_sdk):
     assert body["max_tokens"] == 131072
     assert body["stop_sequences"] == ["THE END"]
     assert not {"input", "reasoning", "reasoning_effort", "temperature", "top_p", "store"} & body.keys()
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "xhigh"}
+
+
+def test_messages_max_reasoning_effort_uses_native_adaptive_thinking(messages_sdk):
+    sdk, requests, _ = messages_sdk()
+    MessagesClient(sdk, reasoning_effort="max").chat.completions.create(
+        model=MODEL, messages=MESSAGES
+    )
+    body = json.loads(requests[0].content)
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "max"}
+    assert "reasoning_effort" not in body
+
+
+def test_messages_minimal_reasoning_effort_is_rejected(messages_sdk):
+    sdk, _, _ = messages_sdk()
+    with pytest.raises(ValueError, match="does not support reasoning effort 'minimal'"):
+        MessagesClient(sdk, reasoning_effort="minimal").chat.completions.create(
+            model=MODEL, messages=MESSAGES
+        )
 
 
 def test_messages_stream_text_once_and_close(messages_sdk):
@@ -177,6 +198,7 @@ def test_all_hosted_pipelines_use_messages(pipeline, configured_user, monkeypatc
     monkeypatch.setattr(main, "Anthropic", lambda **kwargs: sdk)
     main.save_user_keys(configured_user["uid"], {
         "openai_api_key": "test-key", "openai_base_url": "https://example.com/gateway/v1/messages",
+        "openai_reasoning_effort": "max",
         **{field: f"openai::{MODEL}" for field in ("story_model", "background_model", "rules_model")},
     })
     if pipeline == "background":
@@ -190,7 +212,10 @@ def test_all_hosted_pipelines_use_messages(pipeline, configured_user, monkeypatc
     assert text == TEXT
     assert len(requests) == 1
     assert requests[0].url.path == "/gateway/v1/messages"
-    assert json.loads(requests[0].content)["max_tokens"] == 131072
+    body = json.loads(requests[0].content)
+    assert body["max_tokens"] == 131072
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "max"}
 
 
 @pytest.mark.parametrize("reason", ["end_turn", "max_tokens", "interrupted"])

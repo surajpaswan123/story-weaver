@@ -4501,7 +4501,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             </div>
 
             <div>
-                <label for="input-openai-reasoning-effort" class="block font-medium text-stone-300 mb-1">Responses Reasoning Effort</label>
+                <label for="input-openai-reasoning-effort" class="block font-medium text-stone-300 mb-1">Reasoning Effort</label>
                 <select id="input-openai-reasoning-effort" aria-describedby="openai-reasoning-help" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 text-xs">
                     <option value="">Provider default</option>
                     <option value="none">None</option>
@@ -4510,8 +4510,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                     <option value="medium">Medium</option>
                     <option value="high">High</option>
                     <option value="xhigh">Extra high (xhigh)</option>
+                    <option value="max">Max</option>
                 </select>
-                <p id="openai-reasoning-help" class="mt-1 text-xs text-stone-300">Applies to Responses story generation, background analysis, and rule refinement. Available efforts depend on the provider and model.</p>
+                <p id="openai-reasoning-help" class="mt-1 text-xs text-stone-300">Applies to OpenAI Responses and Anthropic Messages requests. Anthropic uses its native adaptive-thinking output effort when supported; available efforts depend on the provider and model.</p>
             </div>
 
             <div>

@@ -89,7 +89,8 @@ from runtime_support import (HistoryChanged, read_chat_page, relay_stream, heart
 from live_stream import LiveStreams
 from dotenv import load_dotenv
 from openai_compat import (API_FORMATS, REASONING_EFFORTS, OpenCodeClient,
-                           MessagesClient, ResponsesClient, is_opencode_zen, resolve_openai_endpoint)
+                           MessagesClient, ReasoningChatClient, ResponsesClient,
+                           is_opencode_zen, resolve_openai_endpoint)
 from turn_checkpoints import TurnCheckpoints, CheckpointError, JOURNAL as UNDO_JOURNAL
 from regeneration import (FeedbackUndoInput, RegenerationContext, extract_model_thoughts,
                           without_model_thoughts, with_regeneration_feedback)
@@ -790,7 +791,8 @@ def _clients_from_keys(user_keys: dict) -> dict:
         if c is None:
             if api_format == "messages" and not is_opencode_zen(base_url):
                 c = MessagesClient(Anthropic(base_url=base_url, api_key=key, auth_token="",
-                                             http_client=AnthropicHttpxClient(follow_redirects=False)), messages_output_limit)
+                                             http_client=AnthropicHttpxClient(follow_redirects=False)),
+                                   messages_output_limit, effort)
             else:
                 extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
                 c = OpenAI(base_url=base_url, api_key=key, **extra)
@@ -800,6 +802,8 @@ def _clients_from_keys(user_keys: dict) -> dict:
                     c = OpenCodeClient(c, effort, messages_sdk, messages_output_limit)
                 elif api_format == "responses":
                     c = ResponsesClient(c, effort)
+                elif api_format == "chat_completions" and effort:
+                    c = ReasoningChatClient(c, effort)
             cache[ck] = c
         return c
 

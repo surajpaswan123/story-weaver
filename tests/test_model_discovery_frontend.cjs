@@ -98,6 +98,7 @@ test('Anthropic connection uses its readable name in story and pipeline selector
     assert.match(html, /<option value="messages">Anthropic Messages<\/option>/);
     assert.match(html, /label for="input-openai-max-output-tokens"/);
     assert.match(html, /id="input-openai-max-output-tokens"[^>]+aria-describedby="openai-output-help"/);
+    assert.match(html, /<option value="max">Max<\/option>/);
 });
 
 test('settings saves the custom Messages endpoint and optional output limit together', async () => {

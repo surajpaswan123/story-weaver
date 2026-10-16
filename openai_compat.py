@@ -7,7 +7,9 @@ from anthropic import Stream
 from anthropic.types import Message, RawMessageStreamEvent
 
 API_FORMATS = {"auto", "chat_completions", "responses", "messages"}
-REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh"}
+REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+ANTHROPIC_OUTPUT_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
 def is_opencode_zen(url):
@@ -177,6 +179,31 @@ class ResponsesClient:
         return getattr(self.client, name)
 
 
+class ReasoningChatCompletions:
+    """Add the standard OpenAI reasoning_effort field to Chat Completions."""
+
+    def __init__(self, client, reasoning_effort=""):
+        self.client = client
+        self.reasoning_effort = reasoning_effort
+
+    def create(self, *, model, messages, stream=False, **kwargs):
+        effort = kwargs.pop("reasoning_effort", None) or self.reasoning_effort
+        if effort:
+            kwargs["reasoning_effort"] = effort
+        return self.client.chat.completions.create(model=model, messages=messages, stream=stream, **kwargs)
+
+
+class ReasoningChatClient:
+    """Keep the OpenAI client surface while forwarding the saved effort."""
+
+    def __init__(self, client, reasoning_effort=""):
+        self.client = client
+        self.chat = SimpleNamespace(completions=ReasoningChatCompletions(client, reasoning_effort))
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+
 def _messages_content(content):
     """Convert the text/image content used by app pipelines without dropping data."""
     if isinstance(content, str):
@@ -272,13 +299,14 @@ class MessagesTextStream:
 
 
 class MessagesCompletions:
-    def __init__(self, client, max_output_tokens=131072):
+    def __init__(self, client, max_output_tokens=131072, reasoning_effort=""):
         # anthropic treats an empty auth_token as present and emits the invalid
         # header `Authorization: Bearer `. Normalize it before any request.
         if getattr(client, "auth_token", None) == "":
             client.auth_token = None
         self.client = client
         self.max_output_tokens = max_output_tokens
+        self.reasoning_effort = reasoning_effort
 
     def create(self, *, model, messages, stream=False, **kwargs):
         system, conversation = [], []
@@ -299,7 +327,8 @@ class MessagesCompletions:
                 raise ValueError(f"Anthropic Messages does not support this message role: {role}")
         # These are defaults from the OpenAI-facing app interface. They are not
         # portable across Anthropic-compatible models, especially reasoning ones.
-        for key in ("temperature", "top_p", "stream_options", "reasoning_effort"):
+        effort = kwargs.pop("reasoning_effort", None) or self.reasoning_effort
+        for key in ("temperature", "top_p", "stream_options"):
             kwargs.pop(key, None)
         limit = kwargs.pop("max_completion_tokens", None)
         legacy_limit = kwargs.pop("max_tokens", None)
@@ -309,6 +338,20 @@ class MessagesCompletions:
         stop = kwargs.pop("stop", None)
         if stop:
             kwargs["stop_sequences"] = [stop] if isinstance(stop, str) else stop
+        if effort:
+            if effort == "none":
+                kwargs["thinking"] = {"type": "disabled"}
+            elif effort in ANTHROPIC_OUTPUT_EFFORTS:
+                # Current Anthropic Messages supports adaptive thinking with a
+                # provider-native output effort. This preserves the caller's
+                # requested level instead of silently dropping reasoning_effort.
+                kwargs["thinking"] = {"type": "adaptive"}
+                kwargs["output_config"] = {"effort": effort}
+            else:
+                raise ValueError(
+                    f"Anthropic Messages does not support reasoning effort '{effort}'. "
+                    "Use none, low, medium, high, xhigh, or max."
+                )
         body = dict(model=model, messages=conversation, max_tokens=limit, stream=stream, **kwargs)
         if system:
             body["system"] = system
@@ -329,9 +372,9 @@ class MessagesCompletions:
 
 
 class MessagesClient:
-    def __init__(self, client, max_output_tokens=131072):
+    def __init__(self, client, max_output_tokens=131072, reasoning_effort=""):
         self.client = client
-        self.chat = SimpleNamespace(completions=MessagesCompletions(client, max_output_tokens))
+        self.chat = SimpleNamespace(completions=MessagesCompletions(client, max_output_tokens, reasoning_effort))
 
     def __getattr__(self, name):
         return getattr(self.client, name)
@@ -344,7 +387,8 @@ class OpenCodeCompletions:
         self.client = client
         self.reasoning_effort = reasoning_effort
         self.responses = ResponsesCompletions(client, reasoning_effort)
-        self.messages = MessagesCompletions(messages_client, max_output_tokens) if messages_client else None
+        self.messages = (MessagesCompletions(messages_client, max_output_tokens, reasoning_effort)
+                         if messages_client else None)
 
     def create(self, *, model, messages, stream=False, **kwargs):
         protocol = opencode_model_format(model)
@@ -356,6 +400,8 @@ class OpenCodeCompletions:
             endpoint = "/messages" if protocol == "messages" else "the Google Generative AI API"
             raise ValueError(f"OpenCode model {model} requires {endpoint}. "
                              "Select a supported endpoint for this model.")
+        if self.reasoning_effort and "reasoning_effort" not in kwargs:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         return self.client.chat.completions.create(model=model, messages=messages, stream=stream, **kwargs)
 
 
