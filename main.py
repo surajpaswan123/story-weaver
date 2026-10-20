@@ -795,7 +795,7 @@ def _clients_from_keys(user_keys: dict) -> dict:
                                    messages_output_limit, effort)
             else:
                 extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
-                c = OpenAI(base_url=base_url, api_key=key, **extra)
+                c = OpenAI(base_url=base_url, api_key=key, timeout=3600, **extra)
                 if kind == "openai" and is_opencode_zen(base_url):
                     messages_sdk = Anthropic(base_url=base_url, api_key=key, auth_token="",
                                              http_client=AnthropicHttpxClient(follow_redirects=False))
