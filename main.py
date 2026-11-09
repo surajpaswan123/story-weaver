@@ -9105,7 +9105,7 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
     discovered_ids = set()
     for key, safe_base_url in pairs:
         try:
-            _, protocol = resolve_openai_endpoint(safe_base_url, api_format)
+            safe_base_url, protocol = resolve_openai_endpoint(safe_base_url, api_format)
         except ValueError as exc:
             error = str(exc)
             continue
