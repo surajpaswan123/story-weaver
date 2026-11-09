@@ -309,3 +309,9 @@ def test_failover_proxy_calls_chained_sdk_methods_on_the_next_client():
     client = main.FailoverClient([first, second], "OpenAI")
     assert client.chat.completions.create(model="test-model") == "success"
     assert calls == ["first", "second"]
+
+    top_level_calls = []
+    first.ping = lambda: (top_level_calls.append("first"), (_ for _ in ()).throw(RuntimeError("401 Unauthorized")))[1]
+    second.ping = lambda: (top_level_calls.append("second"), "top-level success")[1]
+    assert client.ping() == "top-level success"
+    assert top_level_calls == ["first", "second"]

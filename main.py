@@ -793,7 +793,22 @@ class FailoverClient:
         attr0 = getattr(clients[0], name, None)
         if not callable(attr0):
             return attr0
-        return _FailoverResource(clients, label, (name,), markers)
+
+        # Preserve the original proxy's support for top-level SDK methods too.
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for idx, client in enumerate(clients):
+                try:
+                    return getattr(client, name)(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if any(marker in msg for marker in markers):
+                        print(f"[{label}] key #{idx + 1} failed ({str(exc)[:80]}) - trying key #{idx + 2}")
+                        continue
+                    raise
+            raise last_exc
+        return wrapper
 
 
 def _clients_from_keys(user_keys: dict) -> dict:
