@@ -682,6 +682,29 @@ def _split_keys(raw) -> list:
     return out
 
 
+def _split_openai_base_urls(raw) -> list:
+    """Split one shared OpenAI base URL or an ordered, newline-separated URL list."""
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else re.split(r"[\r\n]+", str(raw))
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _openai_key_url_pairs(raw_keys, raw_urls=None) -> list:
+    """Pair API keys with endpoints; a single URL remains shared by all keys."""
+    keys = _split_keys(raw_keys)
+    if not keys:
+        return []
+    urls = _split_openai_base_urls(raw_urls) or ["https://api.openai.com/v1"]
+    if len(urls) == 1:
+        urls = urls * len(keys)
+    elif len(urls) != len(keys):
+        raise ValueError(
+            f"Provide either one shared OpenAI base URL or exactly one URL per API key ({len(keys)} keys)."
+        )
+    return [(key, validate_openai_base_url(url)) for key, url in zip(keys, urls)]
+
+
 def parse_model_override(raw: str):
     """Parse a pipeline model override saved from the provider-grouped dropdowns.
 
@@ -696,19 +719,49 @@ def parse_model_override(raw: str):
     return None, s
 
 
-class FailoverClient:
-    """Wraps several API clients for one provider in strict priority order.
+class _FailoverResource:
+    """Proxy a nested SDK resource and fail over when its final method is called."""
 
-    Callers keep using it exactly like a plain OpenAI-compatible client
-    (.chat.completions.create / .models.list ...). EVERY call starts at
-    key #1, always - no memory between calls, no benching, no rotation.
-    If a key raises a credential-shaped error (401/403/429/quota/rate-
-    limit/billing/expired) the SAME call continues down the list to the
-    next key, and so on until one succeeds or all fail. Key order is the
-    user's declared preference; managing which keys are good is the
-    user's responsibility. Non-failure exceptions (bad-model errors,
-    safety refusals, network blips) propagate unchanged - only
-    credential-shaped errors continue down the list."""
+    def __init__(self, clients: list, label: str, path: tuple, markers: tuple):
+        self._clients = clients
+        self._label = label
+        self._path = path
+        self._markers = markers
+
+    @staticmethod
+    def _resolve(client, path):
+        value = client
+        for part in path:
+            value = getattr(value, part)
+        return value
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        path = self._path + (name,)
+        target = self._resolve(self._clients[0], path)
+        if not callable(target):
+            return _FailoverResource(self._clients, self._label, path, self._markers)
+
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for idx, client in enumerate(self._clients):
+                try:
+                    fn = self._resolve(client, path)
+                    return fn(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if any(marker in msg for marker in self._markers):
+                        print(f"[{self._label}] key #{idx + 1} failed ({str(exc)[:80]}) - trying key #{idx + 2}")
+                        continue
+                    raise
+            raise last_exc
+        return wrapper
+
+
+class FailoverClient:
+    """Wrap several SDK clients and fail over through nested SDK methods."""
 
     _FAILOVER_MARKERS = (
         "401", "403", "429", "unauthorized", "forbidden", "invalid api key",
@@ -716,10 +769,15 @@ class FailoverClient:
         "rate_limit", "too many requests", "billing", "exceeded",
         "insufficient", "permission denied", "token expired",
     )
+    _RESOURCE_ATTRIBUTES = {
+        "chat", "models", "responses", "embeddings", "files", "images",
+        "audio", "moderations", "beta", "batches", "fine_tuning",
+    }
 
-    def __init__(self, clients: list, label: str):
+    def __init__(self, clients: list, label: str, extra_failover_markers: tuple = ()):
         object.__setattr__(self, "_clients", [c for c in clients if c is not None])
         object.__setattr__(self, "_label", label)
+        object.__setattr__(self, "_failover_markers", self._FAILOVER_MARKERS + tuple(extra_failover_markers))
 
     def __len__(self):
         return len(object.__getattribute__(self, "_clients"))
@@ -729,24 +787,26 @@ class FailoverClient:
             raise AttributeError(name)
         clients = object.__getattribute__(self, "_clients")
         label = object.__getattribute__(self, "_label")
-
+        markers = object.__getattribute__(self, "_failover_markers")
+        if name in self._RESOURCE_ATTRIBUTES:
+            return _FailoverResource(clients, label, (name,), markers)
         attr0 = getattr(clients[0], name, None)
         if not callable(attr0):
-            return attr0  # plain property/value from the primary
+            return attr0
 
+        # Preserve the original proxy's support for top-level SDK methods too.
         def wrapper(*args, **kwargs):
             last_exc = None
             for idx, client in enumerate(clients):
-                fn = getattr(client, name)
                 try:
-                    return fn(*args, **kwargs)
+                    return getattr(client, name)(*args, **kwargs)
                 except Exception as exc:
                     last_exc = exc
                     msg = str(exc).lower()
-                    if any(m in msg for m in FailoverClient._FAILOVER_MARKERS):
+                    if any(marker in msg for marker in markers):
                         print(f"[{label}] key #{idx + 1} failed ({str(exc)[:80]}) - trying key #{idx + 2}")
                         continue
-                    raise  # non-credential error: let normal fallback chains handle it
+                    raise
             raise last_exc
         return wrapper
 
@@ -844,8 +904,18 @@ def _clients_from_keys(user_keys: dict) -> dict:
 
     if user_keys.get("openai_api_key"):
         try:
-            base_url = validate_openai_base_url(user_keys.get("openai_base_url") or "https://api.openai.com/v1")
-            user_clients["openai_client"] = _openai_compatible_field("openai_api_key", "openai", base_url)
+            pairs = _openai_key_url_pairs(user_keys.get("openai_api_key"), user_keys.get("openai_base_url"))
+            clients = [_cached_openai_compatible("openai", key, endpoint) for key, endpoint in pairs]
+            if len(clients) == 1:
+                user_clients["openai_client"] = clients[0]
+            elif clients:
+                # A model may exist on only one of several configured endpoints.
+                # Retry model-not-found responses on the next paired key/endpoint.
+                endpoint_markers = ("404", "model not found", "model_not_found", "unknown model", "does not exist")
+                distinct_endpoints = len({endpoint for _, endpoint in pairs}) > 1
+                user_clients["openai_client"] = FailoverClient(
+                    clients, "OpenAI", endpoint_markers if distinct_endpoints else ()
+                )
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client: {e}")
 
@@ -996,7 +1066,7 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
         if k in new_keys and isinstance(new_keys[k], str):
             val = new_keys[k].strip()
             if k == "openai_base_url" and val:
-                val = validate_openai_base_url(val)
+                val = "\n".join(validate_openai_base_url(url) for url in _split_openai_base_urls(val))
             if k == "openai_api_format" and val and val not in API_FORMATS:
                 raise ValueError("Invalid OpenAI API format")
             if k == "openai_reasoning_effort" and val not in REASONING_EFFORTS:
@@ -1011,6 +1081,11 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
                 # Allow clearing non-secret fields (model overrides, base_url)
                 keys[k] = val
             # else: skip empty strings for secret keys — preserves existing value
+
+    # More than one endpoint is paired positionally with the saved API keys.
+    # One endpoint remains backward-compatible and is shared by every key.
+    if keys.get("openai_api_key"):
+        _openai_key_url_pairs(keys["openai_api_key"], keys.get("openai_base_url"))
 
     # A saved model belongs to its connection. A form often resubmits the old
     # overrides together with a new URL/key; do not carry those into that account.
@@ -9027,20 +9102,28 @@ class ModelDiscoveryError(ValueError):
 
 
 def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False, api_format: str = "auto"):
-    keys = _split_keys(api_key if api_key is not None else os.getenv("OPENAI_API_KEY"))
+    raw_keys = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
+    keys = _split_keys(raw_keys)
     if not keys:
         return None
     try:
         default_base_url = os.getenv("OPENAI_BASE_URL") if api_key is None else None
-        safe_base_url = validate_openai_base_url(base_url or default_base_url or "https://api.openai.com/v1")
-        safe_base_url, protocol = resolve_openai_endpoint(safe_base_url, api_format)
+        pairs = _openai_key_url_pairs(raw_keys, base_url or default_base_url or "https://api.openai.com/v1")
     except ValueError as exc:
         if strict:
-            raise ModelDiscoveryError("Invalid provider base URL. Check the HTTPS API URL in Settings.") from exc
+            raise ModelDiscoveryError("Invalid provider base URL or key/URL count. Check Settings.") from exc
         return None
+
     error = "Could not reach the provider's /models endpoint. Check the URL and try refreshing models."
     empty_result = False
-    for key in keys:
+    discovered_models = []
+    discovered_ids = set()
+    for key, safe_base_url in pairs:
+        try:
+            safe_base_url, protocol = resolve_openai_endpoint(safe_base_url, api_format)
+        except ValueError as exc:
+            error = str(exc)
+            continue
         _MESSAGES_MODEL_LIMITS.pop((safe_base_url, key), None)
         try:
             headers = {"User-Agent": "StoryWeaver/1.0"}
@@ -9048,7 +9131,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
                 headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
             else:
                 headers["Authorization"] = f"Bearer {key}"
-            models, limits, cursors = [], {}, set()
+            endpoint_models = []
+            limits, cursors = {}, set()
             catalog_url = safe_base_url + "/models"
             # Never follow a provider-supplied next URL with this credential.
             for _page in range(20):
@@ -9060,10 +9144,11 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
                 for m in data["data"]:
                     if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"].strip():
                         continue
-                    models.append({"id": m["id"], "created": _created_ts(m.get("created_at") or m.get("created"))})
+                    model_id = m["id"]
+                    endpoint_models.append({"id": model_id, "created": _created_ts(m.get("created_at") or m.get("created"))})
                     limit = m.get("max_tokens")
                     if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
-                        limits[m["id"]] = limit
+                        limits[model_id] = limit
                 if protocol != "messages" or not data.get("has_more"):
                     break
                 cursor = data.get("last_id")
@@ -9074,16 +9159,20 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
             else:
                 raise ValueError("Model pagination exceeded its limit")
             _MESSAGES_MODEL_LIMITS[(safe_base_url, key)] = limits
-            if models:
-                return "openai", models
-            empty_result = True
+            if endpoint_models:
+                for model in endpoint_models:
+                    if model["id"] not in discovered_ids:
+                        discovered_ids.add(model["id"])
+                        discovered_models.append(model)
+            else:
+                empty_result = True
         except urllib.error.HTTPError as exc:
             error = f"Provider model discovery failed (HTTP {exc.code}). "
             error += {
                 401: "Check the API key for this provider.",
                 403: "This key does not have access to the provider's model catalog.",
                 404: "Check the API base URL, including /v1 if required.",
-                429: "The provider is rate limiting model discovery. Try refreshing later.",
+                429: "The provider is rate limiting model discovery. Try refreshing models later.",
             }.get(exc.code, "Check the provider connection and try refreshing models.")
             exc.close()
         except (ValueError, UnicodeError):
@@ -9091,13 +9180,15 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
         except Exception:
             # Do not expose request headers or arbitrary provider bodies in logs/UI.
             pass
+
+    if discovered_models:
+        return "openai", discovered_models
     if empty_result:
         return "openai", []
     if strict:
         raise ModelDiscoveryError(error)
     print(f"[Live Fetch Note] OpenAI models fetch: {error}")
     return None
-
 
 def _user_openai_models(user_keys):
     """Automatic candidates belong to the current key and URL, never another user."""
@@ -9403,7 +9494,8 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
         try:
             if pkey == "openai":
                 base_url = user_keys.get("openai_base_url") or "https://api.openai.com/v1"
-                resolved_url, protocol = resolve_openai_endpoint(base_url, user_keys.get("openai_api_format", "auto"))
+                configured_urls = _split_openai_base_urls(base_url) or ["https://api.openai.com/v1"]
+                resolved_url, protocol = resolve_openai_endpoint(configured_urls[0], user_keys.get("openai_api_format", "auto"))
                 if protocol == "messages" and not is_opencode_zen(resolved_url):
                     display = "Anthropic Messages (Custom API)"
                 live = fetcher(user_keys[keyname], base_url, strict=True,
@@ -9439,7 +9531,7 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
 class UserKeysPayload(BaseModel):
     gemini_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_api_key: Optional[str] = Field(default=None, max_length=4096)
-    openai_base_url: Optional[str] = Field(default=None, max_length=2048)
+    openai_base_url: Optional[str] = Field(default=None, max_length=8192)
     openai_api_format: Optional[str] = Field(default=None, max_length=32)
     openai_max_output_tokens: Optional[str] = Field(default=None, max_length=10)
     openai_reasoning_effort: Optional[str] = Field(default=None, max_length=16)

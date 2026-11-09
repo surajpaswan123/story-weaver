@@ -234,3 +234,84 @@ def test_known_manual_model_generates_when_provider_catalog_is_empty(catalog_api
     assert len(requests) == 1
     assert json.loads(requests[0].content)["model"] == "provider-known-model"
     assert requests[0].url.path == ("/v1/responses" if api_format == "responses" else "/v1/chat/completions")
+
+
+
+def test_multiple_openai_urls_pair_with_keys_and_merge_model_catalogs(catalog_api, monkeypatch):
+    requests = []
+
+    def discover(request, **kwargs):
+        requests.append((request.full_url, request.get_header("Authorization")))
+        if "first.example.com" in request.full_url:
+            return model_response(["first-endpoint-model"])
+        return model_response(["second-endpoint-model"])
+
+    monkeypatch.setattr(main._NO_REDIRECT_OPENER, "open", discover)
+    save_connection(
+        catalog_api,
+        "first-test-key\nsecond-test-key",
+        "https://first.example.com/v1\nhttps://second.example.com/v1",
+    )
+    result = catalog_api.get("/api/providers-models").json()
+    assert result["providers"]["openai"]["models"] == [
+        "first-endpoint-model", "second-endpoint-model"
+    ]
+    assert requests == [
+        ("https://first.example.com/v1/models", "Bearer first-test-key"),
+        ("https://second.example.com/v1/models", "Bearer second-test-key"),
+    ]
+
+
+def test_multiple_openai_urls_must_match_key_count_but_one_url_is_shared(catalog_api):
+    shared = catalog_api.post("/api/user/settings", json={
+        "openai_api_key": "first-test-key\nsecond-test-key",
+        "openai_base_url": "https://shared.example.com/v1",
+    })
+    assert shared.status_code == 200
+
+    mismatch = catalog_api.post("/api/user/settings", json={
+        "openai_api_key": "first-test-key\nsecond-test-key\nthird-test-key",
+        "openai_base_url": "https://first.example.com/v1\nhttps://second.example.com/v1",
+    })
+    assert mismatch.status_code == 422
+    assert "one shared OpenAI base URL or exactly one URL per API key" in mismatch.json()["detail"]
+
+
+def test_openai_client_pairs_each_key_with_its_endpoint(configured_user):
+    clients = main._clients_from_keys({
+        "openai_api_key": "first-test-key\nsecond-test-key",
+        "openai_base_url": "https://first.example.com/v1\nhttps://second.example.com/v1",
+    })["openai_client"]
+    assert isinstance(clients, main.FailoverClient)
+    assert [str(client.base_url).rstrip("/") for client in clients._clients] == [
+        "https://first.example.com/v1", "https://second.example.com/v1"
+    ]
+    assert [client.api_key for client in clients._clients] == [
+        "first-test-key", "second-test-key"
+    ]
+
+
+def test_failover_proxy_calls_chained_sdk_methods_on_the_next_client():
+    from types import SimpleNamespace
+
+    calls = []
+
+    def first_create(**kwargs):
+        calls.append("first")
+        raise RuntimeError("401 Unauthorized")
+
+    def second_create(**kwargs):
+        calls.append("second")
+        return "success"
+
+    first = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=first_create)))
+    second = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=second_create)))
+    client = main.FailoverClient([first, second], "OpenAI")
+    assert client.chat.completions.create(model="test-model") == "success"
+    assert calls == ["first", "second"]
+
+    top_level_calls = []
+    first.ping = lambda: (top_level_calls.append("first"), (_ for _ in ()).throw(RuntimeError("401 Unauthorized")))[1]
+    second.ping = lambda: (top_level_calls.append("second"), "top-level success")[1]
+    assert client.ping() == "top-level success"
+    assert top_level_calls == ["first", "second"]
