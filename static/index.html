@@ -4484,9 +4484,9 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
             </div>
 
             <div>
-                <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI / Anthropic Base URL or Full Endpoint</label>
-                <input type="text" id="input-openai-base-url" aria-describedby="openai-endpoint-help" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs">
-                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Enter your provider's own URL, including any path prefix. Accepts /v1, /responses, /chat/completions, or /messages, for example https://your-provider.com/v1/messages. For Anthropic directly, use https://api.anthropic.com/v1/messages. Save the matching key and URL together, then refresh models.</p>
+                <label for="input-openai-base-url" class="block font-medium text-stone-300 mb-1">OpenAI / Anthropic Base URLs or Full Endpoints</label>
+                <textarea id="input-openai-base-url" rows="3" spellcheck="false" aria-describedby="openai-endpoint-help" autocomplete="off" placeholder="https://api.openai.com/v1" class="w-full bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs"></textarea>
+                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Enter one URL to share across all OpenAI-style keys, or enter one URL per key on separate lines, in the same order as the keys. When using multiple URLs, their count must match the number of keys. Accepts base URLs such as /v1 or full endpoints such as /chat/completions, /responses, or /messages. For Anthropic directly, use https://api.anthropic.com/v1/messages. Save the matching keys and URLs together, then refresh models.</p>
             </div>
 
             <div>
