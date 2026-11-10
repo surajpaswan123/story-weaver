@@ -742,8 +742,56 @@ def _openai_key_url_pairs(raw_keys, raw_urls=None, raw_auth_modes=None) -> list:
     ]
 
 
+def _keyless_openai_urls(user_keys: dict) -> list:
+    """Return configured keyless OpenAI-compatible URLs for the separate provider."""
+    return _split_openai_base_urls(user_keys.get("openai_keyless_base_url"))
+
+
+def _keyless_openai_is_configured(user_keys: dict) -> bool:
+    return bool(_keyless_openai_urls(user_keys))
+
+
+def _migrate_legacy_keyless_openai_urls(user_keys: dict) -> dict:
+    """Move legacy No API key URL rows out of the shared API-key provider."""
+    urls = _split_openai_base_urls(user_keys.get("openai_base_url"))
+    if not urls:
+        return user_keys
+    try:
+        modes = _split_openai_auth_modes(user_keys.get("openai_base_url_auth"), len(urls))
+    except ValueError:
+        return user_keys
+    if "none" not in modes:
+        return user_keys
+    keyed_urls = [url for url, mode in zip(urls, modes) if mode == "key"]
+    legacy_keyless_urls = [url for url, mode in zip(urls, modes) if mode == "none"]
+    existing_keyless_urls = _keyless_openai_urls(user_keys)
+    user_keys["openai_keyless_base_url"] = "\n".join(
+        dict.fromkeys(existing_keyless_urls + legacy_keyless_urls)
+    )
+    if keyed_urls:
+        user_keys["openai_base_url"] = "\n".join(keyed_urls)
+        user_keys["openai_base_url_auth"] = "\n".join(["key"] * len(keyed_urls))
+        # The old combined catalog cannot tell us which endpoint supplied a saved
+        # model choice, so clear those choices instead of routing them incorrectly.
+        for field in ("story_model", "background_model", "rules_model", "audio_model"):
+            if str(user_keys.get(field, "")).startswith("openai::"):
+                user_keys[field] = ""
+    else:
+        user_keys["openai_base_url"] = "https://api.openai.com/v1"
+        user_keys["openai_base_url_auth"] = ""
+        # If the old OpenAI-style provider contained only a keyless URL, its
+        # saved provider-tagged model choices now belong to the keyless provider.
+        for field in ("story_model", "background_model", "rules_model", "audio_model"):
+            value = str(user_keys.get(field, ""))
+            if value.startswith("openai::"):
+                user_keys[field] = "keyless::" + value[len("openai::"):]
+    return user_keys
+
+
 def _openai_has_unauthenticated_endpoint(user_keys: dict) -> bool:
-    """Whether Settings explicitly enables at least one API-key-free OpenAI URL."""
+    """Whether a separate keyless provider or a legacy no-auth row is configured."""
+    if _keyless_openai_is_configured(user_keys):
+        return True
     urls = _split_openai_base_urls(user_keys.get("openai_base_url")) or ["https://api.openai.com/v1"]
     try:
         modes = _split_openai_auth_modes(user_keys.get("openai_base_url_auth"), len(urls))
@@ -753,7 +801,8 @@ def _openai_has_unauthenticated_endpoint(user_keys: dict) -> bool:
 
 
 def _openai_is_configured(user_keys: dict) -> bool:
-    return bool(_split_keys(user_keys.get("openai_api_key"))) or _openai_has_unauthenticated_endpoint(user_keys)
+    """Whether the API-key OpenAI-compatible provider has saved credentials."""
+    return bool(_split_keys(user_keys.get("openai_api_key")))
 
 
 def parse_model_override(raw: str):
@@ -949,6 +998,7 @@ def _clients_from_keys(user_keys: dict) -> dict:
         "nokey_client": None,
         "cerebras_client": None,
         "openai_client": None,
+        "keyless_openai_client": None,
         "is_super_admin": False
     }
 
@@ -995,6 +1045,23 @@ def _clients_from_keys(user_keys: dict) -> dict:
         except Exception as e:
             print(f"[UserClient] Failed to create OpenAI client: {e}")
 
+    keyless_urls = _keyless_openai_urls(user_keys)
+    if keyless_urls:
+        try:
+            keyless_clients = [
+                _cached_openai_compatible("openai", None, validate_openai_base_url(url))
+                for url in keyless_urls
+            ]
+            if len(keyless_clients) == 1:
+                user_clients["keyless_openai_client"] = keyless_clients[0]
+            else:
+                endpoint_markers = ("404", "model not found", "model_not_found", "unknown model", "does not exist")
+                user_clients["keyless_openai_client"] = FailoverClient(
+                    keyless_clients, "Mercury (Keyless API)", endpoint_markers
+                )
+        except Exception as e:
+            print(f"[UserClient] Failed to create Mercury keyless client: {e}")
+
     if user_keys.get("openrouter_api_key"):
         try:
             user_clients["openrouter_client"] = _openai_compatible_field(
@@ -1033,7 +1100,7 @@ def get_effective_ai_clients(user_info: dict) -> dict:
         admin_keys = load_user_keys(uid)
         has_custom = any(admin_keys.get(k) for k in (
             "gemini_api_key", "nvidia_api_key", "openrouter_api_key", "groq_api_key"
-        )) or _openai_is_configured(admin_keys)
+        )) or _openai_is_configured(admin_keys) or _keyless_openai_is_configured(admin_keys)
         if has_custom:
             return _clients_from_keys(admin_keys)
         # No Settings keys configured -> only process-level clients explicitly
@@ -1048,6 +1115,7 @@ def get_effective_ai_clients(user_info: dict) -> dict:
             "nokey_client": nokey_client,
             "cerebras_client": cerebras_client,
             "openai_client": official_openai_client,
+            "keyless_openai_client": None,
             "is_super_admin": True
         }
 
@@ -1063,6 +1131,7 @@ def load_user_keys(uid: str) -> dict:
         "openai_api_key": "",
         "openai_base_url": "https://api.openai.com/v1",
         "openai_base_url_auth": "",
+        "openai_keyless_base_url": "",
         "openai_api_format": "auto",
         "openai_reasoning_effort": "",
         "openai_max_output_tokens": "",
@@ -1121,7 +1190,7 @@ def load_user_keys(uid: str) -> dict:
         except Exception as e:
             print(f"[UserKeys Postgres Load Error] {e}")
 
-    return keys
+    return _migrate_legacy_keyless_openai_urls(keys)
 
 def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
     """Save user-specific custom API keys to user_keys.json and Firestore."""
@@ -1136,13 +1205,13 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
             keys[key] = ""
 
     # Non-secret fields can be set to empty (to clear a model override)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_keyless_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     for k in keys:
         if k in new_keys and isinstance(new_keys[k], str):
             val = new_keys[k].strip()
-            if k == "openai_base_url" and val:
+            if k in {"openai_base_url", "openai_keyless_base_url"} and val:
                 val = "\n".join(validate_openai_base_url(url) for url in _split_openai_base_urls(val))
             if k == "openai_api_format" and val and val not in API_FORMATS:
                 raise ValueError("Invalid OpenAI API format")
@@ -1159,14 +1228,15 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
                 keys[k] = val
             # else: skip empty strings for secret keys — preserves existing value
 
-    # More than one endpoint is paired positionally with the saved API keys.
-    # One endpoint remains backward-compatible and is shared by every key.
+    # Validate any legacy mixed URL list before migrating it to the separate fields.
+    # This preserves the existing API-key count validation for older app sessions.
     if keys.get("openai_api_key") or keys.get("openai_base_url_auth"):
         _openai_key_url_pairs(
             keys.get("openai_api_key"),
             keys.get("openai_base_url"),
             keys.get("openai_base_url_auth"),
         )
+    _migrate_legacy_keyless_openai_urls(keys)
 
     # A saved model belongs to its connection. A form often resubmits the old
     # overrides together with a new URL/key; do not carry those into that account.
@@ -1175,6 +1245,12 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
         for field in ("story_model", "background_model", "rules_model", "audio_model"):
             old_model = previous_keys.get(field, "")
             if old_model.startswith("openai::") and keys.get(field) == old_model:
+                keys[field] = ""
+
+    if keys.get("openai_keyless_base_url") != previous_keys.get("openai_keyless_base_url"):
+        for field in ("story_model", "background_model", "rules_model", "audio_model"):
+            old_model = previous_keys.get(field, "")
+            if old_model.startswith("keyless::") and keys.get(field) == old_model:
                 keys[field] = ""
 
     key_file = get_user_keys_file(uid)
@@ -1913,6 +1989,24 @@ def run_user_task_completion(system_prompt: str, user_prompt: str, user_info: di
                             return res, f"Configured/{_t}"
                     except Exception as e:
                         print(f"  [{label}] Configured OpenAI/{_t} note: {e}")
+            elif _ov_prov == "keyless":
+                keyless = active_clients.get("keyless_openai_client")
+                if not keyless:
+                    raise RuntimeError("Mercury (Keyless API) is selected for this pipeline model, but its endpoint is not configured.")
+                try:
+                    print(f"  [{label}] Trying configured Mercury (Keyless API)/{_t}...")
+                    resp = _retry_transient(
+                        lambda: keyless.chat.completions.create(
+                            model=_t, messages=messages, temperature=temperature
+                        ),
+                        label=f"{label}/Mercury/{_t}",
+                    )
+                    result_text = resp.choices[0].message.content or ""
+                    if result_text.strip():
+                        return result_text, f"Mercury (Keyless API)/{_t}"
+                    raise RuntimeError("The Mercury (Keyless API) provider returned an empty response.")
+                except Exception as e:
+                    raise RuntimeError(f"Mercury (Keyless API) model '{_t}' failed: {e}") from e
             else:
                 # nvidia / openrouter / groq / hf / cerebras / mistral — OpenAI-compatible
                 _cmap = {
@@ -2994,6 +3088,7 @@ def has_any_generation_provider(user_info: dict = None) -> bool:
             effective.get("mistral_client") is not None,
             effective.get("openrouter_client") is not None,
             effective.get("openai_client") is not None,
+            effective.get("keyless_openai_client") is not None,
             effective.get("hf_client") is not None,
             effective.get("cerebras_client") is not None,
         ])
@@ -4136,12 +4231,14 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
         active_openai_client = eff.get("openai_client")
         if not active_openai_client and is_admin:
             active_openai_client = official_openai_client
+        active_keyless_openai_client = eff.get("keyless_openai_client")
             
         if uid:
             user_keys = load_user_keys(uid)
             rules_model_override = user_keys.get("rules_model", "").strip()
     else:
         active_openai_client = official_openai_client
+        active_keyless_openai_client = None
         active_genai_clients = clients
         active_nvidia_client = nvidia_client
         active_nokey_client = nokey_client
@@ -4214,7 +4311,37 @@ def refine_with_rules_stream(generated_text: str, rules_text: str, style_text: s
                 except Exception as e:
                     print(f"  [RulesEditor] Configured GenAI/{base_m} failed: {e}")
 
-        # 3. Try OpenAI-compatible providers when tagged accordingly
+        # 3. Use Mercury only when the configured model is tagged for the keyless provider.
+        if active_keyless_openai_client and (_rules_prov == "keyless"):
+            try:
+                print(f"  [RulesEditor] Trying Mercury (Keyless API)/{rules_model_override}...")
+                _oa_kwargs = {"model": rules_model_override, "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": check_prompt},
+                ]}
+                if not rules_model_override.lower().startswith("o"):
+                    _oa_kwargs["temperature"] = 0.1
+                stream = _retry_on_429(
+                    lambda m=rules_model_override: active_keyless_openai_client.chat.completions.create(
+                        **_oa_kwargs, stream=True,
+                    ),
+                    label=f"RulesEditor/Mercury/{rules_model_override}",
+                )
+                got_any = False
+                pieces = []
+                for chunk in stream:
+                    chunk_text = _safe_chunk_text(chunk)
+                    if chunk_text:
+                        got_any = True
+                        pieces.append(chunk_text)
+                if got_any:
+                    print(f"  [RulesEditor] Streamed successfully via Mercury/{rules_model_override}")
+                    yield from pieces
+                    return
+            except Exception as e:
+                print(f"  [RulesEditor] Mercury keyless model {rules_model_override} failed: {e}")
+
+        # 3b. Try the API-key OpenAI-compatible provider only when tagged accordingly
         if active_openai_client and (_rules_prov == "openai"):
             try:
                 print(f"  [RulesEditor] Trying configured Rules Model OpenAI/{rules_model_override}...")
@@ -5491,6 +5618,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         active_openai_client = _eff.get("openai_client")
         if not active_openai_client and is_admin:
             active_openai_client = official_openai_client
+        active_keyless_openai_client = _eff.get("keyless_openai_client")
             
         active_mistral_client = _eff.get("mistral_client")
         if not active_mistral_client and is_admin:
@@ -5510,6 +5638,7 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
         active_groq_client = groq_client
         active_openrouter_client = openrouter_client
         active_openai_client = official_openai_client
+        active_keyless_openai_client = None
         active_mistral_client = mistral_client
         active_hf_client = hf_client
         active_cerebras_client = cerebras_client
@@ -5666,6 +5795,31 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                     selected_error = err
                     print(f"  OpenAI {m_name} failed: {err}")
 
+        # 5b. User selected the separate Mercury keyless provider
+        elif selected_provider == "keyless" and active_keyless_openai_client:
+            keyless_models = [target_model] if target_model else _user_openai_models_for_keyless(user_keys)
+            for m_name in keyless_models:
+                try:
+                    print(f"=== Streaming User Selected Mercury (Keyless API) ({m_name}) ===")
+                    stream = active_keyless_openai_client.chat.completions.create(
+                        model=m_name, messages=chat_messages, temperature=1.0, stream=True
+                    )
+                    def keyless_adapter():
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta if chunk.choices else None
+                            if delta:
+                                reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                                if reasoning:
+                                    yield GenericChunk(f"<thought>{reasoning}</thought>")
+                                if delta.content:
+                                    yield GenericChunk(delta.content)
+                    gen = keyless_adapter()
+                    first_chunk = next(gen)
+                    return StreamWithFirstChunk(gen, first_chunk), f"Mercury (Keyless API)/{m_name}", False
+                except Exception as err:
+                    selected_error = err
+                    print(f"  Mercury keyless model {m_name} failed: {err}")
+
         # 6. User selected Mistral
         elif selected_provider == "mistral" and active_mistral_client:
             ms_models = [target_model] if target_model else MISTRAL_MODELS
@@ -5819,6 +5973,28 @@ def stream_with_fallback(system_msg: str, user_msg: str, skip_nokey_models=None,
                 return StreamWithFirstChunk(gen, first_chunk), f"OpenAI/{story_model_override}", False
             except Exception as err:
                 print(f"  Configured OpenAI {story_model_override} failed: {err}")
+
+        # 3b. Route a tagged story pipeline override to the Mercury provider.
+        if active_keyless_openai_client and _ov_prov == "keyless":
+            try:
+                print(f"=== Streaming Configured Story Model Mercury (Keyless API) ({story_model_override}) ===")
+                stream = active_keyless_openai_client.chat.completions.create(
+                    model=story_model_override, messages=chat_messages, temperature=1.0, stream=True
+                )
+                def keyless_oa_adapter():
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        if delta:
+                            reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                            if reasoning:
+                                yield GenericChunk(f"<thought>{reasoning}</thought>")
+                            if delta.content:
+                                yield GenericChunk(delta.content)
+                gen = keyless_oa_adapter()
+                first_chunk = next(gen)
+                return StreamWithFirstChunk(gen, first_chunk), f"Mercury (Keyless API)/{story_model_override}", False
+            except Exception as err:
+                print(f"  Configured Mercury keyless model {story_model_override} failed: {err}")
 
         # 4. Try Groq
         if active_groq_client and (_ov_prov in (None, "groq")):
@@ -9152,8 +9328,8 @@ def _dropdown_models(provider_key, live_result=_NO_LIVE_MODEL_FETCH):
 
 def _cache_provider_models(provider_key, display, live_result):
     """Warm fixed-provider generation lists, never a custom endpoint catalog."""
-    if provider_key == "openai":
-        # Different URLs and credentials can expose entirely different models.
+    if provider_key in {"openai", "keyless"}:
+        # Different users, URLs and credentials can expose entirely different models.
         # OpenAI automatic selection discovers from that user's connection.
         DYNAMIC_PROVIDER_MODELS.pop(provider_key, None)
         return
@@ -9183,7 +9359,8 @@ class ModelDiscoveryError(ValueError):
 
 
 def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False,
-                             api_format: str = "auto", auth_modes: str = None):
+                             api_format: str = "auto", auth_modes: str = None,
+                             provider_key: str = "openai"):
     raw_keys = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
     try:
         default_base_url = os.getenv("OPENAI_BASE_URL") if api_key is None else None
@@ -9271,23 +9448,40 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
             pass
 
     if discovered_models:
-        return "openai", discovered_models
+        return provider_key, discovered_models
     if empty_result:
-        return "openai", []
+        return provider_key, []
     if strict:
         raise ModelDiscoveryError(error)
     print(f"[Live Fetch Note] OpenAI models fetch: {error}")
     return None
 
 def _user_openai_models(user_keys):
-    """Automatic candidates belong to the current key and URL, never another user."""
+    """Automatic candidates belong to the current keyed connection, never another user."""
     live = fetch_openai_live_models(
         user_keys.get("openai_api_key", ""),
         user_keys.get("openai_base_url"),
         api_format=user_keys.get("openai_api_format", "auto"),
         auth_modes=user_keys.get("openai_base_url_auth"),
+        provider_key="openai",
     )
     return [model for model in _dropdown_models("openai", live)
+            if not any(hint in model.lower() for hint in NON_CHAT_MODEL_HINTS)]
+
+
+def _user_openai_models_for_keyless(user_keys):
+    """Return chat-capable models from this user's separate keyless endpoint."""
+    urls = _keyless_openai_urls(user_keys)
+    if not urls:
+        return []
+    live = fetch_openai_live_models(
+        "",
+        "\n".join(urls),
+        api_format=user_keys.get("openai_api_format", "auto"),
+        auth_modes="\n".join(["none"] * len(urls)),
+        provider_key="keyless",
+    )
+    return [model for model in _dropdown_models("keyless", live)
             if not any(hint in model.lower() for hint in NON_CHAT_MODEL_HINTS)]
 
 
@@ -9558,13 +9752,15 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
     provider_defs = (
         ("google", "gemini_api_key", "Google GenAI (Gemini)", fetch_google_live_models),
         ("nvidia", "nvidia_api_key", "NVIDIA NIM", fetch_nvidia_live_models),
-        ("openai", "openai_api_key", "OpenAI (User Key)", fetch_openai_live_models),
+        ("openai", "openai_api_key", "OpenAI / Custom API (API key)", fetch_openai_live_models),
+        ("keyless", "openai_keyless_base_url", "Mercury (Keyless API)", fetch_openai_live_models),
         ("openrouter", "openrouter_api_key", "OpenRouter", fetch_openrouter_live_models),
         ("groq", "groq_api_key", "Groq", fetch_groq_live_models),
     )
     configured = [
         (p, k, d, f) for p, k, d, f in provider_defs
-        if user_keys.get(k) or (p == "openai" and _openai_has_unauthenticated_endpoint(user_keys))
+        if (bool(user_keys.get(k)) if p not in {"openai", "keyless"} else
+            (_openai_is_configured(user_keys) if p == "openai" else _keyless_openai_is_configured(user_keys)))
     ]
 
     if not configured:
@@ -9600,6 +9796,17 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
                     strict=True,
                     api_format=user_keys.get("openai_api_format", "auto"),
                     auth_modes=user_keys.get("openai_base_url_auth"),
+                    provider_key="openai",
+                )
+            elif pkey == "keyless":
+                keyless_urls = _keyless_openai_urls(user_keys)
+                live = fetcher(
+                    "",
+                    "\n".join(keyless_urls),
+                    strict=True,
+                    api_format=user_keys.get("openai_api_format", "auto"),
+                    auth_modes="\n".join(["none"] * len(keyless_urls)),
+                    provider_key="keyless",
                 )
             else:
                 live = fetcher(user_keys[keyname])
@@ -9625,6 +9832,8 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
         }
         if pkey == "openai":
             allowed_providers[pkey]["base_url"] = user_keys.get("openai_base_url") or "https://api.openai.com/v1"
+        elif pkey == "keyless":
+            allowed_providers[pkey]["base_url"] = "\n".join(_keyless_openai_urls(user_keys))
         _cache_provider_models(pkey, display, live)
 
     return {"providers": allowed_providers, "errors": errors}
@@ -9634,6 +9843,7 @@ class UserKeysPayload(BaseModel):
     openai_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_base_url: Optional[str] = Field(default=None, max_length=8192)
     openai_base_url_auth: Optional[str] = Field(default=None, max_length=128)
+    openai_keyless_base_url: Optional[str] = Field(default=None, max_length=8192)
     openai_api_format: Optional[str] = Field(default=None, max_length=32)
     openai_max_output_tokens: Optional[str] = Field(default=None, max_length=10)
     openai_reasoning_effort: Optional[str] = Field(default=None, max_length=16)
@@ -9671,7 +9881,7 @@ def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         }
     keys = load_user_keys(uid)
     # Non-secret fields that should be returned in full (not masked)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_keyless_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     masked_keys = {}

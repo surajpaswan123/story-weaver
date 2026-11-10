@@ -336,7 +336,9 @@ def test_keyless_openai_endpoint_is_discovered_without_authorization(catalog_api
         openai_base_url_auth="none",
     )
     result = catalog_api.get("/api/providers-models").json()
-    assert result["providers"]["openai"]["models"] == ["public-endpoint-model"]
+    assert "openai" not in result["providers"]
+    assert result["providers"]["keyless"]["models"] == ["public-endpoint-model"]
+    assert result["providers"]["keyless"]["base_url"] == "https://public.ngrok-free.dev/v1"
     assert requests == [("https://public.ngrok-free.dev/v1/models", None, "1")]
 
 
@@ -359,7 +361,8 @@ def test_mixed_keyed_and_keyless_endpoints_pair_in_url_order(catalog_api, monkey
         openai_base_url_auth="key\nnone",
     )
     result = catalog_api.get("/api/providers-models").json()
-    assert set(result["providers"]["openai"]["models"]) == {"keyed-model", "public-model"}
+    assert result["providers"]["openai"]["models"] == ["keyed-model"]
+    assert result["providers"]["keyless"]["models"] == ["public-model"]
     assert requests == [
         ("https://keyed.example.com/v1/models", "Bearer private-test-key", None),
         ("https://public.example.com/v1/models", None, None),
@@ -392,9 +395,9 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
     )
     client = main._clients_from_keys({
         "openai_api_key": "",
-        "openai_base_url": "https://public.ngrok-free.dev/v1",
-        "openai_base_url_auth": "none",
-    })["openai_client"]
+        "openai_base_url": "https://api.openai.com/v1",
+        "openai_keyless_base_url": "https://public.ngrok-free.dev/v1",
+    })["keyless_openai_client"]
     response = client.chat.completions.create(
         model="test-model",
         messages=[{"role": "user", "content": "Hello"}],
@@ -402,6 +405,84 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
     assert response.choices[0].message.content == "Hello"
     assert seen == [(None, "1")]
     client.close()
+
+
+def test_legacy_mixed_urls_migrate_without_losing_either_connection(catalog_api, configured_user):
+    save_connection(
+        catalog_api,
+        key="private-custom-key",
+        url="https://custom.example.com/v1\nhttps://mercury.ngrok-free.dev/v1",
+        openai_base_url_auth="key\nnone",
+        story_model="openai::mercury-3",
+    )
+    keys = main.load_user_keys(configured_user["uid"])
+    assert keys["openai_api_key"] == "private-custom-key"
+    assert keys["openai_base_url"] == "https://custom.example.com/v1"
+    assert keys["openai_base_url_auth"] == "key"
+    assert keys["openai_keyless_base_url"] == "https://mercury.ngrok-free.dev/v1"
+    assert keys["story_model"] == ""  # Mixed old catalogs cannot identify which endpoint supplied the model.
+
+
+def test_keyless_only_legacy_override_is_retagged(catalog_api, configured_user):
+    save_connection(
+        catalog_api,
+        key="",
+        url="https://mercury.ngrok-free.dev/v1",
+        openai_base_url_auth="none",
+        story_model="openai::mercury-3",
+    )
+    keys = main.load_user_keys(configured_user["uid"])
+    assert keys["openai_keyless_base_url"] == "https://mercury.ngrok-free.dev/v1"
+    assert keys["story_model"] == "keyless::mercury-3"
+
+
+def test_keyless_selected_provider_routes_generation_through_its_own_client(configured_user, monkeypatch):
+    from types import SimpleNamespace
+
+    keyless_calls = []
+    keyed_calls = []
+    delta = SimpleNamespace(content="Mercury generated this.", reasoning_content=None, reasoning=None)
+    chunk = SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+    class FakeCompletions:
+        def __init__(self, calls, allow_stream):
+            self.calls = calls
+            self.allow_stream = allow_stream
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if not self.allow_stream:
+                raise AssertionError("The API-key custom provider must not receive a Mercury model.")
+            return iter([chunk])
+
+    class FakeClient:
+        def __init__(self, calls, allow_stream):
+            self.chat = SimpleNamespace(completions=FakeCompletions(calls, allow_stream))
+
+    monkeypatch.setattr(main, "get_effective_ai_clients", lambda user: {
+        "is_super_admin": False,
+        "genai_clients": [],
+        "nvidia_client": None,
+        "nokey_client": None,
+        "groq_client": None,
+        "openrouter_client": None,
+        "openai_client": FakeClient(keyed_calls, False),
+        "keyless_openai_client": FakeClient(keyless_calls, True),
+        "mistral_client": None,
+        "hf_client": None,
+        "cerebras_client": None,
+    })
+    stream, provider_name, _ = main.stream_with_fallback(
+        "System prompt",
+        "Continue the story.",
+        selected_provider="keyless",
+        selected_model="mercury-3",
+        user_info=configured_user,
+    )
+    assert provider_name == "Mercury (Keyless API)/mercury-3"
+    assert len(keyless_calls) == 1
+    assert keyless_calls[0]["model"] == "mercury-3"
+    assert keyed_calls == []
 
 
 def test_keyless_endpoint_requires_explicit_no_auth_mode(catalog_api):
@@ -437,7 +518,7 @@ def test_keyless_openai_connection_passes_standard_user_generation_gate(catalog_
         openai_base_url_auth="none",
     )
     keys = main.load_user_keys(configured_user["uid"])
-    assert main._openai_has_unauthenticated_endpoint(keys) is True
+    assert main._keyless_openai_is_configured(keys) is True
     assert main.has_any_generation_provider(configured_user) is True
 
 
@@ -449,4 +530,5 @@ def test_openai_auth_modes_are_returned_as_nonsecret_settings(catalog_api):
         openai_base_url_auth="none",
     )
     settings = catalog_api.get("/api/user/settings").json()["masked_keys"]
-    assert settings["openai_base_url_auth"] == "none"
+    assert settings["openai_base_url_auth"] == ""
+    assert settings["openai_keyless_base_url"] == "https://public.example.com/v1"
