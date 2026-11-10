@@ -111,9 +111,17 @@ test('settings saves multiple custom Messages endpoints in order with the option
         { value: ' https://first.example.com/v1/messages ' },
         { value: ' https://second.example.com/v1/chat/completions ' },
     ];
+    const urlRows = urlInputs.map((input, index) => ({
+        querySelector: selector => {
+            if (selector === '.base-url-input') return input;
+            if (selector === '.base-url-no-auth') return { checked: index === 1 };
+            return null;
+        }
+    }));
     const urlList = { querySelectorAll: selector => {
-        assert.equal(selector, '.base-url-input');
-        return urlInputs;
+        if (selector === '.base-url-input') return urlInputs;
+        if (selector === '.base-url-row') return urlRows;
+        throw new Error('Unexpected base URL selector: ' + selector);
     } };
     element('input-openai-api-format').value = 'auto';
     element('input-openai-max-output-tokens').value = '200000';
@@ -133,6 +141,7 @@ test('settings saves multiple custom Messages endpoints in order with the option
     vm.runInContext(`${helperCode}\n${html.slice(saveStart, saveEnd)}`, context);
     await context.saveUserSettings();
     assert.equal(requests[0].openai_base_url, 'https://first.example.com/v1/messages\nhttps://second.example.com/v1/chat/completions');
+    assert.equal(requests[0].openai_base_url_auth, 'key\nnone');
     assert.equal(requests[0].openai_api_format, 'auto');
     assert.equal(requests[0].openai_max_output_tokens, '200000');
     assert.match(html, /id="openai-base-url-list"/);
