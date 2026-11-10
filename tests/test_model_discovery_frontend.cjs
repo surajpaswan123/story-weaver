@@ -101,31 +101,43 @@ test('Anthropic connection uses its readable name in story and pipeline selector
     assert.match(html, /<option value="max">Max<\/option>/);
 });
 
-test('settings saves the custom Messages endpoint and optional output limit together', async () => {
+test('settings saves multiple custom Messages endpoints in order with the optional output limit', async () => {
     const elements = new Map();
     const element = id => {
         if (!elements.has(id)) elements.set(id, { value: '', checked: false, className: '', textContent: '' });
         return elements.get(id);
     };
-    element('input-openai-base-url').value = ' https://custom.example.com/prefix/v1/messages ';
+    const urlInputs = [
+        { value: ' https://first.example.com/v1/messages ' },
+        { value: ' https://second.example.com/v1/chat/completions ' },
+    ];
+    const urlList = { querySelectorAll: selector => {
+        assert.equal(selector, '.base-url-input');
+        return urlInputs;
+    } };
     element('input-openai-api-format').value = 'auto';
     element('input-openai-max-output-tokens').value = '200000';
     const requests = [];
     const context = vm.createContext({
-        document: { getElementById: element }, settingsRequestVersion: 0,
+        document: { getElementById: id => id === 'openai-base-url-list' ? urlList : element(id) }, settingsRequestVersion: 0,
         getKeyListValues: () => '', invalidateProviderModels() {}, clearKeyListInputs() {},
         fetchUserSettings: async () => {}, loadProvidersAndModels: async () => {}, setTimeout() {},
         authFetch: async (url, request) => { requests.push(JSON.parse(request.body)); return { ok: true, json: async () => ({}) }; }
     });
-    const start = html.indexOf('async function saveUserSettings(');
-    const end = html.indexOf('\n}', start) + 2;
-    vm.runInContext(html.slice(start, end), context);
+    const helperStart = html.indexOf('function getOpenAIBaseUrlValues()');
+    const helperEnd = html.indexOf('function clearKeyListInputs(provider)', helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'base URL list serializer exists');
+    const helperCode = html.slice(helperStart, helperEnd);
+    const saveStart = html.indexOf('async function saveUserSettings(');
+    const saveEnd = html.indexOf('\n}', saveStart) + 2;
+    vm.runInContext(`${helperCode}\n${html.slice(saveStart, saveEnd)}`, context);
     await context.saveUserSettings();
-    assert.equal(requests[0].openai_base_url, 'https://custom.example.com/prefix/v1/messages');
+    assert.equal(requests[0].openai_base_url, 'https://first.example.com/v1/messages\nhttps://second.example.com/v1/chat/completions');
     assert.equal(requests[0].openai_api_format, 'auto');
     assert.equal(requests[0].openai_max_output_tokens, '200000');
+    assert.match(html, /id="openai-base-url-list"/);
+    assert.match(html, /class="add-base-url-btn[^\"]*"[^>]*aria-label="Add another OpenAI or Anthropic base URL"/);
 });
-
 test('one catalog request updates all selectors and preserves a still-valid choice', async () => {
     const app = setup();
     app.elements['provider-select'].appendChild(Object.assign(new Element('option'), { value: 'openai', selected: true }));
