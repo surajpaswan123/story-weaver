@@ -665,6 +665,18 @@ _USER_CLIENT_CACHE = {}
 _MESSAGES_MODEL_LIMITS = {}
 
 
+def _strip_openai_auth_headers(request):
+    """Remove SDK placeholder credentials before an explicitly keyless request is sent."""
+    request.headers.pop("Authorization", None)
+    request.headers.pop("x-api-key", None)
+
+
+def _is_ngrok_base_url(base_url: str) -> bool:
+    """Detect ngrok-hosted endpoints so their free-tier interstitial can be skipped."""
+    hostname = (urllib.parse.urlsplit(base_url or "").hostname or "").lower()
+    return hostname.endswith((".ngrok-free.dev", ".ngrok-free.app", ".ngrok.io", ".ngrok.app"))
+
+
 def _split_keys(raw) -> list:
     """Split a multi-key blob (comma / semicolon / whitespace / newline separated)
     into a deduped, order-preserved list of non-empty key strings."""
@@ -690,19 +702,58 @@ def _split_openai_base_urls(raw) -> list:
     return [str(value).strip() for value in values if str(value).strip()]
 
 
-def _openai_key_url_pairs(raw_keys, raw_urls=None) -> list:
-    """Pair API keys with endpoints; a single URL remains shared by all keys."""
+def _split_openai_auth_modes(raw, url_count: int) -> list:
+    """Return one authentication mode per URL; old saved connections default to key auth."""
+    if raw is None or raw == "":
+        return ["key"] * url_count
+    values = raw if isinstance(raw, (list, tuple)) else re.split(r"[\r\n]+", str(raw))
+    modes = [str(value).strip().lower() for value in values]
+    if len(modes) != url_count or any(mode not in {"key", "none"} for mode in modes):
+        raise ValueError("Choose whether each OpenAI URL requires an API key.")
+    return modes
+
+
+def _openai_key_url_pairs(raw_keys, raw_urls=None, raw_auth_modes=None) -> list:
+    """Pair each endpoint with a credential; 'none' explicitly disables auth for that URL."""
     keys = _split_keys(raw_keys)
-    if not keys:
-        return []
     urls = _split_openai_base_urls(raw_urls) or ["https://api.openai.com/v1"]
+    modes = _split_openai_auth_modes(raw_auth_modes, len(urls))
+    validated_urls = [validate_openai_base_url(url) for url in urls]
+
     if len(urls) == 1:
-        urls = urls * len(keys)
-    elif len(urls) != len(keys):
+        if modes[0] == "none":
+            return [(None, validated_urls[0])]
+        return [(key, validated_urls[0]) for key in keys]
+
+    required_keys = sum(mode == "key" for mode in modes)
+    if len(keys) != required_keys:
+        if all(mode == "key" for mode in modes):
+            raise ValueError(
+                f"Provide either one shared OpenAI base URL or exactly one URL per API key ({len(keys)} keys)."
+            )
         raise ValueError(
-            f"Provide either one shared OpenAI base URL or exactly one URL per API key ({len(keys)} keys)."
+            f"Provide exactly one API key for each URL that requires authentication "
+            f"({required_keys} required, {len(keys)} supplied). Mark keyless endpoints as No API key."
         )
-    return [(key, validate_openai_base_url(url)) for key, url in zip(keys, urls)]
+    key_iter = iter(keys)
+    return [
+        (next(key_iter) if mode == "key" else None, url)
+        for mode, url in zip(modes, validated_urls)
+    ]
+
+
+def _openai_has_unauthenticated_endpoint(user_keys: dict) -> bool:
+    """Whether Settings explicitly enables at least one API-key-free OpenAI URL."""
+    urls = _split_openai_base_urls(user_keys.get("openai_base_url")) or ["https://api.openai.com/v1"]
+    try:
+        modes = _split_openai_auth_modes(user_keys.get("openai_base_url_auth"), len(urls))
+    except ValueError:
+        return False
+    return any(mode == "none" for mode in modes)
+
+
+def _openai_is_configured(user_keys: dict) -> bool:
+    return bool(_split_keys(user_keys.get("openai_api_key"))) or _openai_has_unauthenticated_endpoint(user_keys)
 
 
 def parse_model_override(raw: str):
@@ -849,16 +900,37 @@ def _clients_from_keys(user_keys: dict) -> dict:
         ck = (kind, base_url, key, api_format, effort, output_setting)
         c = cache.get(ck)
         if c is None:
+            no_auth = kind == "openai" and key is None
+            sdk_key = key or "story-weaver-no-auth"
+            auth_hook = {"request": [_strip_openai_auth_headers]} if no_auth else None
+            endpoint_headers = {"ngrok-skip-browser-warning": "1"} if _is_ngrok_base_url(base_url) else {}
             if api_format == "messages" and not is_opencode_zen(base_url):
-                c = MessagesClient(Anthropic(base_url=base_url, api_key=key, auth_token="",
-                                             http_client=AnthropicHttpxClient(follow_redirects=False)),
+                http_options = {"follow_redirects": False}
+                if endpoint_headers:
+                    http_options["headers"] = endpoint_headers
+                if auth_hook:
+                    http_options["event_hooks"] = auth_hook
+                c = MessagesClient(Anthropic(base_url=base_url, api_key=sdk_key, auth_token="",
+                                             http_client=AnthropicHttpxClient(**http_options)),
                                    messages_output_limit, effort)
             else:
-                extra = {"http_client": DefaultHttpxClient(follow_redirects=False)} if kind == "openai" else {}
-                c = OpenAI(base_url=base_url, api_key=key, timeout=3600, **extra)
+                extra = {}
+                if kind == "openai":
+                    http_options = {"follow_redirects": False}
+                    if endpoint_headers:
+                        http_options["headers"] = endpoint_headers
+                    if auth_hook:
+                        http_options["event_hooks"] = auth_hook
+                    extra["http_client"] = DefaultHttpxClient(**http_options)
+                c = OpenAI(base_url=base_url, api_key=sdk_key, timeout=3600, **extra)
                 if kind == "openai" and is_opencode_zen(base_url):
-                    messages_sdk = Anthropic(base_url=base_url, api_key=key, auth_token="",
-                                             http_client=AnthropicHttpxClient(follow_redirects=False))
+                    messages_options = {"follow_redirects": False}
+                    if endpoint_headers:
+                        messages_options["headers"] = endpoint_headers
+                    if auth_hook:
+                        messages_options["event_hooks"] = auth_hook
+                    messages_sdk = Anthropic(base_url=base_url, api_key=sdk_key, auth_token="",
+                                             http_client=AnthropicHttpxClient(**messages_options))
                     c = OpenCodeClient(c, effort, messages_sdk, messages_output_limit)
                 elif api_format == "responses":
                     c = ResponsesClient(c, effort)
@@ -902,9 +974,13 @@ def _clients_from_keys(user_keys: dict) -> dict:
             return None
         return clients[0] if len(clients) == 1 else FailoverClient(clients, kind.title())
 
-    if user_keys.get("openai_api_key"):
+    if _openai_is_configured(user_keys):
         try:
-            pairs = _openai_key_url_pairs(user_keys.get("openai_api_key"), user_keys.get("openai_base_url"))
+            pairs = _openai_key_url_pairs(
+                user_keys.get("openai_api_key"),
+                user_keys.get("openai_base_url"),
+                user_keys.get("openai_base_url_auth"),
+            )
             clients = [_cached_openai_compatible("openai", key, endpoint) for key, endpoint in pairs]
             if len(clients) == 1:
                 user_clients["openai_client"] = clients[0]
@@ -956,8 +1032,8 @@ def get_effective_ai_clients(user_info: dict) -> dict:
     if is_super_admin:
         admin_keys = load_user_keys(uid)
         has_custom = any(admin_keys.get(k) for k in (
-            "gemini_api_key", "nvidia_api_key", "openai_api_key",
-            "openrouter_api_key", "groq_api_key"))
+            "gemini_api_key", "nvidia_api_key", "openrouter_api_key", "groq_api_key"
+        )) or _openai_is_configured(admin_keys)
         if has_custom:
             return _clients_from_keys(admin_keys)
         # No Settings keys configured -> only process-level clients explicitly
@@ -986,6 +1062,7 @@ def load_user_keys(uid: str) -> dict:
         "gemini_api_key": "",
         "openai_api_key": "",
         "openai_base_url": "https://api.openai.com/v1",
+        "openai_base_url_auth": "",
         "openai_api_format": "auto",
         "openai_reasoning_effort": "",
         "openai_max_output_tokens": "",
@@ -1059,7 +1136,7 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
             keys[key] = ""
 
     # Non-secret fields can be set to empty (to clear a model override)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     for k in keys:
@@ -1084,13 +1161,17 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
 
     # More than one endpoint is paired positionally with the saved API keys.
     # One endpoint remains backward-compatible and is shared by every key.
-    if keys.get("openai_api_key"):
-        _openai_key_url_pairs(keys["openai_api_key"], keys.get("openai_base_url"))
+    if keys.get("openai_api_key") or keys.get("openai_base_url_auth"):
+        _openai_key_url_pairs(
+            keys.get("openai_api_key"),
+            keys.get("openai_base_url"),
+            keys.get("openai_base_url_auth"),
+        )
 
     # A saved model belongs to its connection. A form often resubmits the old
     # overrides together with a new URL/key; do not carry those into that account.
     if any(keys.get(field) != previous_keys.get(field)
-           for field in ("openai_api_key", "openai_base_url")):
+           for field in ("openai_api_key", "openai_base_url", "openai_base_url_auth")):
         for field in ("story_model", "background_model", "rules_model", "audio_model"):
             old_model = previous_keys.get(field, "")
             if old_model.startswith("openai::") and keys.get(field) == old_model:
@@ -7433,8 +7514,8 @@ async def generate_with_audio(
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
-        if not any(bool(user_keys.get(k)) for k in api_keys):
-            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
+        if not any(bool(user_keys.get(k)) for k in api_keys) and not _openai_has_unauthenticated_endpoint(user_keys):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Configure a provider API key or an OpenAI-compatible endpoint marked No API key in Settings.")
     """Generate story with audio context using a memory-bounded upload path."""
     audio_original_name = audio.filename or "uploaded_audio"
     audio_mime = audio.content_type or "audio/mpeg"
@@ -8388,8 +8469,8 @@ async def generate_story(input_data: StoryInput, background_tasks: BackgroundTas
     if not user_info["is_super_admin"]:
         user_keys = load_user_keys(user_id)
         api_keys = ["gemini_api_key", "openai_api_key", "openrouter_api_key", "groq_api_key", "nvidia_api_key"]
-        if not any(bool(user_keys.get(k)) for k in api_keys):
-            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Please open Settings (⚙️) and enter your Gemini, OpenAI, or NVIDIA NIM API Key to proceed.")
+        if not any(bool(user_keys.get(k)) for k in api_keys) and not _openai_has_unauthenticated_endpoint(user_keys):
+            raise HTTPException(status_code=403, detail="API Key Required: You are logged in as a standard user. Configure a provider API key or an OpenAI-compatible endpoint marked No API key in Settings.")
 
     if not has_any_generation_provider(user_info):
         raise HTTPException(status_code=500, detail="No AI providers are configured or reachable.")
@@ -9101,17 +9182,21 @@ class ModelDiscoveryError(ValueError):
     """A safe, actionable catalog error that can be returned to the browser."""
 
 
-def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False, api_format: str = "auto"):
+def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, strict: bool = False,
+                             api_format: str = "auto", auth_modes: str = None):
     raw_keys = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
-    keys = _split_keys(raw_keys)
-    if not keys:
-        return None
     try:
         default_base_url = os.getenv("OPENAI_BASE_URL") if api_key is None else None
-        pairs = _openai_key_url_pairs(raw_keys, base_url or default_base_url or "https://api.openai.com/v1")
+        pairs = _openai_key_url_pairs(
+            raw_keys,
+            base_url or default_base_url or "https://api.openai.com/v1",
+            auth_modes,
+        )
     except ValueError as exc:
         if strict:
-            raise ModelDiscoveryError("Invalid provider base URL or key/URL count. Check Settings.") from exc
+            raise ModelDiscoveryError("Invalid provider base URL, authentication mode, or key/URL count. Check Settings.") from exc
+        return None
+    if not pairs:
         return None
 
     error = "Could not reach the provider's /models endpoint. Check the URL and try refreshing models."
@@ -9127,9 +9212,13 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
         _MESSAGES_MODEL_LIMITS.pop((safe_base_url, key), None)
         try:
             headers = {"User-Agent": "StoryWeaver/1.0"}
+            if _is_ngrok_base_url(safe_base_url):
+                headers["ngrok-skip-browser-warning"] = "1"
             if protocol == "messages" and not is_opencode_zen(safe_base_url):
-                headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
-            else:
+                headers["anthropic-version"] = "2023-06-01"
+                if key:
+                    headers["x-api-key"] = key
+            elif key:
                 headers["Authorization"] = f"Bearer {key}"
             endpoint_models = []
             limits, cursors = {}, set()
@@ -9169,8 +9258,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
         except urllib.error.HTTPError as exc:
             error = f"Provider model discovery failed (HTTP {exc.code}). "
             error += {
-                401: "Check the API key for this provider.",
-                403: "This key does not have access to the provider's model catalog.",
+                401: "This endpoint requires an API key." if not key else "Check the API key for this provider.",
+                403: "This endpoint denied access without authentication." if not key else "This key does not have access to the provider's model catalog.",
                 404: "Check the API base URL, including /v1 if required.",
                 429: "The provider is rate limiting model discovery. Try refreshing models later.",
             }.get(exc.code, "Check the provider connection and try refreshing models.")
@@ -9192,8 +9281,12 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
 
 def _user_openai_models(user_keys):
     """Automatic candidates belong to the current key and URL, never another user."""
-    live = fetch_openai_live_models(user_keys.get("openai_api_key", ""), user_keys.get("openai_base_url"),
-                                    api_format=user_keys.get("openai_api_format", "auto"))
+    live = fetch_openai_live_models(
+        user_keys.get("openai_api_key", ""),
+        user_keys.get("openai_base_url"),
+        api_format=user_keys.get("openai_api_format", "auto"),
+        auth_modes=user_keys.get("openai_base_url_auth"),
+    )
     return [model for model in _dropdown_models("openai", live)
             if not any(hint in model.lower() for hint in NON_CHAT_MODEL_HINTS)]
 
@@ -9469,7 +9562,10 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
         ("openrouter", "openrouter_api_key", "OpenRouter", fetch_openrouter_live_models),
         ("groq", "groq_api_key", "Groq", fetch_groq_live_models),
     )
-    configured = [(p, k, d, f) for p, k, d, f in provider_defs if user_keys.get(k)]
+    configured = [
+        (p, k, d, f) for p, k, d, f in provider_defs
+        if user_keys.get(k) or (p == "openai" and _openai_has_unauthenticated_endpoint(user_keys))
+    ]
 
     if not configured:
         # No Settings keys for this user. NVIDIA's public catalog is refreshable
@@ -9498,8 +9594,13 @@ def get_providers_and_models(user_info: dict = Depends(get_current_user_info)):
                 resolved_url, protocol = resolve_openai_endpoint(configured_urls[0], user_keys.get("openai_api_format", "auto"))
                 if protocol == "messages" and not is_opencode_zen(resolved_url):
                     display = "Anthropic Messages (Custom API)"
-                live = fetcher(user_keys[keyname], base_url, strict=True,
-                               api_format=user_keys.get("openai_api_format", "auto"))
+                live = fetcher(
+                    user_keys[keyname],
+                    base_url,
+                    strict=True,
+                    api_format=user_keys.get("openai_api_format", "auto"),
+                    auth_modes=user_keys.get("openai_base_url_auth"),
+                )
             else:
                 live = fetcher(user_keys[keyname])
         except ModelDiscoveryError as exc:
@@ -9532,6 +9633,7 @@ class UserKeysPayload(BaseModel):
     gemini_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_api_key: Optional[str] = Field(default=None, max_length=4096)
     openai_base_url: Optional[str] = Field(default=None, max_length=8192)
+    openai_base_url_auth: Optional[str] = Field(default=None, max_length=128)
     openai_api_format: Optional[str] = Field(default=None, max_length=32)
     openai_max_output_tokens: Optional[str] = Field(default=None, max_length=10)
     openai_reasoning_effort: Optional[str] = Field(default=None, max_length=16)
@@ -9569,7 +9671,7 @@ def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         }
     keys = load_user_keys(uid)
     # Non-secret fields that should be returned in full (not masked)
-    NON_SECRET_FIELDS = {"openai_base_url", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
+    NON_SECRET_FIELDS = {"openai_base_url", "openai_base_url_auth", "openai_api_format", "openai_reasoning_effort", "openai_max_output_tokens", "story_model", "background_model", "rules_model", "audio_model",
                          "local_enabled", "local_base_url", "local_name",
                          "local_story_model", "local_background_model", "local_rules_model", "local_audio_model"}
     masked_keys = {}
@@ -9601,7 +9703,10 @@ def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         "email": user_info["email"],
         "is_super_admin": user_info["is_super_admin"],
         "is_guest": user_info.get("is_guest", False),
-        "has_custom_keys": any(bool(v) for k, v in keys.items() if k.endswith("_api_key")),
+        "has_custom_keys": (
+            any(bool(v) for k, v in keys.items() if k.endswith("_api_key"))
+            or _openai_has_unauthenticated_endpoint(keys)
+        ),
         "masked_keys": masked_keys,
         # The browser needs the FULL local API key to call the user's own
         # local OpenAI-compatible server directly (the server never touches it).
@@ -9622,7 +9727,7 @@ async def update_user_settings(payload: UserKeysPayload, user_info: dict = Depen
         "status": "success",
         "message": "User API keys saved successfully!",
         "has_gemini": bool(saved.get("gemini_api_key")),
-        "has_openai": bool(saved.get("openai_api_key")),
+        "has_openai": bool(saved.get("openai_api_key")) or _openai_has_unauthenticated_endpoint(saved),
         "has_openrouter": bool(saved.get("openrouter_api_key")),
         "has_groq": bool(saved.get("groq_api_key")),
         "has_nvidia": bool(saved.get("nvidia_api_key"))

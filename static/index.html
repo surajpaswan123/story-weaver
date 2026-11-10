@@ -170,16 +170,18 @@ function getKeyListValues(provider) {
     return vals.join('\n');
 }
 
-function openAIBaseUrlRowTemplate(value, index, total) {
+function openAIBaseUrlRowTemplate(value, index, total, authMode = 'key') {
     const row = document.createElement('div');
-    row.className = 'flex items-center gap-2 base-url-row';
+    row.className = 'base-url-row space-y-1';
+    const line = document.createElement('div');
+    line.className = 'flex items-center gap-2';
     const input = document.createElement('input');
     input.type = 'text';
     input.autocomplete = 'off';
     input.spellcheck = false;
     input.placeholder = 'https://api.example.com/v1';
     input.value = value || '';
-    input.className = 'base-url-input flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs';
+    input.className = 'base-url-input flex-1 min-w-0 bg-stone-950 border border-stone-700 rounded-lg px-3 py-2 text-stone-100 focus:outline-none focus:border-amber-500 font-mono text-xs';
     input.setAttribute('aria-label', `OpenAI / Anthropic base URL ${index + 1} of ${total || '?'}`);
     input.setAttribute('aria-describedby', 'openai-endpoint-help');
 
@@ -198,8 +200,22 @@ function openAIBaseUrlRowTemplate(value, index, total) {
         renumberOpenAIBaseUrlRows(listEl);
     });
 
-    row.appendChild(input);
-    row.appendChild(removeBtn);
+    const authLabel = document.createElement('label');
+    authLabel.className = 'inline-flex items-center gap-1.5 text-[10px] text-stone-400';
+    const noAuth = document.createElement('input');
+    noAuth.type = 'checkbox';
+    noAuth.className = 'base-url-no-auth accent-amber-500';
+    noAuth.checked = authMode === 'none';
+    noAuth.setAttribute('aria-label', `No API key required for base URL ${index + 1}`);
+    authLabel.appendChild(noAuth);
+    const authText = document.createElement('span');
+    authText.textContent = 'No API key';
+    authLabel.appendChild(authText);
+
+    line.appendChild(input);
+    line.appendChild(removeBtn);
+    row.appendChild(line);
+    row.appendChild(authLabel);
     return row;
 }
 
@@ -209,26 +225,41 @@ function renumberOpenAIBaseUrlRows(listEl) {
     rows.forEach((row, index) => {
         const input = row.querySelector('.base-url-input');
         const removeBtn = row.querySelector('.remove-base-url-btn');
+        const noAuth = row.querySelector('.base-url-no-auth');
         if (input) input.setAttribute('aria-label', `OpenAI / Anthropic base URL ${index + 1} of ${rows.length}`);
         if (removeBtn) removeBtn.setAttribute('aria-label', `Remove base URL ${index + 1}`);
+        if (noAuth) noAuth.setAttribute('aria-label', `No API key required for base URL ${index + 1}`);
     });
 }
 
-function renderOpenAIBaseUrlList(rawUrls) {
+function renderOpenAIBaseUrlList(rawUrls, rawAuthModes) {
     const listEl = document.getElementById('openai-base-url-list');
     if (!listEl) return;
     const urls = String(rawUrls || '').split(/\r?\n/).map(url => url.trim()).filter(Boolean);
+    const modes = String(rawAuthModes || '').split(/\r?\n/).map(mode => mode.trim().toLowerCase());
     const values = urls.length ? urls : ['https://api.openai.com/v1'];
     listEl.innerHTML = '';
-    values.forEach((url, index) => listEl.appendChild(openAIBaseUrlRowTemplate(url, index, values.length)));
+    values.forEach((url, index) => {
+        const mode = modes.length === values.length && modes[index] === 'none' ? 'none' : 'key';
+        listEl.appendChild(openAIBaseUrlRowTemplate(url, index, values.length, mode));
+    });
 }
 
 function getOpenAIBaseUrlValues() {
     const listEl = document.getElementById('openai-base-url-list');
     if (!listEl) return '';
-    return [...listEl.querySelectorAll('.base-url-input')]
-        .map(input => input.value.trim())
+    return [...listEl.querySelectorAll('.base-url-row')]
+        .map(row => row.querySelector('.base-url-input')?.value.trim() || '')
         .filter(Boolean)
+        .join('\n');
+}
+
+function getOpenAIBaseUrlAuthModes() {
+    const listEl = document.getElementById('openai-base-url-list');
+    if (!listEl) return '';
+    return [...listEl.querySelectorAll('.base-url-row')]
+        .filter(row => (row.querySelector('.base-url-input')?.value || '').trim())
+        .map(row => row.querySelector('.base-url-no-auth')?.checked ? 'none' : 'key')
         .join('\n');
 }
 
@@ -340,7 +371,10 @@ function renderUserSettingsUI() {
     updateKeyStatus('keylist-groq', 'status-groq-key', masked.groq_api_key, 'gsk_...');
     updateKeyStatus('keylist-nvidia', 'status-nvidia-key', masked.nvidia_api_key, 'nvapi-...');
 
-    renderOpenAIBaseUrlList(masked.openai_base_url || 'https://api.openai.com/v1');
+    renderOpenAIBaseUrlList(
+        masked.openai_base_url || 'https://api.openai.com/v1',
+        masked.openai_base_url_auth || ''
+    );
     document.getElementById('input-openai-api-format').value = masked.openai_api_format || 'auto';
     document.getElementById('input-openai-reasoning-effort').value = masked.openai_reasoning_effort || '';
     document.getElementById('input-openai-max-output-tokens').value = masked.openai_max_output_tokens || '';
@@ -386,6 +420,7 @@ async function saveUserSettings(e) {
         gemini_api_key: getKeyListValues('gemini'),
         openai_api_key: getKeyListValues('openai'),
         openai_base_url: getOpenAIBaseUrlValues(),
+        openai_base_url_auth: getOpenAIBaseUrlAuthModes(),
         openai_api_format: document.getElementById('input-openai-api-format').value,
         openai_reasoning_effort: document.getElementById('input-openai-reasoning-effort').value,
         openai_max_output_tokens: document.getElementById('input-openai-max-output-tokens').value.trim(),
@@ -4559,7 +4594,7 @@ Pacing: Slow-burn with sudden action bursts" aria-label="Style guide text"></tex
                 <label id="openai-base-url-label" class="block font-medium text-stone-300 mb-1">OpenAI / Anthropic Base URLs or Full Endpoints</label>
                 <div id="openai-base-url-list" class="space-y-2" aria-labelledby="openai-base-url-label"></div>
                 <button type="button" class="add-base-url-btn mt-1.5 text-[10px] font-semibold px-2 py-1 rounded-md border border-stone-700 hover:border-amber-500 text-stone-300 hover:text-amber-400 transition-colors" aria-label="Add another OpenAI or Anthropic base URL">＋ Add base URL</button>
-                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Use one URL to share the same endpoint across all OpenAI-style keys, or add one URL per key in the same order. When using multiple URLs, the URL count must match the key count. Each entry can be a base URL such as /v1 or a full endpoint such as /chat/completions, /responses, or /messages. For Anthropic directly, use https://api.anthropic.com/v1/messages.</p>
+                <p id="openai-endpoint-help" class="mt-1 text-xs text-stone-300">Use one URL to share the same endpoint across all OpenAI-style keys, or add one URL per connection. For an endpoint that requires no authentication, check <strong>No API key</strong> under that URL. Otherwise provide one API key for each URL that requires it, in URL order. Render connects to these URLs from the server, so browser CORS settings are not required. Base URLs such as /v1 and full endpoints such as /chat/completions, /responses, or /messages are supported.</p>
             </div>
 
             <div>
