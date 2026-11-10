@@ -721,6 +721,10 @@ def _openai_key_url_pairs(raw_keys, raw_urls=None, raw_auth_modes=None) -> list:
 
     required_keys = sum(mode == "key" for mode in modes)
     if len(keys) != required_keys:
+        if all(mode == "key" for mode in modes):
+            raise ValueError(
+                f"Provide either one shared OpenAI base URL or exactly one URL per API key ({len(keys)} keys)."
+            )
         raise ValueError(
             f"Provide exactly one API key for each URL that requires authentication "
             f"({required_keys} required, {len(keys)} supplied). Mark keyless endpoints as No API key."
@@ -1144,7 +1148,7 @@ def save_user_keys(uid: str, new_keys: dict, clear_keys: list[str] = None):
 
     # More than one endpoint is paired positionally with the saved API keys.
     # One endpoint remains backward-compatible and is shared by every key.
-    if keys.get("openai_api_key") or _openai_has_unauthenticated_endpoint(keys):
+    if keys.get("openai_api_key") or keys.get("openai_base_url_auth"):
         _openai_key_url_pairs(
             keys.get("openai_api_key"),
             keys.get("openai_base_url"),
@@ -9684,7 +9688,10 @@ def get_user_settings(user_info: dict = Depends(get_current_user_info)):
         "email": user_info["email"],
         "is_super_admin": user_info["is_super_admin"],
         "is_guest": user_info.get("is_guest", False),
-        "has_custom_keys": any(bool(v) for k, v in keys.items() if k.endswith("_api_key")),
+        "has_custom_keys": (
+            any(bool(v) for k, v in keys.items() if k.endswith("_api_key"))
+            or _openai_has_unauthenticated_endpoint(keys)
+        ),
         "masked_keys": masked_keys,
         # The browser needs the FULL local API key to call the user's own
         # local OpenAI-compatible server directly (the server never touches it).

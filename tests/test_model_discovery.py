@@ -360,12 +360,13 @@ def test_mixed_keyed_and_keyless_endpoints_pair_in_url_order(catalog_api, monkey
 
 def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, monkeypatch):
     from openai import DefaultHttpxClient as SDKHttpxClient
+    import httpx2
 
     seen = []
 
     def handler(request):
         seen.append(request.headers.get("Authorization"))
-        return httpx.Response(200, json={
+        return httpx2.Response(200, json={
             "id": "chatcmpl-test",
             "object": "chat.completion",
             "created": 1,
@@ -376,7 +377,7 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
     monkeypatch.setattr(
         main,
         "DefaultHttpxClient",
-        lambda **kwargs: SDKHttpxClient(transport=httpx.MockTransport(handler), **kwargs),
+        lambda **kwargs: SDKHttpxClient(transport=httpx2.MockTransport(handler), **kwargs),
     )
     client = main._clients_from_keys({
         "openai_api_key": "",
