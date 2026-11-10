@@ -321,26 +321,34 @@ def test_keyless_openai_endpoint_is_discovered_without_authorization(catalog_api
     requests = []
 
     def discover(request, **kwargs):
-        requests.append((request.full_url, request.get_header("Authorization")))
+        requests.append((
+            request.full_url,
+            request.get_header("Authorization"),
+            request.get_header("Ngrok-skip-browser-warning"),
+        ))
         return model_response(["public-endpoint-model"])
 
     monkeypatch.setattr(main._NO_REDIRECT_OPENER, "open", discover)
     save_connection(
         catalog_api,
         key="",
-        url="https://public.example.com/v1",
+        url="https://public.ngrok-free.dev/v1",
         openai_base_url_auth="none",
     )
     result = catalog_api.get("/api/providers-models").json()
     assert result["providers"]["openai"]["models"] == ["public-endpoint-model"]
-    assert requests == [("https://public.example.com/v1/models", None)]
+    assert requests == [("https://public.ngrok-free.dev/v1/models", None, "1")]
 
 
 def test_mixed_keyed_and_keyless_endpoints_pair_in_url_order(catalog_api, monkeypatch):
     requests = []
 
     def discover(request, **kwargs):
-        requests.append((request.full_url, request.get_header("Authorization")))
+        requests.append((
+            request.full_url,
+            request.get_header("Authorization"),
+            request.get_header("Ngrok-skip-browser-warning"),
+        ))
         return model_response(["keyed-model"] if "keyed.example.com" in request.full_url else ["public-model"])
 
     monkeypatch.setattr(main._NO_REDIRECT_OPENER, "open", discover)
@@ -353,8 +361,8 @@ def test_mixed_keyed_and_keyless_endpoints_pair_in_url_order(catalog_api, monkey
     result = catalog_api.get("/api/providers-models").json()
     assert set(result["providers"]["openai"]["models"]) == {"keyed-model", "public-model"}
     assert requests == [
-        ("https://keyed.example.com/v1/models", "Bearer private-test-key"),
-        ("https://public.example.com/v1/models", None),
+        ("https://keyed.example.com/v1/models", "Bearer private-test-key", None),
+        ("https://public.example.com/v1/models", None, None),
     ]
 
 
@@ -365,7 +373,10 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
     seen = []
 
     def handler(request):
-        seen.append(request.headers.get("Authorization"))
+        seen.append((
+            request.headers.get("Authorization"),
+            request.headers.get("ngrok-skip-browser-warning"),
+        ))
         return httpx2.Response(200, json={
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -381,7 +392,7 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
     )
     client = main._clients_from_keys({
         "openai_api_key": "",
-        "openai_base_url": "https://public.example.com/v1",
+        "openai_base_url": "https://public.ngrok-free.dev/v1",
         "openai_base_url_auth": "none",
     })["openai_client"]
     response = client.chat.completions.create(
@@ -389,7 +400,7 @@ def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, 
         messages=[{"role": "user", "content": "Hello"}],
     )
     assert response.choices[0].message.content == "Hello"
-    assert seen == [None]
+    assert seen == [(None, "1")]
     client.close()
 
 

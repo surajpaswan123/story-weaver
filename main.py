@@ -671,6 +671,12 @@ def _strip_openai_auth_headers(request):
     request.headers.pop("x-api-key", None)
 
 
+def _is_ngrok_base_url(base_url: str) -> bool:
+    """Detect ngrok-hosted endpoints so their free-tier interstitial can be skipped."""
+    hostname = (urllib.parse.urlsplit(base_url or "").hostname or "").lower()
+    return hostname.endswith((".ngrok-free.dev", ".ngrok-free.app", ".ngrok.io", ".ngrok.app"))
+
+
 def _split_keys(raw) -> list:
     """Split a multi-key blob (comma / semicolon / whitespace / newline separated)
     into a deduped, order-preserved list of non-empty key strings."""
@@ -897,8 +903,11 @@ def _clients_from_keys(user_keys: dict) -> dict:
             no_auth = kind == "openai" and key is None
             sdk_key = key or "story-weaver-no-auth"
             auth_hook = {"request": [_strip_openai_auth_headers]} if no_auth else None
+            endpoint_headers = {"ngrok-skip-browser-warning": "1"} if _is_ngrok_base_url(base_url) else {}
             if api_format == "messages" and not is_opencode_zen(base_url):
                 http_options = {"follow_redirects": False}
+                if endpoint_headers:
+                    http_options["headers"] = endpoint_headers
                 if auth_hook:
                     http_options["event_hooks"] = auth_hook
                 c = MessagesClient(Anthropic(base_url=base_url, api_key=sdk_key, auth_token="",
@@ -908,12 +917,16 @@ def _clients_from_keys(user_keys: dict) -> dict:
                 extra = {}
                 if kind == "openai":
                     http_options = {"follow_redirects": False}
+                    if endpoint_headers:
+                        http_options["headers"] = endpoint_headers
                     if auth_hook:
                         http_options["event_hooks"] = auth_hook
                     extra["http_client"] = DefaultHttpxClient(**http_options)
                 c = OpenAI(base_url=base_url, api_key=sdk_key, timeout=3600, **extra)
                 if kind == "openai" and is_opencode_zen(base_url):
                     messages_options = {"follow_redirects": False}
+                    if endpoint_headers:
+                        messages_options["headers"] = endpoint_headers
                     if auth_hook:
                         messages_options["event_hooks"] = auth_hook
                     messages_sdk = Anthropic(base_url=base_url, api_key=sdk_key, auth_token="",
@@ -9199,6 +9212,8 @@ def fetch_openai_live_models(api_key: str = None, base_url: str = None, *, stric
         _MESSAGES_MODEL_LIMITS.pop((safe_base_url, key), None)
         try:
             headers = {"User-Agent": "StoryWeaver/1.0"}
+            if _is_ngrok_base_url(safe_base_url):
+                headers["ngrok-skip-browser-warning"] = "1"
             if protocol == "messages" and not is_opencode_zen(safe_base_url):
                 headers["anthropic-version"] = "2023-06-01"
                 if key:
