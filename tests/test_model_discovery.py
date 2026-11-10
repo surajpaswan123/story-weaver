@@ -315,3 +315,126 @@ def test_failover_proxy_calls_chained_sdk_methods_on_the_next_client():
     second.ping = lambda: (top_level_calls.append("second"), "top-level success")[1]
     assert client.ping() == "top-level success"
     assert top_level_calls == ["first", "second"]
+
+
+def test_keyless_openai_endpoint_is_discovered_without_authorization(catalog_api, monkeypatch):
+    requests = []
+
+    def discover(request, **kwargs):
+        requests.append((request.full_url, request.get_header("Authorization")))
+        return model_response(["public-endpoint-model"])
+
+    monkeypatch.setattr(main._NO_REDIRECT_OPENER, "open", discover)
+    save_connection(
+        catalog_api,
+        key="",
+        url="https://public.example.com/v1",
+        openai_base_url_auth="none",
+    )
+    result = catalog_api.get("/api/providers-models").json()
+    assert result["providers"]["openai"]["models"] == ["public-endpoint-model"]
+    assert requests == [("https://public.example.com/v1/models", None)]
+
+
+def test_mixed_keyed_and_keyless_endpoints_pair_in_url_order(catalog_api, monkeypatch):
+    requests = []
+
+    def discover(request, **kwargs):
+        requests.append((request.full_url, request.get_header("Authorization")))
+        return model_response(["keyed-model"] if "keyed.example.com" in request.full_url else ["public-model"])
+
+    monkeypatch.setattr(main._NO_REDIRECT_OPENER, "open", discover)
+    save_connection(
+        catalog_api,
+        key="private-test-key",
+        url="https://keyed.example.com/v1\nhttps://public.example.com/v1",
+        openai_base_url_auth="key\nnone",
+    )
+    result = catalog_api.get("/api/providers-models").json()
+    assert set(result["providers"]["openai"]["models"]) == {"keyed-model", "public-model"}
+    assert requests == [
+        ("https://keyed.example.com/v1/models", "Bearer private-test-key"),
+        ("https://public.example.com/v1/models", None),
+    ]
+
+
+def test_keyless_openai_client_strips_sdk_authorization_header(configured_user, monkeypatch):
+    from openai import DefaultHttpxClient as SDKHttpxClient
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json={
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
+        })
+
+    monkeypatch.setattr(
+        main,
+        "DefaultHttpxClient",
+        lambda **kwargs: SDKHttpxClient(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    client = main._clients_from_keys({
+        "openai_api_key": "",
+        "openai_base_url": "https://public.example.com/v1",
+        "openai_base_url_auth": "none",
+    })["openai_client"]
+    response = client.chat.completions.create(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+    assert response.choices[0].message.content == "Hello"
+    assert seen == [None]
+    client.close()
+
+
+def test_keyless_endpoint_requires_explicit_no_auth_mode(catalog_api):
+    response = catalog_api.post("/api/user/settings", json={
+        "openai_api_key": "",
+        "openai_base_url": "https://public.example.com/v1",
+    })
+    assert response.status_code == 200
+    assert catalog_api.get("/api/providers-models").json()["providers"] == {}
+
+
+def test_endpoint_auth_mode_count_and_key_count_are_validated(catalog_api):
+    response = catalog_api.post("/api/user/settings", json={
+        "openai_api_key": "one-key",
+        "openai_base_url": "https://one.example.com/v1\nhttps://two.example.com/v1",
+        "openai_base_url_auth": "key",
+    })
+    assert response.status_code == 422
+
+    response = catalog_api.post("/api/user/settings", json={
+        "openai_api_key": "",
+        "openai_base_url": "https://one.example.com/v1\nhttps://two.example.com/v1",
+        "openai_base_url_auth": "key\nnone",
+    })
+    assert response.status_code == 422
+
+
+def test_keyless_openai_connection_passes_standard_user_generation_gate(catalog_api, configured_user):
+    save_connection(
+        catalog_api,
+        key="",
+        url="https://public.example.com/v1",
+        openai_base_url_auth="none",
+    )
+    keys = main.load_user_keys(configured_user["uid"])
+    assert main._openai_has_unauthenticated_endpoint(keys) is True
+    assert main.has_any_generation_provider(configured_user) is True
+
+
+def test_openai_auth_modes_are_returned_as_nonsecret_settings(catalog_api):
+    save_connection(
+        catalog_api,
+        key="",
+        url="https://public.example.com/v1",
+        openai_base_url_auth="none",
+    )
+    settings = catalog_api.get("/api/user/settings").json()["masked_keys"]
+    assert settings["openai_base_url_auth"] == "none"
