@@ -111,23 +111,28 @@ test('settings saves multiple custom Messages endpoints in order with the option
         { value: ' https://first.example.com/v1/messages ' },
         { value: ' https://second.example.com/v1/chat/completions ' },
     ];
-    const urlRows = urlInputs.map((input, index) => ({
-        querySelector: selector => {
-            if (selector === '.base-url-input') return input;
-            if (selector === '.base-url-no-auth') return { checked: index === 1 };
-            return null;
-        }
+    const urlRows = urlInputs.map(input => ({
+        querySelector: selector => selector === '.base-url-input' ? input : null
     }));
     const urlList = { querySelectorAll: selector => {
-        if (selector === '.base-url-input') return urlInputs;
         if (selector === '.base-url-row') return urlRows;
-        throw new Error('Unexpected base URL selector: ' + selector);
+        if (selector === '.base-url-input') return urlInputs;
+        throw new Error('Unexpected API-key URL selector: ' + selector);
+    } };
+    const keylessInputs = [{ value: ' https://mercury.example.com/v1 ' }];
+    const keylessRows = keylessInputs.map(input => ({
+        querySelector: selector => selector === '.keyless-base-url-input' ? input : null
+    }));
+    const keylessList = { querySelectorAll: selector => {
+        if (selector === '.keyless-base-url-row') return keylessRows;
+        if (selector === '.keyless-base-url-input') return keylessInputs;
+        throw new Error('Unexpected keyless URL selector: ' + selector);
     } };
     element('input-openai-api-format').value = 'auto';
     element('input-openai-max-output-tokens').value = '200000';
     const requests = [];
     const context = vm.createContext({
-        document: { getElementById: id => id === 'openai-base-url-list' ? urlList : element(id) }, settingsRequestVersion: 0,
+        document: { getElementById: id => id === 'openai-base-url-list' ? urlList : id === 'openai-keyless-base-url-list' ? keylessList : element(id) }, settingsRequestVersion: 0,
         getKeyListValues: () => '', invalidateProviderModels() {}, clearKeyListInputs() {},
         fetchUserSettings: async () => {}, loadProvidersAndModels: async () => {}, setTimeout() {},
         authFetch: async (url, request) => { requests.push(JSON.parse(request.body)); return { ok: true, json: async () => ({}) }; }
@@ -141,12 +146,32 @@ test('settings saves multiple custom Messages endpoints in order with the option
     vm.runInContext(`${helperCode}\n${html.slice(saveStart, saveEnd)}`, context);
     await context.saveUserSettings();
     assert.equal(requests[0].openai_base_url, 'https://first.example.com/v1/messages\nhttps://second.example.com/v1/chat/completions');
-    assert.equal(requests[0].openai_base_url_auth, 'key\nnone');
+    assert.equal(requests[0].openai_base_url_auth, 'key\nkey');
+    assert.equal(requests[0].openai_keyless_base_url, 'https://mercury.example.com/v1');
     assert.equal(requests[0].openai_api_format, 'auto');
     assert.equal(requests[0].openai_max_output_tokens, '200000');
     assert.match(html, /id="openai-base-url-list"/);
-    assert.match(html, /class="add-base-url-btn[^\"]*"[^>]*aria-label="Add another OpenAI or Anthropic base URL"/);
+    assert.match(html, /class="add-base-url-btn[^\"]*"[^>]*aria-label="Add another API-key OpenAI or Anthropic base URL"/);
+    assert.match(html, /aria-label="Add another keyless Custom API base URL"/);
 });
+test('Mercury keyless models get their own provider and pipeline tags', async () => {
+    const app = setup();
+    const done = app.load();
+    app.requests[0].resolve({ ok: true, json: async () => ({ providers: {
+        openai: { name: 'OpenAI / Custom API (API key)', configured: true,
+            models: ['custom-model'], base_url: 'https://custom.example.com/v1' },
+        keyless: { name: 'Mercury (Keyless API)', configured: true,
+            models: ['mercury-3'], base_url: 'https://mercury.example.com/v1' }
+    } }) });
+    await done;
+    assert.deepEqual(values(app.elements['provider-select']).sort(), ['keyless', 'openai']);
+    assert.equal(app.elements['provider-select'].options.find(option => option.value === 'keyless').textContent,
+        'Mercury (Keyless API)');
+    for (const id of pipelineIds) {
+        assert.deepEqual(values(app.elements[id]).sort(), ['keyless::mercury-3', 'openai::custom-model']);
+    }
+});
+
 test('one catalog request updates all selectors and preserves a still-valid choice', async () => {
     const app = setup();
     app.elements['provider-select'].appendChild(Object.assign(new Element('option'), { value: 'openai', selected: true }));
